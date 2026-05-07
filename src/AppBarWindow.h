@@ -70,6 +70,7 @@ private:
 
     std::wstring FormatDuration(int totalSeconds) const;
     std::wstring FormatDateTime(long long unixSeconds) const;
+    std::wstring FormatClockTime(long long unixSeconds) const;
     std::wstring FormatPercent(double value) const;
 
     HINSTANCE instance_ = nullptr;
@@ -84,6 +85,8 @@ private:
     POINT dragStartPoint_ = {};
     RECT dragStartRect_ = {};
     UINT textFormatDpi_ = 0;
+    long long lastSuccessfulRefreshUnixSeconds_ = 0;
+    int refreshCountdownSeconds_ = 60;
 
     UsageSnapshot snapshot_;
     CodexUsageFetcher fetcher_;

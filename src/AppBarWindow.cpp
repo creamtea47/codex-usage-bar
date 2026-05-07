@@ -42,7 +42,7 @@ int CalculateMinimumWidgetHeight(HWND hwnd, int width) {
     const int heroHeight = ScaleForDpi(hwnd, 76);
     const int metricsHeight = ScaleForDpi(hwnd, 52);
     const int meterInfoHeight = ScaleForDpi(hwnd, 30);
-    const int footerRows = width >= ScaleForDpi(hwnd, 1180) ? 1 : 2;
+    const int footerRows = width >= ScaleForDpi(hwnd, 1040) ? 2 : 3;
     const int footerHeight = ScaleForDpi(hwnd, 8) + footerRows * ScaleForDpi(hwnd, 18) + ScaleForDpi(hwnd, 14);
 
     return heroHeight
@@ -236,8 +236,10 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
                     snapshot_.fiveHour.resetAfterSeconds = std::max(0, snapshot_.fiveHour.resetAfterSeconds - 1);
                     snapshot_.weekly.resetAfterSeconds = std::max(0, snapshot_.weekly.resetAfterSeconds - 1);
                 }
+                refreshCountdownSeconds_ = std::max(0, refreshCountdownSeconds_ - 1);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (wParam == kRefreshTimerId) {
+                refreshCountdownSeconds_ = 60;
                 RequestRefresh(false);
             }
             return 0;
@@ -747,6 +749,10 @@ void AppBarWindow::RequestRefresh(bool force) {
         return;
     }
 
+    refreshCountdownSeconds_ = 60;
+    KillTimer(hwnd_, kRefreshTimerId);
+    SetTimer(hwnd_, kRefreshTimerId, 60000, nullptr);
+
     const HWND target = hwnd_;
     std::thread([this, target]() {
         auto* result = new UsageSnapshot(fetcher_.Fetch());
@@ -759,6 +765,9 @@ void AppBarWindow::OnUsageUpdated(UsageSnapshot* snapshot) {
     refreshInFlight_ = false;
     if (snapshot != nullptr) {
         snapshot_ = *snapshot;
+        if (snapshot_.success) {
+            lastSuccessfulRefreshUnixSeconds_ = static_cast<long long>(std::time(nullptr));
+        }
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1019,11 +1028,28 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         L"5 小时限额: " + FormatPercent(snapshot_.fiveHour.usedPercent) + L" 已用，" + FormatPercent(snapshot_.fiveHour.remainingPercent) + L" 剩余",
     };
 
+    const std::wstring refreshTimeText = lastSuccessfulRefreshUnixSeconds_ > 0
+        ? L"刷新: " + FormatClockTime(lastSuccessfulRefreshUnixSeconds_)
+        : L"刷新: --";
+    std::wstring refreshCountdownText;
+    if (refreshInFlight_) {
+        refreshCountdownText = L"倒计时: 刷新中...";
+    } else {
+        refreshCountdownText = L"倒计时: " + std::to_wstring(refreshCountdownSeconds_) + L"s";
+    }
+
+    const int refreshInfoWidth = std::max(
+        static_cast<int>(std::ceil(measureTextWidth(textFormatFoot_.Get(), refreshTimeText))),
+        static_cast<int>(std::ceil(measureTextWidth(textFormatFoot_.Get(), refreshCountdownText)))) + ScaleForDpi(hwnd_, 8);
+    const int refreshInfoLeft = std::max(static_cast<int>(clientRect.left) + padX,
+        static_cast<int>(clientRect.right) - padX - refreshInfoWidth);
+    const int footerContentRight = std::max(static_cast<int>(clientRect.left) + padX, refreshInfoLeft - footerGap);
+
     int footX = clientRect.left + padX;
     int footY = footerLine.bottom + ScaleForDpi(hwnd_, 10);
     for (const std::wstring& item : footerItems) {
         const float itemWidth = measureTextWidth(textFormatFoot_.Get(), item);
-        if (footX + itemWidth > clientRect.right - padX) {
+        if (footX + itemWidth > footerContentRight) {
             footX = clientRect.left + padX;
             footY += ScaleForDpi(hwnd_, 18);
         }
@@ -1032,6 +1058,15 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         footX += static_cast<int>(std::ceil(itemWidth)) + footerGap;
     }
+
+    const int refreshInfoTop = footerLine.bottom + ScaleForDpi(hwnd_, 10);
+    RECT refreshTimeRect = MakeRect(refreshInfoLeft, refreshInfoTop, clientRect.right - padX, refreshInfoTop + ScaleForDpi(hwnd_, 16));
+    RECT refreshCountdownRect = MakeRect(refreshInfoLeft, refreshTimeRect.bottom + ScaleForDpi(hwnd_, 2),
+        clientRect.right - padX, refreshTimeRect.bottom + ScaleForDpi(hwnd_, 18));
+    drawTextBlock(textFormatFoot_.Get(), refreshTimeText, refreshTimeRect, textSecondary,
+        DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+    drawTextBlock(textFormatFoot_.Get(), refreshCountdownText, refreshCountdownRect, textSecondary,
+        DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
     if (!lockPosition_) {
         RECT gripRect = MakeRect(clientRect.right - ScaleForDpi(hwnd_, 30), clientRect.bottom - ScaleForDpi(hwnd_, 18),
@@ -1097,6 +1132,20 @@ std::wstring AppBarWindow::FormatDateTime(long long unixSeconds) const {
 
     wchar_t buffer[64] = {};
     wcsftime(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%m/%d %H:%M", &localTime);
+    return buffer;
+}
+
+std::wstring AppBarWindow::FormatClockTime(long long unixSeconds) const {
+    if (unixSeconds <= 0) {
+        return L"--";
+    }
+
+    std::time_t t = static_cast<std::time_t>(unixSeconds);
+    std::tm localTime = {};
+    localtime_s(&localTime, &t);
+
+    wchar_t buffer[64] = {};
+    wcsftime(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%H:%M:%S", &localTime);
     return buffer;
 }
 
