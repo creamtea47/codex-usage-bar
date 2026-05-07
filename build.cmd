@@ -1,0 +1,15 @@
+@echo off
+setlocal
+
+call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+if errorlevel 1 exit /b 1
+
+cl /std:c++20 /utf-8 /EHsc /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN ^
+  src\main.cpp ^
+  src\AppBarWindow.cpp ^
+  src\CodexUsageFetcher.cpp ^
+  src\JsonLite.cpp ^
+  /Fe:CodexUsageBar.exe ^
+  /link advapi32.lib ole32.lib shell32.lib shlwapi.lib winhttp.lib user32.lib gdi32.lib
+
+exit /b %errorlevel%

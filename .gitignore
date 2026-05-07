@@ -1,0 +1,8 @@
+build/
+build-vs/
+artifacts/
+*.obj
+*.exe
+*.pdb
+*.ilk
+widget-*.png
