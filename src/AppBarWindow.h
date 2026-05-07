@@ -3,6 +3,9 @@
 #include "CodexUsageFetcher.h"
 
 #include <Windows.h>
+#include <d2d1.h>
+#include <dwrite.h>
+#include <wrl/client.h>
 #include <atomic>
 #include <filesystem>
 #include <string>
@@ -54,8 +57,15 @@ private:
     void RequestRefresh(bool force);
     void OnUsageUpdated(UsageSnapshot* snapshot);
 
+    HRESULT CreateDeviceIndependentResources();
+    HRESULT CreateDeviceResources();
+    void DiscardDeviceResources();
+    void DiscardTextFormats();
+    HRESULT EnsureTextFormats();
+    HRESULT CreateTextFormat(float sizePixels, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** format);
+
     void Paint(HDC hdc);
-    void PaintContent(HDC hdc, const RECT& clientRect);
+    void PaintContent(const RECT& clientRect);
     void ShowContextMenu(POINT screenPoint);
 
     std::wstring FormatDuration(int totalSeconds) const;
@@ -71,7 +81,19 @@ private:
     DragMode dragMode_ = DragMode::None;
     POINT dragStartPoint_ = {};
     RECT dragStartRect_ = {};
+    UINT textFormatDpi_ = 0;
 
     UsageSnapshot snapshot_;
     CodexUsageFetcher fetcher_;
+
+    Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
+    Microsoft::WRL::ComPtr<IDWriteFactory> dwriteFactory_;
+    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> renderTarget_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> solidBrush_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormatKicker_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormatTitle_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormatDelta_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormatMetricLabel_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormatMetricValue_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> textFormatFoot_;
 };

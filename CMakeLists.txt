@@ -26,8 +26,12 @@ target_compile_options(CodexUsageBar PRIVATE /utf-8)
 
 target_link_libraries(CodexUsageBar PRIVATE
     advapi32
+    d2d1
+    dwrite
+    gdi32
     ole32
     shell32
     shlwapi
+    user32
     winhttp
 )

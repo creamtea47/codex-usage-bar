@@ -92,6 +92,22 @@ RECT MakeRect(int left, int top, int right, int bottom) {
     return rect;
 }
 
+D2D1_RECT_F ToRectF(const RECT& rect) {
+    return D2D1::RectF(
+        static_cast<float>(rect.left),
+        static_cast<float>(rect.top),
+        static_cast<float>(rect.right),
+        static_cast<float>(rect.bottom));
+}
+
+D2D1_COLOR_F ToColorF(COLORREF color, float alpha = 1.0f) {
+    return D2D1::ColorF(
+        static_cast<float>(GetRValue(color)) / 255.0f,
+        static_cast<float>(GetGValue(color)) / 255.0f,
+        static_cast<float>(GetBValue(color)) / 255.0f,
+        alpha);
+}
+
 void FillSolidRect(HDC hdc, const RECT& rect, COLORREF color) {
     HBRUSH brush = CreateSolidBrush(color);
     FillRect(hdc, &rect, brush);
@@ -146,7 +162,10 @@ PaceInfo BuildPaceInfo(const UsageSnapshot& snapshot) {
 
 AppBarWindow::AppBarWindow(HINSTANCE instance) : instance_(instance) {}
 
-AppBarWindow::~AppBarWindow() = default;
+AppBarWindow::~AppBarWindow() {
+    DiscardTextFormats();
+    DiscardDeviceResources();
+}
 
 bool AppBarWindow::Create() {
     RegisterWindowClass();
@@ -166,6 +185,10 @@ bool AppBarWindow::Create() {
         this);
 
     if (hwnd_ == nullptr) {
+        return false;
+    }
+
+    if (FAILED(CreateDeviceIndependentResources())) {
         return false;
     }
 
@@ -241,6 +264,7 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             return 0;
 
         case WM_DPICHANGED:
+            DiscardTextFormats();
             UpdateWindowBounds(true);
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
@@ -320,6 +344,8 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             KillTimer(hwnd_, kCountdownTimerId);
             KillTimer(hwnd_, kRefreshTimerId);
             SaveSettings();
+            DiscardTextFormats();
+            DiscardDeviceResources();
             PostQuitMessage(0);
             return 0;
     }
@@ -530,6 +556,111 @@ bool AppBarWindow::SetLaunchAtStartupEnabled(bool enabled) const {
     return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
 }
 
+HRESULT AppBarWindow::CreateDeviceIndependentResources() {
+    if (!d2dFactory_) {
+        const HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2dFactory_.GetAddressOf());
+        if (FAILED(hr)) {
+            return hr;
+        }
+    }
+
+    if (!dwriteFactory_) {
+        const HRESULT hr = DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(dwriteFactory_.GetAddressOf()));
+        if (FAILED(hr)) {
+            return hr;
+        }
+    }
+
+    return S_OK;
+}
+
+HRESULT AppBarWindow::CreateTextFormat(float sizePixels, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** format) {
+    return dwriteFactory_->CreateTextFormat(
+        L"Segoe UI",
+        nullptr,
+        weight,
+        DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        sizePixels,
+        L"zh-CN",
+        format);
+}
+
+void AppBarWindow::DiscardTextFormats() {
+    textFormatKicker_.Reset();
+    textFormatTitle_.Reset();
+    textFormatDelta_.Reset();
+    textFormatMetricLabel_.Reset();
+    textFormatMetricValue_.Reset();
+    textFormatFoot_.Reset();
+    textFormatDpi_ = 0;
+}
+
+HRESULT AppBarWindow::EnsureTextFormats() {
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    if (textFormatDpi_ == dpi &&
+        textFormatKicker_ &&
+        textFormatTitle_ &&
+        textFormatDelta_ &&
+        textFormatMetricLabel_ &&
+        textFormatMetricValue_ &&
+        textFormatFoot_) {
+        return S_OK;
+    }
+
+    DiscardTextFormats();
+
+    HRESULT hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 12)), DWRITE_FONT_WEIGHT_NORMAL, textFormatKicker_.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 18)), DWRITE_FONT_WEIGHT_SEMI_BOLD, textFormatTitle_.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 28)), DWRITE_FONT_WEIGHT_BOLD, textFormatDelta_.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 12)), DWRITE_FONT_WEIGHT_NORMAL, textFormatMetricLabel_.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 17)), DWRITE_FONT_WEIGHT_BOLD, textFormatMetricValue_.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 12)), DWRITE_FONT_WEIGHT_NORMAL, textFormatFoot_.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    textFormatDpi_ = dpi;
+    return S_OK;
+}
+
+HRESULT AppBarWindow::CreateDeviceResources() {
+    if (FAILED(CreateDeviceIndependentResources())) {
+        return E_FAIL;
+    }
+
+    if (!renderTarget_) {
+        const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            96.0f,
+            96.0f,
+            D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE);
+        HRESULT hr = d2dFactory_->CreateDCRenderTarget(&properties, renderTarget_.GetAddressOf());
+        if (FAILED(hr)) {
+            return hr;
+        }
+
+        hr = renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0, 0.0f), solidBrush_.GetAddressOf());
+        if (FAILED(hr)) {
+            return hr;
+        }
+    }
+
+    return EnsureTextFormats();
+}
+
+void AppBarWindow::DiscardDeviceResources() {
+    solidBrush_.Reset();
+    renderTarget_.Reset();
+}
+
 AppBarWindow::DragMode AppBarWindow::HitTestDragMode(POINT clientPoint) const {
     RECT clientRect = {};
     GetClientRect(hwnd_, &clientRect);
@@ -627,38 +758,30 @@ void AppBarWindow::Paint(HDC hdc) {
         return;
     }
 
-    HDC memoryDc = CreateCompatibleDC(hdc);
-    HBITMAP bitmap = CreateCompatibleBitmap(hdc, RectWidth(clientRect), RectHeight(clientRect));
-    HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+    if (FAILED(CreateDeviceResources())) {
+        return;
+    }
 
-    const COLORREF background = lightTheme_ ? RGB(251, 252, 248) : RGB(24, 28, 25);
-    const COLORREF border = lightTheme_ ? RGB(216, 224, 216) : RGB(56, 64, 59);
-    const COLORREF shadow = lightTheme_ ? RGB(226, 231, 225) : RGB(10, 14, 12);
+    if (FAILED(renderTarget_->BindDC(hdc, &clientRect))) {
+        DiscardDeviceResources();
+        return;
+    }
 
-    RECT shadowRect = clientRect;
-    OffsetRect(&shadowRect, 2, 3);
-    FillSolidRect(memoryDc, shadowRect, shadow);
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    renderTarget_->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
+    renderTarget_->SetTransform(D2D1::Matrix3x2F::Scale(96.0f / dpi, 96.0f / dpi));
+    renderTarget_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    renderTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
-    FillSolidRect(memoryDc, clientRect, background);
-
-    HPEN borderPen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldPen = SelectObject(memoryDc, borderPen);
-    HGDIOBJ oldBrush = SelectObject(memoryDc, GetStockObject(HOLLOW_BRUSH));
-    RoundRect(memoryDc, clientRect.left, clientRect.top, clientRect.right, clientRect.bottom, 18, 18);
-    SelectObject(memoryDc, oldBrush);
-    SelectObject(memoryDc, oldPen);
-    DeleteObject(borderPen);
-
-    PaintContent(memoryDc, clientRect);
-    BitBlt(hdc, 0, 0, RectWidth(clientRect), RectHeight(clientRect), memoryDc, 0, 0, SRCCOPY);
-
-    SelectObject(memoryDc, oldBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(memoryDc);
+    renderTarget_->BeginDraw();
+    PaintContent(clientRect);
+    const HRESULT hr = renderTarget_->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) {
+        DiscardDeviceResources();
+    }
 }
 
-void AppBarWindow::PaintContent(HDC hdc, const RECT& clientRect) {
-    SetBkMode(hdc, TRANSPARENT);
+void AppBarWindow::PaintContent(const RECT& clientRect) {
     const PaceInfo pace = BuildPaceInfo(snapshot_);
     const int padX = ScaleForDpi(hwnd_, kHorizontalPadding);
     const int padY = ScaleForDpi(hwnd_, kVerticalPadding);
@@ -666,13 +789,14 @@ void AppBarWindow::PaintContent(HDC hdc, const RECT& clientRect) {
     const int footerTop = ScaleForDpi(hwnd_, 10);
     const int footerGap = ScaleForDpi(hwnd_, 12);
     const int sectionGap = ScaleForDpi(hwnd_, 10);
-    const int width = RectWidth(clientRect);
     const int heroHeight = ScaleForDpi(hwnd_, 76);
     const int metricRowHeight = ScaleForDpi(hwnd_, 52);
 
+    const COLORREF background = lightTheme_ ? RGB(251, 252, 248) : RGB(24, 28, 25);
     const COLORREF textPrimary = lightTheme_ ? RGB(21, 27, 24) : RGB(240, 244, 241);
     const COLORREF textSecondary = lightTheme_ ? RGB(94, 106, 97) : RGB(167, 178, 171);
     const COLORREF border = lightTheme_ ? RGB(219, 224, 220) : RGB(57, 66, 60);
+    const COLORREF shadow = lightTheme_ ? RGB(226, 231, 225) : RGB(10, 14, 12);
     const COLORREF heroBg = pace.valid
         ? (pace.isOver ? (lightTheme_ ? RGB(255, 240, 234) : RGB(60, 34, 28))
                        : (lightTheme_ ? RGB(233, 248, 239) : RGB(27, 48, 36)))
@@ -686,76 +810,130 @@ void AppBarWindow::PaintContent(HDC hdc, const RECT& clientRect) {
         ? (pace.isOver ? (lightTheme_ ? RGB(214, 149, 57) : RGB(227, 165, 79))
                        : (lightTheme_ ? RGB(41, 185, 128) : RGB(84, 208, 154)))
         : (lightTheme_ ? RGB(164, 174, 167) : RGB(108, 118, 112));
-
-    auto makeFont = [](int size, int weight) -> HFONT {
-        return CreateFontW(-size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+    auto fillRect = [&](const RECT& rect, COLORREF color) {
+        solidBrush_->SetColor(ToColorF(color));
+        renderTarget_->FillRectangle(ToRectF(rect), solidBrush_.Get());
     };
 
-    HFONT fontKicker = makeFont(ScaleForDpi(hwnd_, 12), FW_NORMAL);
-    HFONT fontTitle = makeFont(ScaleForDpi(hwnd_, 18), FW_SEMIBOLD);
-    HFONT fontDelta = makeFont(ScaleForDpi(hwnd_, 28), FW_BOLD);
-    HFONT fontMetricLabel = makeFont(ScaleForDpi(hwnd_, 12), FW_NORMAL);
-    HFONT fontMetricValue = makeFont(ScaleForDpi(hwnd_, 17), FW_BOLD);
-    HFONT fontFoot = makeFont(ScaleForDpi(hwnd_, 12), FW_NORMAL);
-    HGDIOBJ oldFont = SelectObject(hdc, fontKicker);
+    auto drawRoundedFilledRect = [&](const RECT& rect, int radius, COLORREF color) {
+        solidBrush_->SetColor(ToColorF(color));
+        renderTarget_->FillRoundedRectangle(
+            D2D1::RoundedRect(ToRectF(rect), static_cast<float>(radius), static_cast<float>(radius)),
+            solidBrush_.Get());
+    };
 
-    auto cleanupFonts = [&]() {
-        SelectObject(hdc, oldFont);
-        DeleteObject(fontKicker);
-        DeleteObject(fontTitle);
-        DeleteObject(fontDelta);
-        DeleteObject(fontMetricLabel);
-        DeleteObject(fontMetricValue);
-        DeleteObject(fontFoot);
+    auto drawRoundedBorder = [&](const RECT& rect, int radius, COLORREF color) {
+        solidBrush_->SetColor(ToColorF(color));
+        renderTarget_->DrawRoundedRectangle(
+            D2D1::RoundedRect(ToRectF(rect), static_cast<float>(radius), static_cast<float>(radius)),
+            solidBrush_.Get(),
+            1.0f);
+    };
+
+    auto drawTextBlock = [&](IDWriteTextFormat* format,
+                             const std::wstring& text,
+                             const RECT& rect,
+                             COLORREF color,
+                             DWRITE_TEXT_ALIGNMENT textAlignment,
+                             DWRITE_PARAGRAPH_ALIGNMENT paragraphAlignment,
+                             DWRITE_WORD_WRAPPING wrapping,
+                             bool trimEllipsis) {
+        format->SetTextAlignment(textAlignment);
+        format->SetParagraphAlignment(paragraphAlignment);
+        format->SetWordWrapping(wrapping);
+
+        Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+        const float layoutWidth = std::max(1.0f, static_cast<float>(RectWidth(rect)));
+        const float layoutHeight = std::max(1.0f, static_cast<float>(RectHeight(rect)));
+        if (FAILED(dwriteFactory_->CreateTextLayout(
+                text.c_str(),
+                static_cast<UINT32>(text.size()),
+                format,
+                layoutWidth,
+                layoutHeight,
+                layout.GetAddressOf()))) {
+            return;
+        }
+
+        if (trimEllipsis) {
+            Microsoft::WRL::ComPtr<IDWriteInlineObject> ellipsisSign;
+            const DWRITE_TRIMMING trimming = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+            if (SUCCEEDED(dwriteFactory_->CreateEllipsisTrimmingSign(format, ellipsisSign.GetAddressOf()))) {
+                layout->SetTrimming(&trimming, ellipsisSign.Get());
+            }
+        }
+
+        solidBrush_->SetColor(ToColorF(color));
+        renderTarget_->DrawTextLayout(
+            D2D1::Point2F(static_cast<float>(rect.left), static_cast<float>(rect.top)),
+            layout.Get(),
+            solidBrush_.Get(),
+            D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    };
+
+    auto measureTextWidth = [&](IDWriteTextFormat* format, const std::wstring& text) -> float {
+        Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dwriteFactory_->CreateTextLayout(
+                text.c_str(),
+                static_cast<UINT32>(text.size()),
+                format,
+                4096.0f,
+                256.0f,
+                layout.GetAddressOf()))) {
+            return 0.0f;
+        }
+
+        DWRITE_TEXT_METRICS metrics = {};
+        if (FAILED(layout->GetMetrics(&metrics))) {
+            return 0.0f;
+        }
+        return metrics.widthIncludingTrailingWhitespace;
     };
 
     RECT heroRect = MakeRect(clientRect.left, clientRect.top, clientRect.right, clientRect.top + heroHeight);
-    FillSolidRect(hdc, heroRect, heroBg);
-    FillSolidRect(hdc, MakeRect(heroRect.left, heroRect.bottom, heroRect.right, heroRect.bottom + 1), border);
+    drawRoundedFilledRect(MakeRect(clientRect.left + 2, clientRect.top + 3, clientRect.right + 2, clientRect.bottom + 3),
+        ScaleForDpi(hwnd_, 18), shadow);
+    drawRoundedFilledRect(clientRect, ScaleForDpi(hwnd_, 18), background);
+    drawRoundedBorder(clientRect, ScaleForDpi(hwnd_, 18), border);
+    fillRect(heroRect, heroBg);
+    fillRect(MakeRect(heroRect.left, heroRect.bottom, heroRect.right, heroRect.bottom + 1), border);
 
     if (!snapshot_.success || !pace.valid) {
         RECT kickerRect = MakeRect(heroRect.left + padX, heroRect.top + padY + ScaleForDpi(hwnd_, 2),
             heroRect.right - padX, heroRect.top + padY + ScaleForDpi(hwnd_, 20));
-        SetTextColor(hdc, textSecondary);
-        DrawTextW(hdc, L"Codex Usage Budget", -1, &kickerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        drawTextBlock(textFormatKicker_.Get(), L"Codex Usage Budget", kickerRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
-        SelectObject(hdc, fontTitle);
         RECT titleRect = MakeRect(heroRect.left + padX, kickerRect.bottom + ScaleForDpi(hwnd_, 6),
             heroRect.right - padX, heroRect.bottom - padY);
-        SetTextColor(hdc, textPrimary);
-        DrawTextW(hdc, L"正在加载用量信息", -1, &titleRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        drawTextBlock(textFormatTitle_.Get(), L"正在加载用量信息", titleRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP, false);
 
         if (!snapshot_.errorMessage.empty()) {
             RECT errorRect = MakeRect(clientRect.left + padX, heroRect.bottom + sectionGap, clientRect.right - padX, clientRect.bottom - padY);
-            SelectObject(hdc, fontFoot);
-            SetTextColor(hdc, RGB(215, 73, 73));
-            DrawTextW(hdc, snapshot_.errorMessage.c_str(), -1, &errorRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+            drawTextBlock(textFormatFoot_.Get(), snapshot_.errorMessage, errorRect, RGB(215, 73, 73),
+                DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP, false);
         }
-
-        cleanupFonts();
         return;
     }
 
     RECT kickerRect = MakeRect(heroRect.left + padX, heroRect.top + padY + ScaleForDpi(hwnd_, 2),
         heroRect.right - padX, heroRect.top + padY + ScaleForDpi(hwnd_, 20));
-    SetTextColor(hdc, textSecondary);
-    DrawTextW(hdc, L"每周限额进度", -1, &kickerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    drawTextBlock(textFormatKicker_.Get(), L"每周限额进度", kickerRect, textSecondary,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
     const wchar_t* titleText = pace.isOver ? L"当前已超过平均进度" : L"当前低于平均进度";
     const std::wstring deltaText = (pace.deltaPercent >= 0.0 ? L"+" : L"-") + FormatPercent(std::fabs(pace.deltaPercent));
 
     RECT titleRect = MakeRect(heroRect.left + padX, kickerRect.bottom + ScaleForDpi(hwnd_, 4),
         heroRect.right - ScaleForDpi(hwnd_, 214), heroRect.bottom - padY + ScaleForDpi(hwnd_, 2));
-    SelectObject(hdc, fontTitle);
-    SetTextColor(hdc, textPrimary);
-    DrawTextW(hdc, titleText, -1, &titleRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    drawTextBlock(textFormatTitle_.Get(), titleText, titleRect, textPrimary,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
 
     RECT deltaRect = MakeRect(heroRect.right - ScaleForDpi(hwnd_, 204), heroRect.top + padY,
         heroRect.right - padX, heroRect.bottom - padY);
-    SelectObject(hdc, fontDelta);
-    SetTextColor(hdc, heroValue);
-    DrawTextW(hdc, deltaText.c_str(), -1, &deltaRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    drawTextBlock(textFormatDelta_.Get(), deltaText, deltaRect, heroValue,
+        DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
     const int metricsTop = heroRect.bottom + 1;
     RECT metricsRect = MakeRect(clientRect.left, metricsTop, clientRect.right, metricsTop + metricRowHeight);
@@ -774,20 +952,18 @@ void AppBarWindow::PaintContent(HDC hdc, const RECT& clientRect) {
             i == 3 ? metricsRect.right : metricsRect.left + (i + 1) * metricWidth,
             metricsRect.bottom);
         if (i != 0) {
-            FillSolidRect(hdc, MakeRect(metricRect.left, metricRect.top, metricRect.left + 1, metricRect.bottom), border);
+            fillRect(MakeRect(metricRect.left, metricRect.top, metricRect.left + 1, metricRect.bottom), border);
         }
 
         RECT labelRect = MakeRect(metricRect.left + padX, metricRect.top + ScaleForDpi(hwnd_, 8),
             metricRect.right - padX, metricRect.top + ScaleForDpi(hwnd_, 22));
-        SelectObject(hdc, fontMetricLabel);
-        SetTextColor(hdc, textSecondary);
-        DrawTextW(hdc, metricLabels[i], -1, &labelRect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+        drawTextBlock(textFormatMetricLabel_.Get(), metricLabels[i], labelRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, true);
 
         RECT valueRect = MakeRect(metricRect.left + padX, metricRect.top + ScaleForDpi(hwnd_, 22),
             metricRect.right - padX, metricRect.bottom - ScaleForDpi(hwnd_, 6));
-        SelectObject(hdc, fontMetricValue);
-        SetTextColor(hdc, textPrimary);
-        DrawTextW(hdc, metricValues[i].c_str(), -1, &valueRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        drawTextBlock(textFormatMetricValue_.Get(), metricValues[i], valueRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
     }
 
     const int meterLeft = clientRect.left + padX;
@@ -795,36 +971,32 @@ void AppBarWindow::PaintContent(HDC hdc, const RECT& clientRect) {
     const int meterHeadTop = metricsRect.bottom + sectionGap;
     const std::wstring meterHint = L"绿色条是实际已用，黑线是按周期第 " + std::to_wstring(pace.cycleDay) + L" 天应到预算";
     const std::wstring meterStat = FormatPercent(pace.actualUsedPercent) + L" / " + FormatPercent(pace.expectedUsedPercent);
-    SelectObject(hdc, fontMetricLabel);
-    SetTextColor(hdc, textSecondary);
 
     RECT meterHeadLeft = MakeRect(meterLeft, meterHeadTop, meterRight - ScaleForDpi(hwnd_, 186), meterHeadTop + ScaleForDpi(hwnd_, 24));
     RECT meterHeadRight = MakeRect(meterRight - ScaleForDpi(hwnd_, 176), meterHeadTop, meterRight, meterHeadTop + ScaleForDpi(hwnd_, 18));
-    DrawTextW(hdc, meterHint.c_str(), -1, &meterHeadLeft, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-    SetTextColor(hdc, textPrimary);
-    DrawTextW(hdc, meterStat.c_str(), -1, &meterHeadRight, DT_RIGHT | DT_TOP | DT_SINGLELINE);
+    drawTextBlock(textFormatMetricLabel_.Get(), meterHint, meterHeadLeft, textSecondary,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, true);
+    drawTextBlock(textFormatMetricLabel_.Get(), meterStat, meterHeadRight, textPrimary,
+        DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
     const int meterInfoBottom = meterHeadLeft.bottom;
 
     RECT meterRect = MakeRect(meterLeft, meterInfoBottom + ScaleForDpi(hwnd_, 6),
         meterRight, meterInfoBottom + ScaleForDpi(hwnd_, 6) + meterHeight);
-    FillSolidRect(hdc, meterRect, trackColor);
+    fillRect(meterRect, trackColor);
 
     RECT actualRect = meterRect;
     actualRect.right = actualRect.left + static_cast<int>(RectWidth(meterRect) * ClampDouble(pace.actualUsedPercent, 0.0, 100.0) / 100.0);
     if (actualRect.right > actualRect.left) {
-        FillSolidRect(hdc, actualRect, actualBarColor);
+        fillRect(actualRect, actualBarColor);
     }
 
     const int markerX = meterRect.left + static_cast<int>(RectWidth(meterRect) * ClampDouble(pace.expectedUsedPercent, 0.0, 100.0) / 100.0);
-    FillSolidRect(hdc,
+    fillRect(
         MakeRect(markerX - 1, meterRect.top - ScaleForDpi(hwnd_, 3), markerX + 1, meterRect.bottom + ScaleForDpi(hwnd_, 6)),
         lightTheme_ ? RGB(21, 27, 24) : RGB(240, 244, 241));
 
     RECT footerLine = MakeRect(clientRect.left, meterRect.bottom + footerTop, clientRect.right, meterRect.bottom + footerTop + 1);
-    FillSolidRect(hdc, footerLine, border);
-
-    SelectObject(hdc, fontFoot);
-    SetTextColor(hdc, textSecondary);
+    fillRect(footerLine, border);
     const std::wstring footerItems[6] = {
         L"本周开始: " + FormatDateTime(pace.weekStartUnixSeconds),
         L"重置时间: " + FormatDateTime(snapshot_.weekly.resetAtUnixSeconds),
@@ -837,23 +1009,21 @@ void AppBarWindow::PaintContent(HDC hdc, const RECT& clientRect) {
     int footX = clientRect.left + padX;
     int footY = footerLine.bottom + ScaleForDpi(hwnd_, 10);
     for (const std::wstring& item : footerItems) {
-        SIZE size = {};
-        GetTextExtentPoint32W(hdc, item.c_str(), static_cast<int>(item.size()), &size);
-        if (footX + size.cx > clientRect.right - padX) {
+        const float itemWidth = measureTextWidth(textFormatFoot_.Get(), item);
+        if (footX + itemWidth > clientRect.right - padX) {
             footX = clientRect.left + padX;
             footY += ScaleForDpi(hwnd_, 18);
         }
-        RECT itemRect = MakeRect(footX, footY, footX + size.cx + ScaleForDpi(hwnd_, 4), footY + ScaleForDpi(hwnd_, 16));
-        DrawTextW(hdc, item.c_str(), -1, &itemRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
-        footX += size.cx + footerGap;
+        RECT itemRect = MakeRect(footX, footY, footX + static_cast<int>(std::ceil(itemWidth)) + ScaleForDpi(hwnd_, 4), footY + ScaleForDpi(hwnd_, 16));
+        drawTextBlock(textFormatFoot_.Get(), item, itemRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        footX += static_cast<int>(std::ceil(itemWidth)) + footerGap;
     }
 
     RECT gripRect = MakeRect(clientRect.right - ScaleForDpi(hwnd_, 30), clientRect.bottom - ScaleForDpi(hwnd_, 18),
         clientRect.right - ScaleForDpi(hwnd_, 8), clientRect.bottom - ScaleForDpi(hwnd_, 6));
-    SetTextColor(hdc, lightTheme_ ? RGB(147, 156, 149) : RGB(117, 126, 120));
-    DrawTextW(hdc, L"///", -1, &gripRect, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE);
-
-    cleanupFonts();
+    drawTextBlock(textFormatFoot_.Get(), L"///", gripRect, lightTheme_ ? RGB(147, 156, 149) : RGB(117, 126, 120),
+        DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 }
 
 void AppBarWindow::ShowContextMenu(POINT screenPoint) {
