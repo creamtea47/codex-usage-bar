@@ -1,8 +1,10 @@
 # CodexUsageBar
 
-原生 `Win32/C++` 的 Codex 用量桌面挂件，面向 Windows。
+A native `Win32/C++` desktop widget for Windows that shows your Codex usage budget at a glance.
 
-## 项目看板
+[中文说明](README-zh.md)
+
+## Project Status
 
 [![Build](https://github.com/luodaoyi/codex-useage-win/actions/workflows/build.yml/badge.svg)](https://github.com/luodaoyi/codex-useage-win/actions/workflows/build.yml)
 [![Latest Release](https://img.shields.io/github/v/release/luodaoyi/codex-useage-win?display_name=tag)](https://github.com/luodaoyi/codex-useage-win/releases/latest)
@@ -10,26 +12,134 @@
 [![Total Downloads](https://img.shields.io/github/downloads/luodaoyi/codex-useage-win/total)](https://github.com/luodaoyi/codex-useage-win/releases)
 [![Stars](https://img.shields.io/github/stars/luodaoyi/codex-useage-win?style=flat)](https://github.com/luodaoyi/codex-useage-win/stargazers)
 
-它会读取当前 Codex 账号的限额信息，在桌面上显示一个可拖动、可缩放的固定布局面板，用来观察：
+The widget reads usage limits from the current Codex account and displays them in a draggable, resizable desktop panel. It helps you monitor:
 
-- `5 小时限额` 已用/剩余
-- `每周限额` 已用/剩余
-- `当前周期理论应使用多少`
-- `实际已经使用多少`
-- `当前高于/低于平均进度`
-- `距离重置还剩多久`
-- `上次成功刷新时间`
-- `距离下一次自动刷新还剩多久`
+- `5-hour quota` used and remaining
+- `Weekly quota` used and remaining
+- `Expected usage` for the current point in the cycle
+- `Actual usage`
+- `Ahead of pace` or `behind pace`
+- `Time until reset`
+- `Last successful refresh`
+- `Time until the next automatic refresh`
 
-## 示例
+## Screenshots
 
-### 标准模式
+### Standard Mode
 
-![CodexUsageBar 标准模式](1.png)
+![CodexUsageBar standard mode](IMG/3.png)
 
-### 简单模式
+### Simple Mode
 
-![CodexUsageBar 简单模式](2.png)
+![CodexUsageBar simple mode](IMG/4.png)
+
+## Features
+
+- Native `Win32 + Direct2D + DirectWrite + WinHTTP`
+- No `C#`, no `WebView`
+- Reads `%USERPROFILE%\.codex\auth.json` or `%CODEX_HOME%\auth.json`
+- Requests `GET https://chatgpt.com/backend-api/wham/usage`
+- Two display modes:
+  - Standard mode: hero status, four metrics, weekly pace bar, budget marker, footer details, refresh time, and countdown
+  - Simple mode: compact `Today` and `This Week` cards with status text
+- Desktop overlay widget with drag and resize support
+- Dynamic coloring based on current pace
+- Launch at startup toggle
+- Always-on-top toggle
+- Lock-position toggle
+- UI language switch between English and Chinese
+
+## Refresh Behavior
+
+- Remote usage API refresh: every `60` seconds
+- Local countdown repaint: every `1` second
+- Left click on the widget: force refresh immediately
+- Bottom-right area shows:
+  - last successful refresh time
+  - countdown to the next automatic refresh
+- Right-click menu `Refresh now`: force refresh immediately
+
+## Usage
+
+- Drag the widget body to move it
+- Drag the right edge, bottom edge, or bottom-right corner to resize it
+- Right-click menu:
+  - `Refresh now`
+  - `Launch at startup`
+  - `Always on top`
+  - `Lock position`
+  - `Simple mode`
+  - `Language`
+  - `Reset widget position`
+  - `Exit`
+
+Position and size are stored in:
+
+- `%APPDATA%\CodexUsageBar\settings.ini`
+
+Startup registration uses the current user registry key:
+
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+
+## Build Locally
+
+### Direct Build
+
+```cmd
+build.cmd
+```
+
+Output:
+
+- `CodexUsageBar.exe`
+
+### Build with CMake
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+## GitHub Actions
+
+The repository includes automated build and release workflows.
+
+### Build Workflow
+
+- Platforms:
+  - `x64`
+  - `ARM64`
+- Triggers:
+  - push to `main` / `master`
+  - `pull_request`
+  - `workflow_dispatch`
+
+### Release Workflow
+
+- Trigger:
+  - push a version tag such as `v0.1.0`
+- Behavior:
+  - build `x64` and `ARM64`
+  - create a GitHub Release automatically
+  - upload:
+    - `CodexUsageBar-x64.exe`
+    - `CodexUsageBar-ARM64.exe`
+
+## Release Flow
+
+```bash
+git tag v0.1.0
+git push origin master
+git push origin v0.1.0
+```
+
+If the default branch is `main`, replace `master` with `main`.
+
+## Known Limitations
+
+- It currently relies on the existing `access_token` in `auth.json`; automatic refresh via `refresh_token` is not implemented
+- If the OpenAI backend response changes, the parser must be updated accordingly
+- This is a desktop overlay widget, not the legacy Windows Gadget platform
 
 ## Star History
 
@@ -40,110 +150,3 @@
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=luodaoyi/codex-useage-win&type=timeline&logscale&legend=top-left" />
  </picture>
 </a>
-
-## 功能
-
-- 原生 `Win32 + Direct2D + DirectWrite + WinHTTP`
-- 无 `C#`、无 `WebView`
-- 读取 `%USERPROFILE%\.codex\auth.json` 或 `%CODEX_HOME%\auth.json`
-- 请求 `GET https://chatgpt.com/backend-api/wham/usage`
-- 双显示模式：
-  - 标准模式：顶部状态标题、四项指标、周进度条、预算标记线、底部明细、刷新时间与倒计时
-  - 简单模式：只显示 `当日`、`本周` 和状态标签，适合更紧凑的小卡片
-- 桌面浮层挂件，可拖动、可缩放
-- 根据当前进度状态切换颜色
-- 支持开机自启开关
-- 支持 `Always on top` 置顶开关
-- 支持 `Lock position` 固定位置开关
-- 支持 `Simple mode` 简单模式开关
-
-## 刷新策略
-
-- 远程用量接口：每 `60` 秒刷新一次
-- 本地倒计时：每 `1` 秒重绘一次
-- 左键点击挂件：立即强制刷新
-- 右下角显示：
-  - 上次成功刷新时间
-  - 距离下一次自动刷新的倒计时
-- 右键 `立即刷新`：立即强制刷新
-
-## 使用方式
-
-- 拖动挂件主体：移动位置
-- 拖右边、下边、右下角：调整大小
-- 右键菜单：
-  - `立即刷新`
-  - `开机自启`
-  - `始终置顶`
-  - `固定位置`
-  - `简单模式`
-  - `重置组件位置`
-  - `退出`
-
-位置和尺寸会保存到：
-
-- `%APPDATA%\CodexUsageBar\settings.ini`
-
-开机自启使用当前用户注册表：
-
-- `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-
-## 本地构建
-
-### 直接构建
-
-```cmd
-build.cmd
-```
-
-输出文件：
-
-- `CodexUsageBar.exe`
-
-### 使用 CMake
-
-```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-```
-
-## GitHub Actions
-
-仓库包含自动构建和自动发布工作流。
-
-### 自动构建
-
-- 平台：
-  - `x64`
-  - `ARM64`
-- 触发方式：
-  - 推送到 `main` / `master`
-  - `pull_request`
-  - `workflow_dispatch`
-
-### 自动发布 Release
-
-- 触发方式：
-  - 推送版本标签，例如 `v0.1.0`
-- 行为：
-  - 自动构建 `x64` 和 `ARM64`
-  - 自动创建 GitHub Release
-  - 自动上传：
-    - `CodexUsageBar-x64.exe`
-    - `CodexUsageBar-ARM64.exe`
-
-## 发布流程
-
-```bash
-git tag v0.1.0
-git push origin master
-git push origin v0.1.0
-```
-
-如果默认分支改成了 `main`，把上面的 `master` 换成 `main` 即可。
-
-## 已知限制
-
-- 当前只使用 `auth.json` 中现有的 `access_token`，还没做 `refresh_token` 自动续期
-- 如果 OpenAI 后端接口字段变化，需要同步调整解析逻辑
-- 当前是桌面浮层挂件，不是 Windows 7 时代的官方 Gadget 平台

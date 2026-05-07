@@ -16,6 +16,15 @@ namespace {
 
 constexpr wchar_t kWindowClassName[] = L"CodexUsageBarWindow";
 constexpr int kLayoutVersion = 5;
+constexpr UINT kCommandRefresh = 1;
+constexpr UINT kCommandExit = 2;
+constexpr UINT kCommandResetPosition = 3;
+constexpr UINT kCommandLaunchAtStartup = 4;
+constexpr UINT kCommandAlwaysOnTop = 5;
+constexpr UINT kCommandLockPosition = 6;
+constexpr UINT kCommandSimpleMode = 7;
+constexpr UINT kCommandLanguageEnglish = 8;
+constexpr UINT kCommandLanguageChinese = 9;
 constexpr int kDefaultWidgetWidth = 820;
 constexpr int kMinimumWidgetWidth = 640;
 constexpr int kSimpleDefaultWidgetWidth = 240;
@@ -179,7 +188,7 @@ bool AppBarWindow::Create() {
     hwnd_ = CreateWindowExW(
         WS_EX_TOOLWINDOW,
         kWindowClassName,
-        L"Codex Usage Widget",
+        LocalizeText(L"Codex Usage Widget", L"Codex 用量挂件"),
         WS_POPUP | WS_VISIBLE,
         0,
         0,
@@ -393,6 +402,23 @@ int AppBarWindow::GetMinimumWidgetHeight(int width) const {
     return CalculateDetailedMinimumWidgetHeight(hwnd_, width);
 }
 
+void AppBarWindow::SetLanguage(Language language) {
+    if (language_ == language) {
+        return;
+    }
+
+    language_ = language;
+    if (hwnd_ != nullptr) {
+        SetWindowTextW(hwnd_, LocalizeText(L"Codex Usage Widget", L"Codex 用量挂件"));
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+    SaveSettings();
+}
+
+const wchar_t* AppBarWindow::LocalizeText(const wchar_t* english, const wchar_t* chinese) const {
+    return language_ == Language::Chinese ? chinese : english;
+}
+
 RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
     const int margin = ScaleForDpi(hwnd_, kDesktopMargin);
     const int width = ScaleForDpi(hwnd_, simpleMode_ ? kSimpleDefaultWidgetWidth : kDefaultWidgetWidth);
@@ -465,6 +491,9 @@ void AppBarWindow::LoadSettings() {
     alwaysOnTop_ = GetPrivateProfileIntW(L"layout", L"always_on_top", 0, path.c_str()) != 0;
     lockPosition_ = GetPrivateProfileIntW(L"layout", L"lock_position", 0, path.c_str()) != 0;
     simpleMode_ = GetPrivateProfileIntW(L"layout", L"simple_mode", 0, path.c_str()) != 0;
+    language_ = GetPrivateProfileIntW(L"layout", L"language", 0, path.c_str()) == 1
+        ? Language::Chinese
+        : Language::English;
     if (version < kLayoutVersion) {
         hasSavedRect_ = false;
         return;
@@ -497,6 +526,7 @@ void AppBarWindow::SaveSettings() const {
     WritePrivateProfileStringW(L"layout", L"always_on_top", alwaysOnTop_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"lock_position", lockPosition_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"simple_mode", simpleMode_ ? L"1" : L"0", path.c_str());
+    WritePrivateProfileStringW(L"layout", L"language", language_ == Language::Chinese ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"x", std::to_wstring(savedRect_.left).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"y", std::to_wstring(savedRect_.top).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"width", std::to_wstring(RectWidth(savedRect_)).c_str(), path.c_str());
@@ -931,7 +961,11 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         const bool warning = snapshot_.success &&
             !exhausted &&
             (snapshot_.fiveHour.remainingPercent <= 15 || snapshot_.weekly.remainingPercent <= 15 || pace.isOver);
-        const wchar_t* statusText = !snapshot_.success ? L"加载中" : (exhausted ? L"用尽" : (warning ? L"紧张" : L"正常"));
+        const wchar_t* statusText = !snapshot_.success
+            ? LocalizeText(L"Loading", L"加载中")
+            : (exhausted
+                ? LocalizeText(L"Exhausted", L"用尽")
+                : (warning ? LocalizeText(L"Tight", L"紧张") : LocalizeText(L"Normal", L"正常")));
         const COLORREF statusColor = !snapshot_.success
             ? textSecondary
             : (exhausted ? (lightTheme_ ? RGB(196, 54, 32) : RGB(255, 144, 120))
@@ -948,7 +982,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             clientRect.right - innerPad - ScaleForDpi(hwnd_, 66), clientRect.top + topBandHeight);
         RECT statusRect = MakeRect(clientRect.right - innerPad - ScaleForDpi(hwnd_, 54), clientRect.top + ScaleForDpi(hwnd_, 8),
             clientRect.right - innerPad, clientRect.top + ScaleForDpi(hwnd_, 28));
-        drawTextBlock(textFormatMetricValue_.Get(), L"额度用量", titleRect, textPrimary,
+        drawTextBlock(textFormatMetricValue_.Get(), LocalizeText(L"Usage", L"额度用量"), titleRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
         drawTextBlock(textFormatMetricLabel_.Get(), statusText, statusRect, statusColor,
             DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
@@ -967,11 +1001,11 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         RECT dayValueRect = MakeRect(dayRect.left + innerPad, dayRect.top + ScaleForDpi(hwnd_, 24), dayRect.right - innerPad, dayRect.bottom - ScaleForDpi(hwnd_, 8));
         RECT weekLabelRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 8), weekRect.right - innerPad, weekRect.top + ScaleForDpi(hwnd_, 24));
         RECT weekValueRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 24), weekRect.right - innerPad, weekRect.bottom - ScaleForDpi(hwnd_, 8));
-        drawTextBlock(textFormatMetricLabel_.Get(), L"当日", dayLabelRect, textSecondary,
+        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"Today", L"当日"), dayLabelRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         drawTextBlock(textFormatDelta_.Get(), dayValue, dayValueRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
-        drawTextBlock(textFormatMetricLabel_.Get(), L"本周", weekLabelRect, textSecondary,
+        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"This Week", L"本周"), weekLabelRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         drawTextBlock(textFormatDelta_.Get(), weekValue, weekValueRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
@@ -980,7 +1014,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             ? FormatClockTime(lastSuccessfulRefreshUnixSeconds_)
             : L"--";
         const std::wstring refreshCountdownText = refreshInFlight_
-            ? L"刷新中"
+            ? std::wstring(LocalizeText(L"Refreshing", L"刷新中"))
             : (std::to_wstring(refreshCountdownSeconds_) + L"s");
         RECT footerLeftRect = MakeRect(clientRect.left + innerPad, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 1),
             clientRect.right / 2, clientRect.bottom - ScaleForDpi(hwnd_, 1));
@@ -1003,12 +1037,12 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     if (!snapshot_.success || !pace.valid) {
         RECT kickerRect = MakeRect(heroRect.left + padX, heroRect.top + padY + ScaleForDpi(hwnd_, 2),
             heroRect.right - padX, heroRect.top + padY + ScaleForDpi(hwnd_, 20));
-        drawTextBlock(textFormatKicker_.Get(), L"Codex Usage Budget", kickerRect, textSecondary,
+        drawTextBlock(textFormatKicker_.Get(), LocalizeText(L"Codex Usage Budget", L"Codex 用量预算"), kickerRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
         RECT titleRect = MakeRect(heroRect.left + padX, kickerRect.bottom + ScaleForDpi(hwnd_, 6),
             heroRect.right - padX, heroRect.bottom - padY);
-        drawTextBlock(textFormatTitle_.Get(), L"正在加载用量信息", titleRect, textPrimary,
+        drawTextBlock(textFormatTitle_.Get(), LocalizeText(L"Loading usage data", L"正在加载用量信息"), titleRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP, false);
 
         if (!snapshot_.errorMessage.empty()) {
@@ -1021,10 +1055,12 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 
     RECT kickerRect = MakeRect(heroRect.left + padX, heroRect.top + padY + ScaleForDpi(hwnd_, 2),
         heroRect.right - padX, heroRect.top + padY + ScaleForDpi(hwnd_, 20));
-    drawTextBlock(textFormatKicker_.Get(), L"每周限额进度", kickerRect, textSecondary,
+    drawTextBlock(textFormatKicker_.Get(), LocalizeText(L"Weekly quota pacing", L"每周限额进度"), kickerRect, textSecondary,
         DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
-    const wchar_t* titleText = pace.isOver ? L"当前已超过平均进度" : L"当前低于平均进度";
+    const wchar_t* titleText = pace.isOver
+        ? LocalizeText(L"Currently above the average pace", L"当前已超过平均进度")
+        : LocalizeText(L"Currently below the average pace", L"当前低于平均进度");
     const std::wstring deltaText = (pace.deltaPercent >= 0.0 ? L"+" : L"-") + FormatPercent(std::fabs(pace.deltaPercent));
 
     RECT titleRect = MakeRect(heroRect.left + padX, kickerRect.bottom + ScaleForDpi(hwnd_, 4),
@@ -1039,7 +1075,12 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 
     const int metricsTop = heroRect.bottom + 1;
     RECT metricsRect = MakeRect(clientRect.left, metricsTop, clientRect.right, metricsTop + metricRowHeight);
-    const wchar_t* metricLabels[4] = { L"今日平均预算", L"今日可累计使用", L"实际已使用", L"每周剩余" };
+    const wchar_t* metricLabels[4] = {
+        LocalizeText(L"Daily average budget", L"今日平均预算"),
+        LocalizeText(L"Expected used today", L"今日可累计使用"),
+        LocalizeText(L"Actual used", L"实际已使用"),
+        LocalizeText(L"Weekly remaining", L"每周剩余")
+    };
     const std::wstring metricValues[4] = {
         FormatPercent(pace.dailyBudgetPercent),
         FormatPercent(pace.expectedUsedPercent),
@@ -1071,7 +1112,9 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     const int meterLeft = clientRect.left + padX;
     const int meterRight = clientRect.right - padX;
     const int meterHeadTop = metricsRect.bottom + sectionGap;
-    const std::wstring meterHint = L"绿色条是实际已用，黑线是按周期第 " + std::to_wstring(pace.cycleDay) + L" 天应到预算";
+    const std::wstring meterHint = language_ == Language::Chinese
+        ? (L"绿色条是实际已用，黑线是按周期第 " + std::to_wstring(pace.cycleDay) + L" 天应到预算")
+        : (L"Green is actual usage, black line is the expected budget by day " + std::to_wstring(pace.cycleDay));
     const std::wstring meterStat = FormatPercent(pace.actualUsedPercent) + L" / " + FormatPercent(pace.expectedUsedPercent);
 
     RECT meterHeadLeft = MakeRect(meterLeft, meterHeadTop, meterRight - ScaleForDpi(hwnd_, 186), meterHeadTop + ScaleForDpi(hwnd_, 24));
@@ -1100,22 +1143,26 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     RECT footerLine = MakeRect(clientRect.left, meterRect.bottom + footerTop, clientRect.right, meterRect.bottom + footerTop + 1);
     fillRect(footerLine, border);
     const std::wstring footerItems[6] = {
-        L"本周开始: " + FormatDateTime(pace.weekStartUnixSeconds),
-        L"重置时间: " + FormatDateTime(snapshot_.weekly.resetAtUnixSeconds),
-        L"当前: 第 " + std::to_wstring(pace.cycleDay) + L" 天",
-        L"已用时间: " + FormatDuration(pace.elapsedSeconds),
-        L"剩余时间: " + FormatDuration(pace.remainingSeconds),
-        L"5 小时限额: " + FormatPercent(snapshot_.fiveHour.usedPercent) + L" 已用，" + FormatPercent(snapshot_.fiveHour.remainingPercent) + L" 剩余",
+        std::wstring(LocalizeText(L"Week start: ", L"本周开始: ")) + FormatDateTime(pace.weekStartUnixSeconds),
+        std::wstring(LocalizeText(L"Reset at: ", L"重置时间: ")) + FormatDateTime(snapshot_.weekly.resetAtUnixSeconds),
+        language_ == Language::Chinese
+            ? (L"当前: 第 " + std::to_wstring(pace.cycleDay) + L" 天")
+            : (L"Current: Day " + std::to_wstring(pace.cycleDay)),
+        std::wstring(LocalizeText(L"Elapsed: ", L"已用时间: ")) + FormatDuration(pace.elapsedSeconds),
+        std::wstring(LocalizeText(L"Remaining: ", L"剩余时间: ")) + FormatDuration(pace.remainingSeconds),
+        language_ == Language::Chinese
+            ? (L"5 小时限额: " + FormatPercent(snapshot_.fiveHour.usedPercent) + L" 已用，" + FormatPercent(snapshot_.fiveHour.remainingPercent) + L" 剩余")
+            : (L"5-hour quota: " + FormatPercent(snapshot_.fiveHour.usedPercent) + L" used, " + FormatPercent(snapshot_.fiveHour.remainingPercent) + L" remaining"),
     };
 
     const std::wstring refreshTimeText = lastSuccessfulRefreshUnixSeconds_ > 0
-        ? L"刷新: " + FormatClockTime(lastSuccessfulRefreshUnixSeconds_)
-        : L"刷新: --";
+        ? (std::wstring(LocalizeText(L"Refresh: ", L"刷新: ")) + FormatClockTime(lastSuccessfulRefreshUnixSeconds_))
+        : (std::wstring(LocalizeText(L"Refresh: ", L"刷新: ")) + L"--");
     std::wstring refreshCountdownText;
     if (refreshInFlight_) {
-        refreshCountdownText = L"倒计时: 刷新中...";
+        refreshCountdownText = std::wstring(LocalizeText(L"Countdown: Refreshing...", L"倒计时: 刷新中..."));
     } else {
-        refreshCountdownText = L"倒计时: " + std::to_wstring(refreshCountdownSeconds_) + L"s";
+        refreshCountdownText = std::wstring(LocalizeText(L"Countdown: ", L"倒计时: ")) + std::to_wstring(refreshCountdownSeconds_) + L"s";
     }
 
     const int refreshInfoWidth = std::max(
@@ -1158,40 +1205,55 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 
 void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     HMENU menu = CreatePopupMenu();
+    HMENU languageMenu = CreatePopupMenu();
     const bool launchAtStartup = IsLaunchAtStartupEnabled();
-    AppendMenuW(menu, MF_STRING, 1, L"立即刷新");
-    AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED), 4, L"开机自启");
-    AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), 5, L"始终置顶");
-    AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), 6, L"固定位置");
-    AppendMenuW(menu, MF_STRING | (simpleMode_ ? MF_CHECKED : MF_UNCHECKED), 7, L"简单模式");
-    AppendMenuW(menu, MF_STRING, 3, L"重置组件位置");
+    AppendMenuW(languageMenu, MF_STRING | (language_ == Language::English ? MF_CHECKED : MF_UNCHECKED),
+        kCommandLanguageEnglish, L"English");
+    AppendMenuW(languageMenu, MF_STRING | (language_ == Language::Chinese ? MF_CHECKED : MF_UNCHECKED),
+        kCommandLanguageChinese, L"中文");
+
+    AppendMenuW(menu, MF_STRING, kCommandRefresh, LocalizeText(L"Refresh now", L"立即刷新"));
+    AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED),
+        kCommandLaunchAtStartup, LocalizeText(L"Launch at startup", L"开机自启"));
+    AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED),
+        kCommandAlwaysOnTop, LocalizeText(L"Always on top", L"始终置顶"));
+    AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED),
+        kCommandLockPosition, LocalizeText(L"Lock position", L"固定位置"));
+    AppendMenuW(menu, MF_STRING | (simpleMode_ ? MF_CHECKED : MF_UNCHECKED),
+        kCommandSimpleMode, LocalizeText(L"Simple mode", L"简单模式"));
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(languageMenu), LocalizeText(L"Language", L"语言"));
+    AppendMenuW(menu, MF_STRING, kCommandResetPosition, LocalizeText(L"Reset widget position", L"重置组件位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 2, L"退出");
+    AppendMenuW(menu, MF_STRING, kCommandExit, LocalizeText(L"Exit", L"退出"));
 
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
     DestroyMenu(menu);
 
-    if (command == 1) {
+    if (command == kCommandRefresh) {
         RequestRefresh(true);
-    } else if (command == 4) {
+    } else if (command == kCommandLaunchAtStartup) {
         SetLaunchAtStartupEnabled(!launchAtStartup);
-    } else if (command == 5) {
+    } else if (command == kCommandAlwaysOnTop) {
         alwaysOnTop_ = !alwaysOnTop_;
         UpdateWindowBounds(true);
         SaveSettings();
-    } else if (command == 6) {
+    } else if (command == kCommandLockPosition) {
         lockPosition_ = !lockPosition_;
         SaveSettings();
-    } else if (command == 7) {
+    } else if (command == kCommandSimpleMode) {
         simpleMode_ = !simpleMode_;
         UpdateWindowBounds(true);
         SaveSettings();
         InvalidateRect(hwnd_, nullptr, TRUE);
-    } else if (command == 3) {
+    } else if (command == kCommandLanguageEnglish) {
+        SetLanguage(Language::English);
+    } else if (command == kCommandLanguageChinese) {
+        SetLanguage(Language::Chinese);
+    } else if (command == kCommandResetPosition) {
         hasSavedRect_ = false;
         UpdateWindowBounds(false);
         SaveSettings();
-    } else if (command == 2) {
+    } else if (command == kCommandExit) {
         DestroyWindow(hwnd_);
     }
 }
@@ -1201,10 +1263,16 @@ std::wstring AppBarWindow::FormatDuration(int totalSeconds) const {
     const int hours = (totalSeconds % 86400) / 3600;
 
     if (days > 0) {
-        return std::to_wstring(days) + L" 天 " + std::to_wstring(hours) + L" 小时";
+        if (language_ == Language::Chinese) {
+            return std::to_wstring(days) + L" 天 " + std::to_wstring(hours) + L" 小时";
+        }
+        return std::to_wstring(days) + L"d " + std::to_wstring(hours) + L"h";
     }
     const int minutes = (totalSeconds % 3600) / 60;
-    return std::to_wstring(hours) + L" 小时 " + std::to_wstring(minutes) + L" 分钟";
+    if (language_ == Language::Chinese) {
+        return std::to_wstring(hours) + L" 小时 " + std::to_wstring(minutes) + L" 分钟";
+    }
+    return std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
 }
 
 std::wstring AppBarWindow::FormatDateTime(long long unixSeconds) const {

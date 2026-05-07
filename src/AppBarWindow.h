@@ -23,6 +23,11 @@ private:
     static constexpr UINT_PTR kCountdownTimerId = 1;
     static constexpr UINT_PTR kRefreshTimerId = 2;
 
+    enum class Language {
+        English = 0,
+        Chinese = 1,
+    };
+
     enum class DragMode {
         None,
         Move,
@@ -69,6 +74,8 @@ private:
     void ShowContextMenu(POINT screenPoint);
     int GetMinimumWidgetWidth() const;
     int GetMinimumWidgetHeight(int width) const;
+    void SetLanguage(Language language);
+    const wchar_t* LocalizeText(const wchar_t* english, const wchar_t* chinese) const;
 
     std::wstring FormatDuration(int totalSeconds) const;
     std::wstring FormatDateTime(long long unixSeconds) const;
@@ -82,6 +89,7 @@ private:
     bool alwaysOnTop_ = false;
     bool lockPosition_ = false;
     bool simpleMode_ = false;
+    Language language_ = Language::English;
     bool hasSavedRect_ = false;
     RECT savedRect_ = {};
     DragMode dragMode_ = DragMode::None;
