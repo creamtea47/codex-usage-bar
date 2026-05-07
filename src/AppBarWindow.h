@@ -75,9 +75,12 @@ private:
     int GetMinimumWidgetWidth() const;
     int GetMinimumWidgetHeight(int width) const;
     void SetLanguage(Language language);
+    void SetRefreshIntervalSeconds(int seconds);
+    void RestartRefreshTimer();
     const wchar_t* LocalizeText(const wchar_t* english, const wchar_t* chinese) const;
 
     std::wstring FormatDuration(int totalSeconds) const;
+    std::wstring FormatRefreshCountdown(int totalSeconds) const;
     std::wstring FormatDateTime(long long unixSeconds) const;
     std::wstring FormatClockTime(long long unixSeconds) const;
     std::wstring FormatPercent(double value) const;
@@ -97,6 +100,7 @@ private:
     RECT dragStartRect_ = {};
     UINT textFormatDpi_ = 0;
     long long lastSuccessfulRefreshUnixSeconds_ = 0;
+    int refreshIntervalSeconds_ = 60;
     int refreshCountdownSeconds_ = 60;
 
     UsageSnapshot snapshot_;

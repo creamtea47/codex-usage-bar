@@ -25,6 +25,11 @@ constexpr UINT kCommandLockPosition = 6;
 constexpr UINT kCommandSimpleMode = 7;
 constexpr UINT kCommandLanguageEnglish = 8;
 constexpr UINT kCommandLanguageChinese = 9;
+constexpr UINT kCommandRefreshInterval1Minute = 10;
+constexpr UINT kCommandRefreshInterval3Minutes = 11;
+constexpr UINT kCommandRefreshInterval5Minutes = 12;
+constexpr UINT kCommandRefreshInterval10Minutes = 13;
+constexpr UINT kCommandRefreshInterval30Minutes = 14;
 constexpr int kDefaultWidgetWidth = 820;
 constexpr int kMinimumWidgetWidth = 640;
 constexpr int kSimpleDefaultWidgetWidth = 240;
@@ -35,6 +40,19 @@ constexpr int kVerticalPadding = 10;
 constexpr int kResizeGrip = 12;
 constexpr long long kDaySeconds = 24LL * 60 * 60;
 constexpr long long kWeekSeconds = 7LL * kDaySeconds;
+
+int SanitizeRefreshIntervalSeconds(int seconds) {
+    switch (seconds) {
+        case 60:
+        case 180:
+        case 300:
+        case 600:
+        case 1800:
+            return seconds;
+        default:
+            return 60;
+    }
+}
 
 int ScaleForDpi(HWND hwnd, int value) {
     const UINT dpi = GetDpiForWindow(hwnd != nullptr ? hwnd : GetDesktopWindow());
@@ -213,8 +231,9 @@ bool AppBarWindow::Create() {
     UpdateWindow(hwnd_);
     InvalidateRect(hwnd_, nullptr, TRUE);
 
+    refreshCountdownSeconds_ = refreshIntervalSeconds_;
     SetTimer(hwnd_, kCountdownTimerId, 1000, nullptr);
-    SetTimer(hwnd_, kRefreshTimerId, 60000, nullptr);
+    RestartRefreshTimer();
     RequestRefresh(true);
     return true;
 }
@@ -254,7 +273,7 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
                 refreshCountdownSeconds_ = std::max(0, refreshCountdownSeconds_ - 1);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (wParam == kRefreshTimerId) {
-                refreshCountdownSeconds_ = 60;
+                refreshCountdownSeconds_ = refreshIntervalSeconds_;
                 RequestRefresh(false);
             }
             return 0;
@@ -415,6 +434,30 @@ void AppBarWindow::SetLanguage(Language language) {
     SaveSettings();
 }
 
+void AppBarWindow::SetRefreshIntervalSeconds(int seconds) {
+    const int sanitized = SanitizeRefreshIntervalSeconds(seconds);
+    if (refreshIntervalSeconds_ == sanitized) {
+        return;
+    }
+
+    refreshIntervalSeconds_ = sanitized;
+    refreshCountdownSeconds_ = refreshIntervalSeconds_;
+    if (hwnd_ != nullptr) {
+        RestartRefreshTimer();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+    SaveSettings();
+}
+
+void AppBarWindow::RestartRefreshTimer() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    KillTimer(hwnd_, kRefreshTimerId);
+    SetTimer(hwnd_, kRefreshTimerId, static_cast<UINT>(refreshIntervalSeconds_ * 1000), nullptr);
+}
+
 const wchar_t* AppBarWindow::LocalizeText(const wchar_t* english, const wchar_t* chinese) const {
     return language_ == Language::Chinese ? chinese : english;
 }
@@ -491,6 +534,9 @@ void AppBarWindow::LoadSettings() {
     alwaysOnTop_ = GetPrivateProfileIntW(L"layout", L"always_on_top", 0, path.c_str()) != 0;
     lockPosition_ = GetPrivateProfileIntW(L"layout", L"lock_position", 0, path.c_str()) != 0;
     simpleMode_ = GetPrivateProfileIntW(L"layout", L"simple_mode", 0, path.c_str()) != 0;
+    refreshIntervalSeconds_ = SanitizeRefreshIntervalSeconds(
+        GetPrivateProfileIntW(L"layout", L"refresh_interval_seconds", 60, path.c_str()));
+    refreshCountdownSeconds_ = refreshIntervalSeconds_;
     language_ = GetPrivateProfileIntW(L"layout", L"language", 0, path.c_str()) == 1
         ? Language::Chinese
         : Language::English;
@@ -526,6 +572,7 @@ void AppBarWindow::SaveSettings() const {
     WritePrivateProfileStringW(L"layout", L"always_on_top", alwaysOnTop_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"lock_position", lockPosition_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"simple_mode", simpleMode_ ? L"1" : L"0", path.c_str());
+    WritePrivateProfileStringW(L"layout", L"refresh_interval_seconds", std::to_wstring(refreshIntervalSeconds_).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"language", language_ == Language::Chinese ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"x", std::to_wstring(savedRect_.left).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"y", std::to_wstring(savedRect_.top).c_str(), path.c_str());
@@ -798,9 +845,8 @@ void AppBarWindow::RequestRefresh(bool force) {
         return;
     }
 
-    refreshCountdownSeconds_ = 60;
-    KillTimer(hwnd_, kRefreshTimerId);
-    SetTimer(hwnd_, kRefreshTimerId, 60000, nullptr);
+    refreshCountdownSeconds_ = refreshIntervalSeconds_;
+    RestartRefreshTimer();
 
     const HWND target = hwnd_;
     std::thread([this, target]() {
@@ -1015,7 +1061,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             : L"--";
         const std::wstring refreshCountdownText = refreshInFlight_
             ? std::wstring(LocalizeText(L"Refreshing", L"刷新中"))
-            : (std::to_wstring(refreshCountdownSeconds_) + L"s");
+            : FormatRefreshCountdown(refreshCountdownSeconds_);
         RECT footerLeftRect = MakeRect(clientRect.left + innerPad, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 1),
             clientRect.right / 2, clientRect.bottom - ScaleForDpi(hwnd_, 1));
         RECT footerRightRect = MakeRect(clientRect.right / 2, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 1),
@@ -1162,7 +1208,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     if (refreshInFlight_) {
         refreshCountdownText = std::wstring(LocalizeText(L"Countdown: Refreshing...", L"倒计时: 刷新中..."));
     } else {
-        refreshCountdownText = std::wstring(LocalizeText(L"Countdown: ", L"倒计时: ")) + std::to_wstring(refreshCountdownSeconds_) + L"s";
+        refreshCountdownText = std::wstring(LocalizeText(L"Countdown: ", L"倒计时: ")) + FormatRefreshCountdown(refreshCountdownSeconds_);
     }
 
     const int refreshInfoWidth = std::max(
@@ -1206,13 +1252,25 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     HMENU menu = CreatePopupMenu();
     HMENU languageMenu = CreatePopupMenu();
+    HMENU refreshIntervalMenu = CreatePopupMenu();
     const bool launchAtStartup = IsLaunchAtStartupEnabled();
     AppendMenuW(languageMenu, MF_STRING | (language_ == Language::English ? MF_CHECKED : MF_UNCHECKED),
         kCommandLanguageEnglish, L"English");
     AppendMenuW(languageMenu, MF_STRING | (language_ == Language::Chinese ? MF_CHECKED : MF_UNCHECKED),
         kCommandLanguageChinese, L"中文");
+    AppendMenuW(refreshIntervalMenu, MF_STRING | (refreshIntervalSeconds_ == 60 ? MF_CHECKED : MF_UNCHECKED),
+        kCommandRefreshInterval1Minute, LocalizeText(L"1 minute", L"1分钟"));
+    AppendMenuW(refreshIntervalMenu, MF_STRING | (refreshIntervalSeconds_ == 180 ? MF_CHECKED : MF_UNCHECKED),
+        kCommandRefreshInterval3Minutes, LocalizeText(L"3 minutes", L"3分钟"));
+    AppendMenuW(refreshIntervalMenu, MF_STRING | (refreshIntervalSeconds_ == 300 ? MF_CHECKED : MF_UNCHECKED),
+        kCommandRefreshInterval5Minutes, LocalizeText(L"5 minutes", L"5分钟"));
+    AppendMenuW(refreshIntervalMenu, MF_STRING | (refreshIntervalSeconds_ == 600 ? MF_CHECKED : MF_UNCHECKED),
+        kCommandRefreshInterval10Minutes, LocalizeText(L"10 minutes", L"10分钟"));
+    AppendMenuW(refreshIntervalMenu, MF_STRING | (refreshIntervalSeconds_ == 1800 ? MF_CHECKED : MF_UNCHECKED),
+        kCommandRefreshInterval30Minutes, LocalizeText(L"30 minutes", L"30分钟"));
 
     AppendMenuW(menu, MF_STRING, kCommandRefresh, LocalizeText(L"Refresh now", L"立即刷新"));
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(refreshIntervalMenu), LocalizeText(L"Refresh interval", L"刷新间隔"));
     AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED),
         kCommandLaunchAtStartup, LocalizeText(L"Launch at startup", L"开机自启"));
     AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED),
@@ -1231,6 +1289,16 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
 
     if (command == kCommandRefresh) {
         RequestRefresh(true);
+    } else if (command == kCommandRefreshInterval1Minute) {
+        SetRefreshIntervalSeconds(60);
+    } else if (command == kCommandRefreshInterval3Minutes) {
+        SetRefreshIntervalSeconds(180);
+    } else if (command == kCommandRefreshInterval5Minutes) {
+        SetRefreshIntervalSeconds(300);
+    } else if (command == kCommandRefreshInterval10Minutes) {
+        SetRefreshIntervalSeconds(600);
+    } else if (command == kCommandRefreshInterval30Minutes) {
+        SetRefreshIntervalSeconds(1800);
     } else if (command == kCommandLaunchAtStartup) {
         SetLaunchAtStartupEnabled(!launchAtStartup);
     } else if (command == kCommandAlwaysOnTop) {
@@ -1273,6 +1341,30 @@ std::wstring AppBarWindow::FormatDuration(int totalSeconds) const {
         return std::to_wstring(hours) + L" 小时 " + std::to_wstring(minutes) + L" 分钟";
     }
     return std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
+}
+
+std::wstring AppBarWindow::FormatRefreshCountdown(int totalSeconds) const {
+    const int hours = totalSeconds / 3600;
+    const int minutes = (totalSeconds % 3600) / 60;
+    const int seconds = totalSeconds % 60;
+
+    if (language_ == Language::Chinese) {
+        if (hours > 0) {
+            return std::to_wstring(hours) + L"小时 " + std::to_wstring(minutes) + L"分";
+        }
+        if (minutes > 0) {
+            return std::to_wstring(minutes) + L"分 " + std::to_wstring(seconds) + L"秒";
+        }
+        return std::to_wstring(seconds) + L"秒";
+    }
+
+    if (hours > 0) {
+        return std::to_wstring(hours) + L"h " + std::to_wstring(minutes) + L"m";
+    }
+    if (minutes > 0) {
+        return std::to_wstring(minutes) + L"m " + std::to_wstring(seconds) + L"s";
+    }
+    return std::to_wstring(seconds) + L"s";
 }
 
 std::wstring AppBarWindow::FormatDateTime(long long unixSeconds) const {
