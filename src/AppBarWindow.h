@@ -67,6 +67,8 @@ private:
     void Paint(HDC hdc);
     void PaintContent(const RECT& clientRect);
     void ShowContextMenu(POINT screenPoint);
+    int GetMinimumWidgetWidth() const;
+    int GetMinimumWidgetHeight(int width) const;
 
     std::wstring FormatDuration(int totalSeconds) const;
     std::wstring FormatDateTime(long long unixSeconds) const;
@@ -79,6 +81,7 @@ private:
     bool lightTheme_ = false;
     bool alwaysOnTop_ = false;
     bool lockPosition_ = false;
+    bool simpleMode_ = false;
     bool hasSavedRect_ = false;
     RECT savedRect_ = {};
     DragMode dragMode_ = DragMode::None;

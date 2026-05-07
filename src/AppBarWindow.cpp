@@ -18,6 +18,8 @@ constexpr wchar_t kWindowClassName[] = L"CodexUsageBarWindow";
 constexpr int kLayoutVersion = 5;
 constexpr int kDefaultWidgetWidth = 820;
 constexpr int kMinimumWidgetWidth = 640;
+constexpr int kSimpleDefaultWidgetWidth = 240;
+constexpr int kSimpleMinimumWidgetWidth = 220;
 constexpr int kDesktopMargin = 18;
 constexpr int kHorizontalPadding = 12;
 constexpr int kVerticalPadding = 10;
@@ -38,12 +40,12 @@ int RectHeight(const RECT& rect) {
     return rect.bottom - rect.top;
 }
 
-int CalculateMinimumWidgetHeight(HWND hwnd, int width) {
+int CalculateDetailedMinimumWidgetHeight(HWND hwnd, int width) {
     const int heroHeight = ScaleForDpi(hwnd, 76);
     const int metricsHeight = ScaleForDpi(hwnd, 52);
     const int meterInfoHeight = ScaleForDpi(hwnd, 30);
     const int footerRows = width >= ScaleForDpi(hwnd, 1040) ? 2 : 3;
-    const int footerHeight = ScaleForDpi(hwnd, 8) + footerRows * ScaleForDpi(hwnd, 18) + ScaleForDpi(hwnd, 14);
+    const int footerHeight = ScaleForDpi(hwnd, 4) + footerRows * ScaleForDpi(hwnd, 18) + ScaleForDpi(hwnd, 8);
 
     return heroHeight
         + 1
@@ -54,6 +56,10 @@ int CalculateMinimumWidgetHeight(HWND hwnd, int width) {
         + ScaleForDpi(hwnd, 10)
         + 1
         + footerHeight;
+}
+
+int CalculateSimpleMinimumWidgetHeight(HWND hwnd) {
+    return ScaleForDpi(hwnd, 108);
 }
 
 RECT ShrinkRect(const RECT& rect, int dx, int dy) {
@@ -376,10 +382,21 @@ RECT AppBarWindow::GetDesktopClientRect() const {
     return rect;
 }
 
+int AppBarWindow::GetMinimumWidgetWidth() const {
+    return ScaleForDpi(hwnd_, simpleMode_ ? kSimpleMinimumWidgetWidth : kMinimumWidgetWidth);
+}
+
+int AppBarWindow::GetMinimumWidgetHeight(int width) const {
+    if (simpleMode_) {
+        return CalculateSimpleMinimumWidgetHeight(hwnd_);
+    }
+    return CalculateDetailedMinimumWidgetHeight(hwnd_, width);
+}
+
 RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
     const int margin = ScaleForDpi(hwnd_, kDesktopMargin);
-    const int width = ScaleForDpi(hwnd_, kDefaultWidgetWidth);
-    const int height = CalculateMinimumWidgetHeight(hwnd_, width);
+    const int width = ScaleForDpi(hwnd_, simpleMode_ ? kSimpleDefaultWidgetWidth : kDefaultWidgetWidth);
+    const int height = GetMinimumWidgetHeight(width);
     RECT rect = {};
     rect.right = std::max(width + margin, static_cast<int>(desktopRect.right) - margin);
     rect.left = std::max(static_cast<int>(desktopRect.left) + margin, static_cast<int>(rect.right) - width);
@@ -390,8 +407,8 @@ RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
 
 RECT AppBarWindow::ClampRectToDesktop(RECT rect) const {
     const RECT desktopRect = GetDesktopClientRect();
-    const int minWidth = ScaleForDpi(hwnd_, kMinimumWidgetWidth);
-    const int minHeight = CalculateMinimumWidgetHeight(hwnd_, std::max(RectWidth(rect), minWidth));
+    const int minWidth = GetMinimumWidgetWidth();
+    const int minHeight = GetMinimumWidgetHeight(std::max(RectWidth(rect), minWidth));
 
     if (RectWidth(rect) < minWidth) {
         rect.right = rect.left + minWidth;
@@ -447,6 +464,7 @@ void AppBarWindow::LoadSettings() {
     const int version = GetPrivateProfileIntW(L"layout", L"layout_version", 0, path.c_str());
     alwaysOnTop_ = GetPrivateProfileIntW(L"layout", L"always_on_top", 0, path.c_str()) != 0;
     lockPosition_ = GetPrivateProfileIntW(L"layout", L"lock_position", 0, path.c_str()) != 0;
+    simpleMode_ = GetPrivateProfileIntW(L"layout", L"simple_mode", 0, path.c_str()) != 0;
     if (version < kLayoutVersion) {
         hasSavedRect_ = false;
         return;
@@ -478,6 +496,7 @@ void AppBarWindow::SaveSettings() const {
     WritePrivateProfileStringW(L"layout", L"layout_version", std::to_wstring(kLayoutVersion).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"always_on_top", alwaysOnTop_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"lock_position", lockPosition_ ? L"1" : L"0", path.c_str());
+    WritePrivateProfileStringW(L"layout", L"simple_mode", simpleMode_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"x", std::to_wstring(savedRect_.left).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"y", std::to_wstring(savedRect_.top).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"width", std::to_wstring(RectWidth(savedRect_)).c_str(), path.c_str());
@@ -837,19 +856,9 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         renderTarget_->FillRectangle(ToRectF(rect), solidBrush_.Get());
     };
 
-    auto drawRoundedFilledRect = [&](const RECT& rect, int radius, COLORREF color) {
+    auto drawRectBorder = [&](const RECT& rect, COLORREF color) {
         solidBrush_->SetColor(ToColorF(color));
-        renderTarget_->FillRoundedRectangle(
-            D2D1::RoundedRect(ToRectF(rect), static_cast<float>(radius), static_cast<float>(radius)),
-            solidBrush_.Get());
-    };
-
-    auto drawRoundedBorder = [&](const RECT& rect, int radius, COLORREF color) {
-        solidBrush_->SetColor(ToColorF(color));
-        renderTarget_->DrawRoundedRectangle(
-            D2D1::RoundedRect(ToRectF(rect), static_cast<float>(radius), static_cast<float>(radius)),
-            solidBrush_.Get(),
-            1.0f);
+        renderTarget_->DrawRectangle(ToRectF(rect), solidBrush_.Get(), 1.0f);
     };
 
     auto drawTextBlock = [&](IDWriteTextFormat* format,
@@ -912,11 +921,82 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         return metrics.widthIncludingTrailingWhitespace;
     };
 
+    if (simpleMode_) {
+        fillRect(MakeRect(clientRect.left + 2, clientRect.top + 3, clientRect.right + 2, clientRect.bottom + 3), shadow);
+        fillRect(clientRect, background);
+        drawRectBorder(clientRect, border);
+
+        const bool exhausted = snapshot_.success &&
+            (snapshot_.fiveHour.remainingPercent <= 0 || snapshot_.weekly.remainingPercent <= 0);
+        const bool warning = snapshot_.success &&
+            !exhausted &&
+            (snapshot_.fiveHour.remainingPercent <= 15 || snapshot_.weekly.remainingPercent <= 15 || pace.isOver);
+        const wchar_t* statusText = !snapshot_.success ? L"加载中" : (exhausted ? L"用尽" : (warning ? L"紧张" : L"正常"));
+        const COLORREF statusColor = !snapshot_.success
+            ? textSecondary
+            : (exhausted ? (lightTheme_ ? RGB(196, 54, 32) : RGB(255, 144, 120))
+                         : (warning ? (lightTheme_ ? RGB(184, 121, 38) : RGB(233, 180, 91))
+                                    : (lightTheme_ ? RGB(21, 148, 78) : RGB(118, 216, 163))));
+        const COLORREF dayCard = lightTheme_ ? RGB(224, 246, 239) : RGB(31, 58, 46);
+        const COLORREF weekCard = lightTheme_ ? RGB(239, 247, 226) : RGB(47, 59, 35);
+        const int topBandHeight = ScaleForDpi(hwnd_, 34);
+        const int innerPad = ScaleForDpi(hwnd_, 12);
+        const int cardGap = ScaleForDpi(hwnd_, 10);
+        const int footerHeight = ScaleForDpi(hwnd_, 16);
+
+        RECT titleRect = MakeRect(clientRect.left + innerPad, clientRect.top + ScaleForDpi(hwnd_, 6),
+            clientRect.right - innerPad - ScaleForDpi(hwnd_, 66), clientRect.top + topBandHeight);
+        RECT statusRect = MakeRect(clientRect.right - innerPad - ScaleForDpi(hwnd_, 54), clientRect.top + ScaleForDpi(hwnd_, 8),
+            clientRect.right - innerPad, clientRect.top + ScaleForDpi(hwnd_, 28));
+        drawTextBlock(textFormatMetricValue_.Get(), L"额度用量", titleRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
+        drawTextBlock(textFormatMetricLabel_.Get(), statusText, statusRect, statusColor,
+            DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+
+        RECT cardsRect = MakeRect(clientRect.left + innerPad, clientRect.top + topBandHeight + ScaleForDpi(hwnd_, 2),
+            clientRect.right - innerPad, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 4));
+        const int cardWidth = (RectWidth(cardsRect) - cardGap) / 2;
+        RECT dayRect = MakeRect(cardsRect.left, cardsRect.top, cardsRect.left + cardWidth, cardsRect.bottom);
+        RECT weekRect = MakeRect(dayRect.right + cardGap, cardsRect.top, cardsRect.right, cardsRect.bottom);
+        fillRect(dayRect, dayCard);
+        fillRect(weekRect, weekCard);
+
+        const std::wstring dayValue = snapshot_.success ? FormatPercent(snapshot_.fiveHour.usedPercent) : L"--";
+        const std::wstring weekValue = snapshot_.success ? FormatPercent(snapshot_.weekly.usedPercent) : L"--";
+        RECT dayLabelRect = MakeRect(dayRect.left + innerPad, dayRect.top + ScaleForDpi(hwnd_, 8), dayRect.right - innerPad, dayRect.top + ScaleForDpi(hwnd_, 24));
+        RECT dayValueRect = MakeRect(dayRect.left + innerPad, dayRect.top + ScaleForDpi(hwnd_, 24), dayRect.right - innerPad, dayRect.bottom - ScaleForDpi(hwnd_, 8));
+        RECT weekLabelRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 8), weekRect.right - innerPad, weekRect.top + ScaleForDpi(hwnd_, 24));
+        RECT weekValueRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 24), weekRect.right - innerPad, weekRect.bottom - ScaleForDpi(hwnd_, 8));
+        drawTextBlock(textFormatMetricLabel_.Get(), L"当日", dayLabelRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        drawTextBlock(textFormatDelta_.Get(), dayValue, dayValueRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        drawTextBlock(textFormatMetricLabel_.Get(), L"本周", weekLabelRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        drawTextBlock(textFormatDelta_.Get(), weekValue, weekValueRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+
+        const std::wstring refreshTimeText = lastSuccessfulRefreshUnixSeconds_ > 0
+            ? FormatClockTime(lastSuccessfulRefreshUnixSeconds_)
+            : L"--";
+        const std::wstring refreshCountdownText = refreshInFlight_
+            ? L"刷新中"
+            : (std::to_wstring(refreshCountdownSeconds_) + L"s");
+        RECT footerLeftRect = MakeRect(clientRect.left + innerPad, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 1),
+            clientRect.right / 2, clientRect.bottom - ScaleForDpi(hwnd_, 1));
+        RECT footerRightRect = MakeRect(clientRect.right / 2, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 1),
+            clientRect.right - innerPad, clientRect.bottom - ScaleForDpi(hwnd_, 1));
+        drawTextBlock(textFormatFoot_.Get(), refreshTimeText, footerLeftRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        drawTextBlock(textFormatFoot_.Get(), refreshCountdownText, footerRightRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        return;
+    }
+
     RECT heroRect = MakeRect(clientRect.left, clientRect.top, clientRect.right, clientRect.top + heroHeight);
-    drawRoundedFilledRect(MakeRect(clientRect.left + 2, clientRect.top + 3, clientRect.right + 2, clientRect.bottom + 3),
-        ScaleForDpi(hwnd_, 18), shadow);
-    drawRoundedFilledRect(clientRect, ScaleForDpi(hwnd_, 18), background);
-    drawRoundedBorder(clientRect, ScaleForDpi(hwnd_, 18), border);
+    fillRect(MakeRect(clientRect.left + 2, clientRect.top + 3, clientRect.right + 2, clientRect.bottom + 3), shadow);
+    fillRect(clientRect, background);
+    drawRectBorder(clientRect, border);
     fillRect(heroRect, heroBg);
     fillRect(MakeRect(heroRect.left, heroRect.bottom, heroRect.right, heroRect.bottom + 1), border);
 
@@ -1046,7 +1126,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     const int footerContentRight = std::max(static_cast<int>(clientRect.left) + padX, refreshInfoLeft - footerGap);
 
     int footX = clientRect.left + padX;
-    int footY = footerLine.bottom + ScaleForDpi(hwnd_, 10);
+    int footY = footerLine.bottom + ScaleForDpi(hwnd_, 6);
     for (const std::wstring& item : footerItems) {
         const float itemWidth = measureTextWidth(textFormatFoot_.Get(), item);
         if (footX + itemWidth > footerContentRight) {
@@ -1059,7 +1139,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         footX += static_cast<int>(std::ceil(itemWidth)) + footerGap;
     }
 
-    const int refreshInfoTop = footerLine.bottom + ScaleForDpi(hwnd_, 10);
+    const int refreshInfoTop = footerLine.bottom + ScaleForDpi(hwnd_, 6);
     RECT refreshTimeRect = MakeRect(refreshInfoLeft, refreshInfoTop, clientRect.right - padX, refreshInfoTop + ScaleForDpi(hwnd_, 16));
     RECT refreshCountdownRect = MakeRect(refreshInfoLeft, refreshTimeRect.bottom + ScaleForDpi(hwnd_, 2),
         clientRect.right - padX, refreshTimeRect.bottom + ScaleForDpi(hwnd_, 18));
@@ -1079,13 +1159,14 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     HMENU menu = CreatePopupMenu();
     const bool launchAtStartup = IsLaunchAtStartupEnabled();
-    AppendMenuW(menu, MF_STRING, 1, L"Refresh now");
-    AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED), 4, L"Launch at startup");
-    AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), 5, L"Always on top");
-    AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), 6, L"Lock position");
-    AppendMenuW(menu, MF_STRING, 3, L"Reset widget position");
+    AppendMenuW(menu, MF_STRING, 1, L"立即刷新");
+    AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED), 4, L"开机自启");
+    AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), 5, L"始终置顶");
+    AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), 6, L"固定位置");
+    AppendMenuW(menu, MF_STRING | (simpleMode_ ? MF_CHECKED : MF_UNCHECKED), 7, L"简单模式");
+    AppendMenuW(menu, MF_STRING, 3, L"重置组件位置");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 2, L"Exit");
+    AppendMenuW(menu, MF_STRING, 2, L"退出");
 
     const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
     DestroyMenu(menu);
@@ -1101,6 +1182,11 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     } else if (command == 6) {
         lockPosition_ = !lockPosition_;
         SaveSettings();
+    } else if (command == 7) {
+        simpleMode_ = !simpleMode_;
+        UpdateWindowBounds(true);
+        SaveSettings();
+        InvalidateRect(hwnd_, nullptr, TRUE);
     } else if (command == 3) {
         hasSavedRect_ = false;
         UpdateWindowBounds(false);
