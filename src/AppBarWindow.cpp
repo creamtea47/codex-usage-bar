@@ -1001,7 +1001,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         RECT dayValueRect = MakeRect(dayRect.left + innerPad, dayRect.top + ScaleForDpi(hwnd_, 24), dayRect.right - innerPad, dayRect.bottom - ScaleForDpi(hwnd_, 8));
         RECT weekLabelRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 8), weekRect.right - innerPad, weekRect.top + ScaleForDpi(hwnd_, 24));
         RECT weekValueRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 24), weekRect.right - innerPad, weekRect.bottom - ScaleForDpi(hwnd_, 8));
-        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"Today", L"当日"), dayLabelRect, textSecondary,
+        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"5 Hours", L"5小时"), dayLabelRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         drawTextBlock(textFormatDelta_.Get(), dayValue, dayValueRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
@@ -1078,13 +1078,13 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     const wchar_t* metricLabels[4] = {
         LocalizeText(L"Daily average budget", L"今日平均预算"),
         LocalizeText(L"Expected used today", L"今日可累计使用"),
-        LocalizeText(L"Actual used", L"实际已使用"),
+        LocalizeText(L"5-hour remaining", L"5小时剩余"),
         LocalizeText(L"Weekly remaining", L"每周剩余")
     };
     const std::wstring metricValues[4] = {
         FormatPercent(pace.dailyBudgetPercent),
         FormatPercent(pace.expectedUsedPercent),
-        FormatPercent(pace.actualUsedPercent),
+        FormatPercent(snapshot_.fiveHour.remainingPercent),
         FormatPercent(pace.weeklyRemainingPercent),
     };
     const int metricWidth = RectWidth(metricsRect) / 4;
