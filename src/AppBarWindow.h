@@ -76,6 +76,8 @@ private:
     HWND hwnd_ = nullptr;
     std::atomic_bool refreshInFlight_ = false;
     bool lightTheme_ = false;
+    bool alwaysOnTop_ = false;
+    bool lockPosition_ = false;
     bool hasSavedRect_ = false;
     RECT savedRect_ = {};
     DragMode dragMode_ = DragMode::None;

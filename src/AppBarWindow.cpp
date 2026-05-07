@@ -433,7 +433,8 @@ void AppBarWindow::UpdateWindowBounds(bool useSavedPosition) {
     savedRect_ = rect;
     hasSavedRect_ = true;
     MoveWindow(hwnd_, rect.left, rect.top, RectWidth(rect), RectHeight(rect), TRUE);
-    SetWindowPos(hwnd_, HWND_TOPMOST, rect.left, rect.top, RectWidth(rect), RectHeight(rect), SWP_NOACTIVATE);
+    SetWindowPos(hwnd_, alwaysOnTop_ ? HWND_TOPMOST : HWND_NOTOPMOST,
+        rect.left, rect.top, RectWidth(rect), RectHeight(rect), SWP_NOACTIVATE);
     if (!usingPersistedRect) {
         SaveSettings();
     }
@@ -442,6 +443,8 @@ void AppBarWindow::UpdateWindowBounds(bool useSavedPosition) {
 void AppBarWindow::LoadSettings() {
     const std::wstring path = GetSettingsPath();
     const int version = GetPrivateProfileIntW(L"layout", L"layout_version", 0, path.c_str());
+    alwaysOnTop_ = GetPrivateProfileIntW(L"layout", L"always_on_top", 0, path.c_str()) != 0;
+    lockPosition_ = GetPrivateProfileIntW(L"layout", L"lock_position", 0, path.c_str()) != 0;
     if (version < kLayoutVersion) {
         hasSavedRect_ = false;
         return;
@@ -471,6 +474,8 @@ void AppBarWindow::SaveSettings() const {
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
     WritePrivateProfileStringW(L"layout", L"layout_version", std::to_wstring(kLayoutVersion).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"layout", L"always_on_top", alwaysOnTop_ ? L"1" : L"0", path.c_str());
+    WritePrivateProfileStringW(L"layout", L"lock_position", lockPosition_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"x", std::to_wstring(savedRect_.left).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"y", std::to_wstring(savedRect_.top).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"width", std::to_wstring(RectWidth(savedRect_)).c_str(), path.c_str());
@@ -662,6 +667,10 @@ void AppBarWindow::DiscardDeviceResources() {
 }
 
 AppBarWindow::DragMode AppBarWindow::HitTestDragMode(POINT clientPoint) const {
+    if (lockPosition_) {
+        return DragMode::None;
+    }
+
     RECT clientRect = {};
     GetClientRect(hwnd_, &clientRect);
     const int grip = ScaleForDpi(hwnd_, kResizeGrip);
@@ -680,6 +689,10 @@ AppBarWindow::DragMode AppBarWindow::HitTestDragMode(POINT clientPoint) const {
 }
 
 void AppBarWindow::BeginDrag(DragMode mode, POINT screenPoint) {
+    if (mode == DragMode::None) {
+        return;
+    }
+
     dragMode_ = mode;
     dragStartPoint_ = screenPoint;
     dragStartRect_ = savedRect_;
@@ -1020,10 +1033,12 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         footX += static_cast<int>(std::ceil(itemWidth)) + footerGap;
     }
 
-    RECT gripRect = MakeRect(clientRect.right - ScaleForDpi(hwnd_, 30), clientRect.bottom - ScaleForDpi(hwnd_, 18),
-        clientRect.right - ScaleForDpi(hwnd_, 8), clientRect.bottom - ScaleForDpi(hwnd_, 6));
-    drawTextBlock(textFormatFoot_.Get(), L"///", gripRect, lightTheme_ ? RGB(147, 156, 149) : RGB(117, 126, 120),
-        DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+    if (!lockPosition_) {
+        RECT gripRect = MakeRect(clientRect.right - ScaleForDpi(hwnd_, 30), clientRect.bottom - ScaleForDpi(hwnd_, 18),
+            clientRect.right - ScaleForDpi(hwnd_, 8), clientRect.bottom - ScaleForDpi(hwnd_, 6));
+        drawTextBlock(textFormatFoot_.Get(), L"///", gripRect, lightTheme_ ? RGB(147, 156, 149) : RGB(117, 126, 120),
+            DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+    }
 }
 
 void AppBarWindow::ShowContextMenu(POINT screenPoint) {
@@ -1031,6 +1046,8 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     const bool launchAtStartup = IsLaunchAtStartupEnabled();
     AppendMenuW(menu, MF_STRING, 1, L"Refresh now");
     AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED), 4, L"Launch at startup");
+    AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED), 5, L"Always on top");
+    AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED), 6, L"Lock position");
     AppendMenuW(menu, MF_STRING, 3, L"Reset widget position");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 2, L"Exit");
@@ -1042,6 +1059,13 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
         RequestRefresh(true);
     } else if (command == 4) {
         SetLaunchAtStartupEnabled(!launchAtStartup);
+    } else if (command == 5) {
+        alwaysOnTop_ = !alwaysOnTop_;
+        UpdateWindowBounds(true);
+        SaveSettings();
+    } else if (command == 6) {
+        lockPosition_ = !lockPosition_;
+        SaveSettings();
     } else if (command == 3) {
         hasSavedRect_ = false;
         UpdateWindowBounds(false);
