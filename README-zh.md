@@ -3,7 +3,7 @@
 原生 `Win32/C++` 的 Codex 用量桌面挂件，面向 Windows。
 
 [English README](README.md)
-[社区讨论](https://linux.do/)
+[![Linux.do 社区](https://img.shields.io/badge/Linux.do-%E7%A4%BE%E5%8C%BA-2ea44f?style=flat-square)](https://linux.do/)
 
 ## 项目看板
 

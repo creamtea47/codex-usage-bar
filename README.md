@@ -3,7 +3,7 @@
 A native `Win32/C++` desktop widget for Windows that shows your Codex usage budget at a glance.
 
 [中文说明](README-zh.md)
-[Community Discussion](https://linux.do/)
+[![Linux.do Community](https://img.shields.io/badge/Linux.do-Community-2ea44f?style=flat-square)](https://linux.do/)
 
 ## Project Status
 
