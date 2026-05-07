@@ -31,7 +31,7 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Configure
-        run: cmake -S . -B build-${{ matrix.arch }} -G "Visual Studio 17 2022" -A ${{ matrix.arch }}
+        run: cmake -S . -B build-${{ matrix.arch }} -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DAPP_VERSION="${{ github.ref_name }}"
 
       - name: Build Release
         run: cmake --build build-${{ matrix.arch }} --config Release

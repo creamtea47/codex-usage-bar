@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -76,6 +77,125 @@ bool ExtractWindow(const jsonlite::Value* windowNode, UsageWindow* output) {
     return true;
 }
 
+std::optional<std::string> HttpGetJson(const std::wstring& userAgent,
+                                       const std::wstring& host,
+                                       const std::wstring& path,
+                                       const std::vector<std::wstring>& headers,
+                                       std::wstring* errorMessage) {
+    if (errorMessage != nullptr) {
+        errorMessage->clear();
+    }
+
+    HINTERNET session = WinHttpOpen(userAgent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (session == nullptr) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"WinHttpOpen failed";
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::string> responseBody;
+    HINTERNET connect = nullptr;
+    HINTERNET request = nullptr;
+
+    do {
+        connect = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+        if (connect == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpConnect failed";
+            }
+            break;
+        }
+
+        request = WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (request == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpOpenRequest failed";
+            }
+            break;
+        }
+
+        for (const std::wstring& header : headers) {
+            if (!WinHttpAddRequestHeaders(request, header.c_str(), static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = L"WinHttpAddRequestHeaders failed";
+                }
+                break;
+            }
+        }
+        if (errorMessage != nullptr && !errorMessage->empty()) {
+            break;
+        }
+
+        DWORD timeout = 15000;
+        WinHttpSetTimeouts(request, timeout, timeout, timeout, timeout);
+
+        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpSendRequest failed";
+            }
+            break;
+        }
+
+        if (!WinHttpReceiveResponse(request, nullptr)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpReceiveResponse failed";
+            }
+            break;
+        }
+
+        DWORD statusCode = 0;
+        DWORD statusCodeSize = sizeof(statusCode);
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
+        if (statusCode != 200) {
+            if (errorMessage != nullptr) {
+                *errorMessage = host + path + L" returned HTTP " + std::to_wstring(statusCode);
+            }
+            break;
+        }
+
+        std::string body;
+        for (;;) {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = L"WinHttpQueryDataAvailable failed";
+                }
+                break;
+            }
+            if (available == 0) {
+                responseBody = std::move(body);
+                break;
+            }
+
+            std::string chunk(static_cast<size_t>(available), '\0');
+            DWORD downloaded = 0;
+            if (!WinHttpReadData(request, chunk.data(), available, &downloaded)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = L"WinHttpReadData failed";
+                }
+                break;
+            }
+
+            chunk.resize(downloaded);
+            body.append(chunk);
+        }
+    } while (false);
+
+    if (request != nullptr) {
+        WinHttpCloseHandle(request);
+    }
+    if (connect != nullptr) {
+        WinHttpCloseHandle(connect);
+    }
+    WinHttpCloseHandle(session);
+
+    return responseBody;
+}
+
 }  // namespace
 
 UsageSnapshot CodexUsageFetcher::Fetch() const {
@@ -100,6 +220,23 @@ UsageSnapshot CodexUsageFetcher::Fetch() const {
     }
 
     return snapshot;
+}
+
+ReleaseVersionInfo CodexUsageFetcher::FetchLatestRelease() const {
+    ReleaseVersionInfo info;
+
+    std::wstring errorMessage;
+    std::optional<std::string> releaseJson = HttpGetLatestReleaseJson(&errorMessage);
+    if (!releaseJson.has_value()) {
+        info.errorMessage = errorMessage;
+        return info;
+    }
+
+    info = ParseLatestReleaseJson(*releaseJson, &errorMessage);
+    if (!info.success) {
+        info.errorMessage = errorMessage;
+    }
+    return info;
 }
 
 std::wstring CodexUsageFetcher::ResolveAuthJsonPath() const {
@@ -158,110 +295,25 @@ std::optional<std::string> CodexUsageFetcher::LoadFileUtf8(const std::wstring& p
 }
 
 std::optional<std::string> CodexUsageFetcher::HttpGetUsageJson(const std::string& accessToken, std::wstring* errorMessage) const {
-    HINTERNET session = WinHttpOpen(L"CodexUsageBar/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session == nullptr) {
-        if (errorMessage != nullptr) {
-            *errorMessage = L"WinHttpOpen failed";
-        }
-        return std::nullopt;
-    }
+    return HttpGetJson(
+        L"CodexUsageBar/0.1",
+        L"chatgpt.com",
+        L"/backend-api/wham/usage",
+        { L"Authorization: Bearer " + Utf8ToWide(accessToken) },
+        errorMessage);
+}
 
-    std::optional<std::string> responseBody;
-    HINTERNET connect = nullptr;
-    HINTERNET request = nullptr;
-
-    do {
-        connect = WinHttpConnect(session, L"chatgpt.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-        if (connect == nullptr) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpConnect failed";
-            }
-            break;
-        }
-
-        request = WinHttpOpenRequest(connect, L"GET", L"/backend-api/wham/usage", nullptr,
-            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-        if (request == nullptr) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpOpenRequest failed";
-            }
-            break;
-        }
-
-        const std::wstring authHeader = L"Authorization: Bearer " + Utf8ToWide(accessToken);
-        if (!WinHttpAddRequestHeaders(request, authHeader.c_str(), static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD)) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpAddRequestHeaders failed";
-            }
-            break;
-        }
-
-        DWORD timeout = 15000;
-        WinHttpSetTimeouts(request, timeout, timeout, timeout, timeout);
-
-        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpSendRequest failed";
-            }
-            break;
-        }
-
-        if (!WinHttpReceiveResponse(request, nullptr)) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpReceiveResponse failed";
-            }
-            break;
-        }
-
-        DWORD statusCode = 0;
-        DWORD statusCodeSize = sizeof(statusCode);
-        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
-        if (statusCode != 200) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"usage API returned HTTP " + std::to_wstring(statusCode);
-            }
-            break;
-        }
-
-        std::string body;
-        for (;;) {
-            DWORD available = 0;
-            if (!WinHttpQueryDataAvailable(request, &available)) {
-                if (errorMessage != nullptr) {
-                    *errorMessage = L"WinHttpQueryDataAvailable failed";
-                }
-                break;
-            }
-            if (available == 0) {
-                responseBody = std::move(body);
-                break;
-            }
-
-            std::string chunk(static_cast<size_t>(available), '\0');
-            DWORD downloaded = 0;
-            if (!WinHttpReadData(request, chunk.data(), available, &downloaded)) {
-                if (errorMessage != nullptr) {
-                    *errorMessage = L"WinHttpReadData failed";
-                }
-                break;
-            }
-
-            chunk.resize(downloaded);
-            body.append(chunk);
-        }
-    } while (false);
-
-    if (request != nullptr) {
-        WinHttpCloseHandle(request);
-    }
-    if (connect != nullptr) {
-        WinHttpCloseHandle(connect);
-    }
-    WinHttpCloseHandle(session);
-
-    return responseBody;
+std::optional<std::string> CodexUsageFetcher::HttpGetLatestReleaseJson(std::wstring* errorMessage) const {
+    return HttpGetJson(
+        L"CodexUsageBar/0.1",
+        L"api.github.com",
+        L"/repos/luodaoyi/codex-useage-win/releases/latest",
+        {
+            L"Accept: application/vnd.github+json",
+            L"X-GitHub-Api-Version: 2022-11-28",
+            L"User-Agent: CodexUsageBar"
+        },
+        errorMessage);
 }
 
 UsageSnapshot CodexUsageFetcher::ParseUsageJson(const std::string& jsonText, std::wstring* errorMessage) const {
@@ -297,4 +349,30 @@ UsageSnapshot CodexUsageFetcher::ParseUsageJson(const std::string& jsonText, std
 
     snapshot.success = true;
     return snapshot;
+}
+
+ReleaseVersionInfo CodexUsageFetcher::ParseLatestReleaseJson(const std::string& jsonText, std::wstring* errorMessage) const {
+    ReleaseVersionInfo info;
+
+    jsonlite::Parser parser(jsonText);
+    std::optional<jsonlite::Value> root = parser.Parse();
+    if (!root.has_value()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"latest release JSON parse failed: " + Utf8ToWide(parser.Error());
+        }
+        return info;
+    }
+
+    const jsonlite::Value* tagName = root->Find("tag_name");
+    auto tag = tagName != nullptr ? tagName->AsString() : std::nullopt;
+    if (!tag.has_value() || tag->empty()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"latest release payload missing tag_name";
+        }
+        return info;
+    }
+
+    info.latestTag = Utf8ToWide(std::string(*tag));
+    info.success = true;
+    return info;
 }

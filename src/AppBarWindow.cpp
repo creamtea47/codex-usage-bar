@@ -1,4 +1,5 @@
 #include "AppBarWindow.h"
+#include "AppVersion.h"
 
 #include <ShlObj.h>
 #include <winreg.h>
@@ -11,10 +12,12 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"CodexUsageBarWindow";
+constexpr const wchar_t* kCurrentVersion = APP_VERSION_W;
 constexpr int kLayoutVersion = 5;
 constexpr UINT kCommandRefresh = 1;
 constexpr UINT kCommandExit = 2;
@@ -30,6 +33,7 @@ constexpr UINT kCommandRefreshInterval3Minutes = 11;
 constexpr UINT kCommandRefreshInterval5Minutes = 12;
 constexpr UINT kCommandRefreshInterval10Minutes = 13;
 constexpr UINT kCommandRefreshInterval30Minutes = 14;
+constexpr UINT kCommandCheckVersion = 15;
 constexpr int kDefaultWidgetWidth = 820;
 constexpr int kMinimumWidgetWidth = 640;
 constexpr int kSimpleDefaultWidgetWidth = 240;
@@ -40,6 +44,7 @@ constexpr int kVerticalPadding = 10;
 constexpr int kResizeGrip = 12;
 constexpr long long kDaySeconds = 24LL * 60 * 60;
 constexpr long long kWeekSeconds = 7LL * kDaySeconds;
+constexpr int kReleaseCheckIntervalSeconds = 6 * 60 * 60;
 
 int SanitizeRefreshIntervalSeconds(int seconds) {
     switch (seconds) {
@@ -52,6 +57,47 @@ int SanitizeRefreshIntervalSeconds(int seconds) {
         default:
             return 60;
     }
+}
+
+std::vector<int> ParseVersionParts(const std::wstring& version) {
+    std::vector<int> parts;
+    int value = 0;
+    bool inNumber = false;
+
+    for (wchar_t ch : version) {
+        if (ch >= L'0' && ch <= L'9') {
+            value = value * 10 + (ch - L'0');
+            inNumber = true;
+        } else if (inNumber) {
+            parts.push_back(value);
+            value = 0;
+            inNumber = false;
+        }
+    }
+    if (inNumber) {
+        parts.push_back(value);
+    }
+
+    return parts;
+}
+
+int CompareVersions(const std::wstring& left, const std::wstring& right) {
+    const std::vector<int> leftParts = ParseVersionParts(left);
+    const std::vector<int> rightParts = ParseVersionParts(right);
+    const size_t count = std::max(leftParts.size(), rightParts.size());
+
+    for (size_t i = 0; i < count; ++i) {
+        const int leftValue = i < leftParts.size() ? leftParts[i] : 0;
+        const int rightValue = i < rightParts.size() ? rightParts[i] : 0;
+        if (leftValue < rightValue) {
+            return -1;
+        }
+        if (leftValue > rightValue) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 int ScaleForDpi(HWND hwnd, int value) {
@@ -232,9 +278,11 @@ bool AppBarWindow::Create() {
     InvalidateRect(hwnd_, nullptr, TRUE);
 
     refreshCountdownSeconds_ = refreshIntervalSeconds_;
+    releaseCheckCountdownSeconds_ = kReleaseCheckIntervalSeconds;
     SetTimer(hwnd_, kCountdownTimerId, 1000, nullptr);
     RestartRefreshTimer();
     RequestRefresh(true);
+    RequestLatestReleaseCheck(true);
     return true;
 }
 
@@ -271,6 +319,10 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
                     snapshot_.weekly.resetAfterSeconds = std::max(0, snapshot_.weekly.resetAfterSeconds - 1);
                 }
                 refreshCountdownSeconds_ = std::max(0, refreshCountdownSeconds_ - 1);
+                releaseCheckCountdownSeconds_ = std::max(0, releaseCheckCountdownSeconds_ - 1);
+                if (releaseCheckCountdownSeconds_ == 0) {
+                    RequestLatestReleaseCheck(false);
+                }
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (wParam == kRefreshTimerId) {
                 refreshCountdownSeconds_ = refreshIntervalSeconds_;
@@ -376,6 +428,10 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             OnUsageUpdated(reinterpret_cast<UsageSnapshot*>(lParam));
             return 0;
 
+        case kReleaseVersionUpdatedMessage:
+            OnLatestReleaseChecked(reinterpret_cast<ReleaseVersionInfo*>(lParam));
+            return 0;
+
         case WM_DESTROY:
             KillTimer(hwnd_, kCountdownTimerId);
             KillTimer(hwnd_, kRefreshTimerId);
@@ -460,6 +516,26 @@ void AppBarWindow::RestartRefreshTimer() {
 
 const wchar_t* AppBarWindow::LocalizeText(const wchar_t* english, const wchar_t* chinese) const {
     return language_ == Language::Chinese ? chinese : english;
+}
+
+std::wstring AppBarWindow::GetVersionStatusText(bool compact) const {
+    if (updateAvailable_ && !latestReleaseTag_.empty()) {
+        if (compact) {
+            return language_ == Language::Chinese
+                ? (std::wstring(kCurrentVersion) + L" -> " + latestReleaseTag_)
+                : (std::wstring(kCurrentVersion) + L" -> " + latestReleaseTag_);
+        }
+        return language_ == Language::Chinese
+            ? (L"版本: " + std::wstring(kCurrentVersion) + L"，可更新到 " + latestReleaseTag_)
+            : (L"Version: " + std::wstring(kCurrentVersion) + L", update available: " + latestReleaseTag_);
+    }
+
+    if (compact) {
+        return kCurrentVersion;
+    }
+    return language_ == Language::Chinese
+        ? (L"版本: " + std::wstring(kCurrentVersion))
+        : (L"Version: " + std::wstring(kCurrentVersion));
 }
 
 RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
@@ -867,6 +943,44 @@ void AppBarWindow::OnUsageUpdated(UsageSnapshot* snapshot) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void AppBarWindow::RequestLatestReleaseCheck(bool force) {
+    bool expected = false;
+    if (!force && !releaseCheckInFlight_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    if (force && releaseCheckInFlight_.exchange(true)) {
+        return;
+    }
+
+    releaseCheckCountdownSeconds_ = kReleaseCheckIntervalSeconds;
+
+    const HWND target = hwnd_;
+    std::thread([this, target]() {
+        auto* result = new ReleaseVersionInfo(fetcher_.FetchLatestRelease());
+        PostMessageW(target, kReleaseVersionUpdatedMessage, 0, reinterpret_cast<LPARAM>(result));
+    }).detach();
+}
+
+void AppBarWindow::OnLatestReleaseChecked(ReleaseVersionInfo* info) {
+    std::unique_ptr<ReleaseVersionInfo> holder(info);
+    releaseCheckInFlight_ = false;
+    lastReleaseCheckUnixSeconds_ = static_cast<long long>(std::time(nullptr));
+
+    if (info != nullptr) {
+        hasReleaseCheckResult_ = info->success;
+        releaseCheckErrorMessage_ = info->errorMessage;
+        if (info->success) {
+            latestReleaseTag_ = info->latestTag;
+            updateAvailable_ = CompareVersions(kCurrentVersion, latestReleaseTag_) < 0;
+        } else {
+            latestReleaseTag_.clear();
+            updateAvailable_ = false;
+        }
+    }
+
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void AppBarWindow::Paint(HDC hdc) {
     RECT clientRect = {};
     GetClientRect(hwnd_, &clientRect);
@@ -1019,6 +1133,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
                                     : (lightTheme_ ? RGB(21, 148, 78) : RGB(118, 216, 163))));
         const COLORREF dayCard = lightTheme_ ? RGB(224, 246, 239) : RGB(31, 58, 46);
         const COLORREF weekCard = lightTheme_ ? RGB(239, 247, 226) : RGB(47, 59, 35);
+        const std::wstring versionStatusText = GetVersionStatusText(true);
         const int topBandHeight = ScaleForDpi(hwnd_, 34);
         const int innerPad = ScaleForDpi(hwnd_, 12);
         const int cardGap = ScaleForDpi(hwnd_, 10);
@@ -1066,7 +1181,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             clientRect.right / 2, clientRect.bottom - ScaleForDpi(hwnd_, 1));
         RECT footerRightRect = MakeRect(clientRect.right / 2, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 1),
             clientRect.right - innerPad, clientRect.bottom - ScaleForDpi(hwnd_, 1));
-        drawTextBlock(textFormatFoot_.Get(), refreshTimeText, footerLeftRect, textSecondary,
+        drawTextBlock(textFormatFoot_.Get(), versionStatusText, footerLeftRect, updateAvailable_ ? heroValue : textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         drawTextBlock(textFormatFoot_.Get(), refreshCountdownText, footerRightRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
@@ -1096,6 +1211,11 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             drawTextBlock(textFormatFoot_.Get(), snapshot_.errorMessage, errorRect, RGB(215, 73, 73),
                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP, false);
         }
+
+        RECT versionRect = MakeRect(clientRect.left + padX, clientRect.bottom - ScaleForDpi(hwnd_, 22),
+            clientRect.left + padX + ScaleForDpi(hwnd_, 220), clientRect.bottom - ScaleForDpi(hwnd_, 6));
+        drawTextBlock(textFormatFoot_.Get(), GetVersionStatusText(true), versionRect, updateAvailable_ ? heroValue : textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         return;
     }
 
@@ -1188,6 +1308,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 
     RECT footerLine = MakeRect(clientRect.left, meterRect.bottom + footerTop, clientRect.right, meterRect.bottom + footerTop + 1);
     fillRect(footerLine, border);
+    const std::wstring versionStatusText = GetVersionStatusText(true);
     const std::wstring footerItems[6] = {
         std::wstring(LocalizeText(L"Week start: ", L"本周开始: ")) + FormatDateTime(pace.weekStartUnixSeconds),
         std::wstring(LocalizeText(L"Reset at: ", L"重置时间: ")) + FormatDateTime(snapshot_.weekly.resetAtUnixSeconds),
@@ -1214,16 +1335,19 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     const int refreshInfoWidth = std::max(
         static_cast<int>(std::ceil(measureTextWidth(textFormatFoot_.Get(), refreshTimeText))),
         static_cast<int>(std::ceil(measureTextWidth(textFormatFoot_.Get(), refreshCountdownText)))) + ScaleForDpi(hwnd_, 8);
+    const int versionInfoWidth = static_cast<int>(std::ceil(measureTextWidth(textFormatFoot_.Get(), versionStatusText))) + ScaleForDpi(hwnd_, 8);
+    const int versionInfoLeft = clientRect.left + padX;
     const int refreshInfoLeft = std::max(static_cast<int>(clientRect.left) + padX,
         static_cast<int>(clientRect.right) - padX - refreshInfoWidth);
-    const int footerContentRight = std::max(static_cast<int>(clientRect.left) + padX, refreshInfoLeft - footerGap);
+    const int footerContentLeft = clientRect.left + padX;
+    const int footerContentRight = std::max(static_cast<int>(footerContentLeft), refreshInfoLeft - footerGap);
 
-    int footX = clientRect.left + padX;
+    int footX = footerContentLeft;
     int footY = footerLine.bottom + ScaleForDpi(hwnd_, 6);
     for (const std::wstring& item : footerItems) {
         const float itemWidth = measureTextWidth(textFormatFoot_.Get(), item);
         if (footX + itemWidth > footerContentRight) {
-            footX = clientRect.left + padX;
+            footX = footerContentLeft;
             footY += ScaleForDpi(hwnd_, 18);
         }
         RECT itemRect = MakeRect(footX, footY, footX + static_cast<int>(std::ceil(itemWidth)) + ScaleForDpi(hwnd_, 4), footY + ScaleForDpi(hwnd_, 16));
@@ -1233,9 +1357,14 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
     }
 
     const int refreshInfoTop = footerLine.bottom + ScaleForDpi(hwnd_, 6);
+    const int versionRectBottom = clientRect.bottom - ScaleForDpi(hwnd_, 4);
+    RECT versionRect = MakeRect(versionInfoLeft, versionRectBottom - ScaleForDpi(hwnd_, 16),
+        versionInfoLeft + versionInfoWidth, versionRectBottom);
     RECT refreshTimeRect = MakeRect(refreshInfoLeft, refreshInfoTop, clientRect.right - padX, refreshInfoTop + ScaleForDpi(hwnd_, 16));
     RECT refreshCountdownRect = MakeRect(refreshInfoLeft, refreshTimeRect.bottom + ScaleForDpi(hwnd_, 2),
         clientRect.right - padX, refreshTimeRect.bottom + ScaleForDpi(hwnd_, 18));
+    drawTextBlock(textFormatFoot_.Get(), versionStatusText, versionRect, updateAvailable_ ? heroValue : textSecondary,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
     drawTextBlock(textFormatFoot_.Get(), refreshTimeText, refreshTimeRect, textSecondary,
         DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
     drawTextBlock(textFormatFoot_.Get(), refreshCountdownText, refreshCountdownRect, textSecondary,
@@ -1270,6 +1399,7 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
         kCommandRefreshInterval30Minutes, LocalizeText(L"30 minutes", L"30分钟"));
 
     AppendMenuW(menu, MF_STRING, kCommandRefresh, LocalizeText(L"Refresh now", L"立即刷新"));
+    AppendMenuW(menu, MF_STRING, kCommandCheckVersion, LocalizeText(L"Check version", L"检查版本"));
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(refreshIntervalMenu), LocalizeText(L"Refresh interval", L"刷新间隔"));
     AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED),
         kCommandLaunchAtStartup, LocalizeText(L"Launch at startup", L"开机自启"));
@@ -1289,6 +1419,8 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
 
     if (command == kCommandRefresh) {
         RequestRefresh(true);
+    } else if (command == kCommandCheckVersion) {
+        RequestLatestReleaseCheck(true);
     } else if (command == kCommandRefreshInterval1Minute) {
         SetRefreshIntervalSeconds(60);
     } else if (command == kCommandRefreshInterval3Minutes) {

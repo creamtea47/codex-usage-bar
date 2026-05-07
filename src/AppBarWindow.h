@@ -20,6 +20,7 @@ public:
 
 private:
     static constexpr UINT kUsageUpdatedMessage = WM_APP + 1;
+    static constexpr UINT kReleaseVersionUpdatedMessage = WM_APP + 2;
     static constexpr UINT_PTR kCountdownTimerId = 1;
     static constexpr UINT_PTR kRefreshTimerId = 2;
 
@@ -61,6 +62,8 @@ private:
 
     void RequestRefresh(bool force);
     void OnUsageUpdated(UsageSnapshot* snapshot);
+    void RequestLatestReleaseCheck(bool force);
+    void OnLatestReleaseChecked(ReleaseVersionInfo* info);
 
     HRESULT CreateDeviceIndependentResources();
     HRESULT CreateDeviceResources();
@@ -78,6 +81,7 @@ private:
     void SetRefreshIntervalSeconds(int seconds);
     void RestartRefreshTimer();
     const wchar_t* LocalizeText(const wchar_t* english, const wchar_t* chinese) const;
+    std::wstring GetVersionStatusText(bool compact) const;
 
     std::wstring FormatDuration(int totalSeconds) const;
     std::wstring FormatRefreshCountdown(int totalSeconds) const;
@@ -88,10 +92,13 @@ private:
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
     std::atomic_bool refreshInFlight_ = false;
+    std::atomic_bool releaseCheckInFlight_ = false;
     bool lightTheme_ = false;
     bool alwaysOnTop_ = false;
     bool lockPosition_ = false;
     bool simpleMode_ = false;
+    bool hasReleaseCheckResult_ = false;
+    bool updateAvailable_ = false;
     Language language_ = Language::English;
     bool hasSavedRect_ = false;
     RECT savedRect_ = {};
@@ -100,8 +107,12 @@ private:
     RECT dragStartRect_ = {};
     UINT textFormatDpi_ = 0;
     long long lastSuccessfulRefreshUnixSeconds_ = 0;
+    long long lastReleaseCheckUnixSeconds_ = 0;
     int refreshIntervalSeconds_ = 60;
     int refreshCountdownSeconds_ = 60;
+    int releaseCheckCountdownSeconds_ = 6 * 60 * 60;
+    std::wstring latestReleaseTag_;
+    std::wstring releaseCheckErrorMessage_;
 
     UsageSnapshot snapshot_;
     CodexUsageFetcher fetcher_;

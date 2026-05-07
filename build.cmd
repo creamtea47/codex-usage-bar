@@ -1,10 +1,19 @@
 @echo off
 setlocal
 
+set "APP_VERSION_TEXT="
+if not "%GITHUB_REF_NAME%"=="" (
+  set "APP_VERSION_TEXT=%GITHUB_REF_NAME%"
+) else (
+  for /f "usebackq delims=" %%i in (`git describe --tags --always --dirty 2^>nul`) do set "APP_VERSION_TEXT=%%i"
+)
+if "%APP_VERSION_TEXT%"=="" set "APP_VERSION_TEXT=dev"
+
 call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
 if errorlevel 1 exit /b 1
 
 cl /std:c++20 /utf-8 /EHsc /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN ^
+  /DAPP_VERSION_W=L\"%APP_VERSION_TEXT%\" ^
   src\main.cpp ^
   src\AppBarWindow.cpp ^
   src\CodexUsageFetcher.cpp ^
