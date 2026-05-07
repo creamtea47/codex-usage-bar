@@ -3,6 +3,7 @@
 原生 `Win32/C++` 的 Codex 用量桌面挂件，面向 Windows。
 
 [English README](README.md)
+[社区讨论](https://linux.do/)
 
 ## 项目看板
 
