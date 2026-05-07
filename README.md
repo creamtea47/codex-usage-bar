@@ -2,6 +2,14 @@
 
 原生 `Win32/C++` 的 Codex 用量桌面挂件，面向 Windows。
 
+## 项目看板
+
+[![Build](https://github.com/luodaoyi/codex-useage-win/actions/workflows/build.yml/badge.svg)](https://github.com/luodaoyi/codex-useage-win/actions/workflows/build.yml)
+[![Latest Release](https://img.shields.io/github/v/release/luodaoyi/codex-useage-win?display_name=tag)](https://github.com/luodaoyi/codex-useage-win/releases/latest)
+[![Release Date](https://img.shields.io/github/release-date/luodaoyi/codex-useage-win)](https://github.com/luodaoyi/codex-useage-win/releases/latest)
+[![Total Downloads](https://img.shields.io/github/downloads/luodaoyi/codex-useage-win/total)](https://github.com/luodaoyi/codex-useage-win/releases)
+[![Stars](https://img.shields.io/github/stars/luodaoyi/codex-useage-win?style=flat)](https://github.com/luodaoyi/codex-useage-win/stargazers)
+
 它会读取当前 Codex 账号的限额信息，在桌面上显示一个可拖动、可缩放的固定布局面板，用来观察：
 
 - `5 小时限额` 已用/剩余
@@ -15,9 +23,19 @@
 
 ![CodexUsageBar 示例](img.png)
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=luodaoyi%2Fcodex-useage-win&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=luodaoyi/codex-useage-win&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=luodaoyi/codex-useage-win&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=luodaoyi/codex-useage-win&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## 功能
 
-- 原生 `Win32 + GDI + WinHTTP`
+- 原生 `Win32 + Direct2D + DirectWrite + WinHTTP`
 - 无 `C#`、无 `WebView`
 - 读取 `%USERPROFILE%\.codex\auth.json` 或 `%CODEX_HOME%\auth.json`
 - 请求 `GET https://chatgpt.com/backend-api/wham/usage`
@@ -28,6 +46,8 @@
 - 桌面浮层挂件，可拖动、可缩放
 - 根据当前进度状态切换颜色
 - 支持开机自启开关
+- 支持 `Always on top` 置顶开关
+- 支持 `Lock position` 固定位置开关
 
 ## 刷新策略
 
@@ -43,6 +63,8 @@
 - 右键菜单：
   - `Refresh now`
   - `Launch at startup`
+  - `Always on top`
+  - `Lock position`
   - `Reset widget position`
   - `Exit`
 
