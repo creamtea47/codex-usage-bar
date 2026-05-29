@@ -34,10 +34,15 @@ constexpr UINT kCommandRefreshInterval5Minutes = 12;
 constexpr UINT kCommandRefreshInterval10Minutes = 13;
 constexpr UINT kCommandRefreshInterval30Minutes = 14;
 constexpr UINT kCommandCheckVersion = 15;
+constexpr UINT kCommandFullMode = 16;
+constexpr UINT kCommandTaskbarMode = 17;
 constexpr int kDefaultWidgetWidth = 820;
 constexpr int kMinimumWidgetWidth = 640;
 constexpr int kSimpleDefaultWidgetWidth = 240;
 constexpr int kSimpleMinimumWidgetWidth = 220;
+constexpr int kTaskbarDefaultWidgetWidth = 184;
+constexpr int kTaskbarMinimumWidgetWidth = 160;
+constexpr int kTaskbarWidgetHeight = 46;
 constexpr int kDesktopMargin = 18;
 constexpr int kHorizontalPadding = 12;
 constexpr int kVerticalPadding = 10;
@@ -133,6 +138,10 @@ int CalculateDetailedMinimumWidgetHeight(HWND hwnd, int width) {
 
 int CalculateSimpleMinimumWidgetHeight(HWND hwnd) {
     return ScaleForDpi(hwnd, 108);
+}
+
+int CalculateTaskbarWidgetHeight(HWND hwnd) {
+    return ScaleForDpi(hwnd, kTaskbarWidgetHeight);
 }
 
 RECT ShrinkRect(const RECT& rect, int dx, int dy) {
@@ -342,8 +351,15 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         }
 
         case WM_THEMECHANGED:
+            RefreshTheme();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+
         case WM_SETTINGCHANGE:
             RefreshTheme();
+            if (taskbarMode_) {
+                UpdateWindowBounds(false);
+            }
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
 
@@ -466,11 +482,48 @@ RECT AppBarWindow::GetDesktopClientRect() const {
     return rect;
 }
 
+bool AppBarWindow::GetCurrentMonitorInfo(MONITORINFO& monitorInfo) const {
+    monitorInfo = {};
+    monitorInfo.cbSize = sizeof(MONITORINFO);
+
+    HMONITOR monitor = nullptr;
+    if (hwnd_ != nullptr) {
+        monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+    }
+    if (monitor == nullptr && hasSavedRect_) {
+        POINT center = {
+            savedRect_.left + RectWidth(savedRect_) / 2,
+            savedRect_.top + RectHeight(savedRect_) / 2,
+        };
+        monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+    }
+    if (monitor == nullptr) {
+        POINT origin = { 0, 0 };
+        monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTONEAREST);
+    }
+
+    return monitor != nullptr && GetMonitorInfoW(monitor, &monitorInfo) != FALSE;
+}
+
+RECT AppBarWindow::GetCurrentMonitorWorkRect() const {
+    MONITORINFO monitorInfo = {};
+    if (GetCurrentMonitorInfo(monitorInfo)) {
+        return monitorInfo.rcWork;
+    }
+    return GetDesktopClientRect();
+}
+
 int AppBarWindow::GetMinimumWidgetWidth() const {
+    if (taskbarMode_) {
+        return ScaleForDpi(hwnd_, kTaskbarMinimumWidgetWidth);
+    }
     return ScaleForDpi(hwnd_, simpleMode_ ? kSimpleMinimumWidgetWidth : kMinimumWidgetWidth);
 }
 
 int AppBarWindow::GetMinimumWidgetHeight(int width) const {
+    if (taskbarMode_) {
+        return CalculateTaskbarWidgetHeight(hwnd_);
+    }
     if (simpleMode_) {
         return CalculateSimpleMinimumWidgetHeight(hwnd_);
     }
@@ -539,6 +592,10 @@ std::wstring AppBarWindow::GetVersionStatusText(bool compact) const {
 }
 
 RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
+    if (taskbarMode_) {
+        return BuildTaskbarDockRect();
+    }
+
     const int margin = ScaleForDpi(hwnd_, kDesktopMargin);
     const int width = ScaleForDpi(hwnd_, simpleMode_ ? kSimpleDefaultWidgetWidth : kDefaultWidgetWidth);
     const int height = GetMinimumWidgetHeight(width);
@@ -550,8 +607,46 @@ RECT AppBarWindow::BuildDefaultRect(const RECT& desktopRect) const {
     return rect;
 }
 
+RECT AppBarWindow::BuildTaskbarDockRect() const {
+    MONITORINFO monitorInfo = {};
+    RECT monitorRect = GetDesktopClientRect();
+    RECT workRect = monitorRect;
+    if (GetCurrentMonitorInfo(monitorInfo)) {
+        monitorRect = monitorInfo.rcMonitor;
+        workRect = monitorInfo.rcWork;
+    }
+
+    const int margin = ScaleForDpi(hwnd_, 4);
+    const int width = ScaleForDpi(hwnd_, kTaskbarDefaultWidgetWidth);
+    const int height = CalculateTaskbarWidgetHeight(hwnd_);
+    const int leftGap = std::max(0, static_cast<int>(workRect.left - monitorRect.left));
+    const int topGap = std::max(0, static_cast<int>(workRect.top - monitorRect.top));
+    const int rightGap = std::max(0, static_cast<int>(monitorRect.right - workRect.right));
+    const int bottomGap = std::max(0, static_cast<int>(monitorRect.bottom - workRect.bottom));
+    const int largestGap = std::max({ leftGap, topGap, rightGap, bottomGap });
+
+    RECT rect = {};
+    if (leftGap == largestGap && leftGap > 0) {
+        rect.left = workRect.left + margin;
+        rect.top = workRect.bottom - height - margin;
+    } else if (rightGap == largestGap && rightGap > 0) {
+        rect.left = workRect.right - width - margin;
+        rect.top = workRect.bottom - height - margin;
+    } else if (topGap == largestGap && topGap > 0) {
+        rect.left = workRect.right - width - margin;
+        rect.top = workRect.top + margin;
+    } else {
+        rect.left = workRect.right - width - margin;
+        rect.top = workRect.bottom - height - margin;
+    }
+
+    rect.right = rect.left + width;
+    rect.bottom = rect.top + height;
+    return rect;
+}
+
 RECT AppBarWindow::ClampRectToDesktop(RECT rect) const {
-    const RECT desktopRect = GetDesktopClientRect();
+    const RECT desktopRect = taskbarMode_ ? GetCurrentMonitorWorkRect() : GetDesktopClientRect();
     const int minWidth = GetMinimumWidgetWidth();
     const int minHeight = GetMinimumWidgetHeight(std::max(RectWidth(rect), minWidth));
 
@@ -591,17 +686,29 @@ RECT AppBarWindow::ClampRectToDesktop(RECT rect) const {
 }
 
 void AppBarWindow::UpdateWindowBounds(bool useSavedPosition) {
-    const bool usingPersistedRect = useSavedPosition && hasSavedRect_;
+    const bool usingPersistedRect = useSavedPosition && hasSavedRect_ && !taskbarMode_;
     RECT rect = usingPersistedRect ? savedRect_ : BuildDefaultRect(GetDesktopClientRect());
     rect = ClampRectToDesktop(rect);
     savedRect_ = rect;
     hasSavedRect_ = true;
     MoveWindow(hwnd_, rect.left, rect.top, RectWidth(rect), RectHeight(rect), TRUE);
-    SetWindowPos(hwnd_, alwaysOnTop_ ? HWND_TOPMOST : HWND_NOTOPMOST,
+    SetWindowPos(hwnd_, (alwaysOnTop_ || taskbarMode_) ? HWND_TOPMOST : HWND_NOTOPMOST,
         rect.left, rect.top, RectWidth(rect), RectHeight(rect), SWP_NOACTIVATE);
     if (!usingPersistedRect) {
         SaveSettings();
     }
+}
+
+void AppBarWindow::SetDisplayMode(bool simpleMode, bool taskbarMode) {
+    const bool normalizedSimpleMode = simpleMode && !taskbarMode;
+    if (simpleMode_ == normalizedSimpleMode && taskbarMode_ == taskbarMode) {
+        return;
+    }
+
+    simpleMode_ = normalizedSimpleMode;
+    taskbarMode_ = taskbarMode;
+    UpdateWindowBounds(false);
+    InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
 void AppBarWindow::LoadSettings() {
@@ -610,6 +717,10 @@ void AppBarWindow::LoadSettings() {
     alwaysOnTop_ = GetPrivateProfileIntW(L"layout", L"always_on_top", 0, path.c_str()) != 0;
     lockPosition_ = GetPrivateProfileIntW(L"layout", L"lock_position", 0, path.c_str()) != 0;
     simpleMode_ = GetPrivateProfileIntW(L"layout", L"simple_mode", 0, path.c_str()) != 0;
+    taskbarMode_ = GetPrivateProfileIntW(L"layout", L"taskbar_mode", 0, path.c_str()) != 0;
+    if (taskbarMode_) {
+        simpleMode_ = false;
+    }
     refreshIntervalSeconds_ = SanitizeRefreshIntervalSeconds(
         GetPrivateProfileIntW(L"layout", L"refresh_interval_seconds", 60, path.c_str()));
     refreshCountdownSeconds_ = refreshIntervalSeconds_;
@@ -648,6 +759,7 @@ void AppBarWindow::SaveSettings() const {
     WritePrivateProfileStringW(L"layout", L"always_on_top", alwaysOnTop_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"lock_position", lockPosition_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"simple_mode", simpleMode_ ? L"1" : L"0", path.c_str());
+    WritePrivateProfileStringW(L"layout", L"taskbar_mode", taskbarMode_ ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"refresh_interval_seconds", std::to_wstring(refreshIntervalSeconds_).c_str(), path.c_str());
     WritePrivateProfileStringW(L"layout", L"language", language_ == Language::Chinese ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"layout", L"x", std::to_wstring(savedRect_.left).c_str(), path.c_str());
@@ -842,6 +954,9 @@ void AppBarWindow::DiscardDeviceResources() {
 
 AppBarWindow::DragMode AppBarWindow::HitTestDragMode(POINT clientPoint) const {
     if (lockPosition_) {
+        return DragMode::None;
+    }
+    if (taskbarMode_) {
         return DragMode::None;
     }
 
@@ -1110,6 +1225,61 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         }
         return metrics.widthIncludingTrailingWhitespace;
     };
+
+    if (taskbarMode_) {
+        fillRect(MakeRect(clientRect.left + 1, clientRect.top + 2, clientRect.right + 1, clientRect.bottom + 2), shadow);
+        fillRect(clientRect, background);
+        drawRectBorder(clientRect, border);
+
+        const bool exhausted = snapshot_.success &&
+            (snapshot_.fiveHour.remainingPercent <= 0 || snapshot_.weekly.remainingPercent <= 0);
+        const bool warning = snapshot_.success &&
+            !exhausted &&
+            (snapshot_.fiveHour.remainingPercent <= 15 || snapshot_.weekly.remainingPercent <= 15 || pace.isOver);
+        const COLORREF statusColor = !snapshot_.success
+            ? textSecondary
+            : (exhausted ? (lightTheme_ ? RGB(196, 54, 32) : RGB(255, 144, 120))
+                         : (warning ? (lightTheme_ ? RGB(184, 121, 38) : RGB(233, 180, 91))
+                                    : (lightTheme_ ? RGB(21, 148, 78) : RGB(118, 216, 163))));
+        const COLORREF leftPane = lightTheme_ ? RGB(224, 246, 239) : RGB(31, 58, 46);
+        const COLORREF rightPane = lightTheme_ ? RGB(239, 247, 226) : RGB(47, 59, 35);
+        const int stripWidth = ScaleForDpi(hwnd_, 4);
+        const int innerPad = ScaleForDpi(hwnd_, 8);
+        const int dividerWidth = ScaleForDpi(hwnd_, 1);
+
+        RECT statusStrip = MakeRect(clientRect.left, clientRect.top, clientRect.left + stripWidth, clientRect.bottom);
+        fillRect(statusStrip, statusColor);
+
+        RECT contentRect = MakeRect(statusStrip.right, clientRect.top, clientRect.right, clientRect.bottom);
+        const int columnWidth = (RectWidth(contentRect) - dividerWidth) / 2;
+        RECT fiveRect = MakeRect(contentRect.left, contentRect.top, contentRect.left + columnWidth, contentRect.bottom);
+        RECT weekRect = MakeRect(fiveRect.right + dividerWidth, contentRect.top, contentRect.right, contentRect.bottom);
+        fillRect(fiveRect, leftPane);
+        fillRect(weekRect, rightPane);
+        fillRect(MakeRect(fiveRect.right, contentRect.top + ScaleForDpi(hwnd_, 6),
+            fiveRect.right + dividerWidth, contentRect.bottom - ScaleForDpi(hwnd_, 6)), border);
+
+        const std::wstring fiveValue = snapshot_.success ? FormatPercent(snapshot_.fiveHour.remainingPercent) : L"--";
+        const std::wstring weekValue = snapshot_.success ? FormatPercent(snapshot_.weekly.remainingPercent) : L"--";
+        RECT fiveLabelRect = MakeRect(fiveRect.left + innerPad, fiveRect.top + ScaleForDpi(hwnd_, 4),
+            fiveRect.right - innerPad, fiveRect.top + ScaleForDpi(hwnd_, 18));
+        RECT fiveValueRect = MakeRect(fiveRect.left + innerPad, fiveRect.top + ScaleForDpi(hwnd_, 16),
+            fiveRect.right - innerPad, fiveRect.bottom - ScaleForDpi(hwnd_, 3));
+        RECT weekLabelRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 4),
+            weekRect.right - innerPad, weekRect.top + ScaleForDpi(hwnd_, 18));
+        RECT weekValueRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 16),
+            weekRect.right - innerPad, weekRect.bottom - ScaleForDpi(hwnd_, 3));
+
+        drawTextBlock(textFormatFoot_.Get(), LocalizeText(L"5h left", L"5小时剩余"), fiveLabelRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, true);
+        drawTextBlock(textFormatMetricValue_.Get(), fiveValue, fiveValueRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        drawTextBlock(textFormatFoot_.Get(), LocalizeText(L"Week left", L"本周剩余"), weekLabelRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, true);
+        drawTextBlock(textFormatMetricValue_.Get(), weekValue, weekValueRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        return;
+    }
 
     if (simpleMode_) {
         fillRect(MakeRect(clientRect.left + 2, clientRect.top + 3, clientRect.right + 2, clientRect.bottom + 3), shadow);
@@ -1382,7 +1552,11 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     HMENU menu = CreatePopupMenu();
     HMENU languageMenu = CreatePopupMenu();
     HMENU refreshIntervalMenu = CreatePopupMenu();
+    HMENU displayModeMenu = CreatePopupMenu();
     const bool launchAtStartup = IsLaunchAtStartupEnabled();
+    const UINT alwaysOnTopMenuState = MF_STRING
+        | ((alwaysOnTop_ || taskbarMode_) ? MF_CHECKED : MF_UNCHECKED)
+        | (taskbarMode_ ? MF_GRAYED : 0);
     AppendMenuW(languageMenu, MF_STRING | (language_ == Language::English ? MF_CHECKED : MF_UNCHECKED),
         kCommandLanguageEnglish, L"English");
     AppendMenuW(languageMenu, MF_STRING | (language_ == Language::Chinese ? MF_CHECKED : MF_UNCHECKED),
@@ -1397,18 +1571,22 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
         kCommandRefreshInterval10Minutes, LocalizeText(L"10 minutes", L"10分钟"));
     AppendMenuW(refreshIntervalMenu, MF_STRING | (refreshIntervalSeconds_ == 1800 ? MF_CHECKED : MF_UNCHECKED),
         kCommandRefreshInterval30Minutes, LocalizeText(L"30 minutes", L"30分钟"));
+    AppendMenuW(displayModeMenu, MF_STRING | (!simpleMode_ && !taskbarMode_ ? MF_CHECKED : MF_UNCHECKED),
+        kCommandFullMode, LocalizeText(L"Full mode", L"完整模式"));
+    AppendMenuW(displayModeMenu, MF_STRING | (simpleMode_ ? MF_CHECKED : MF_UNCHECKED),
+        kCommandSimpleMode, LocalizeText(L"Simple mode", L"简单模式"));
+    AppendMenuW(displayModeMenu, MF_STRING | (taskbarMode_ ? MF_CHECKED : MF_UNCHECKED),
+        kCommandTaskbarMode, LocalizeText(L"Taskbar mode", L"任务栏模式"));
 
     AppendMenuW(menu, MF_STRING, kCommandRefresh, LocalizeText(L"Refresh now", L"立即刷新"));
     AppendMenuW(menu, MF_STRING, kCommandCheckVersion, LocalizeText(L"Check version", L"检查版本"));
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(refreshIntervalMenu), LocalizeText(L"Refresh interval", L"刷新间隔"));
     AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED),
         kCommandLaunchAtStartup, LocalizeText(L"Launch at startup", L"开机自启"));
-    AppendMenuW(menu, MF_STRING | (alwaysOnTop_ ? MF_CHECKED : MF_UNCHECKED),
-        kCommandAlwaysOnTop, LocalizeText(L"Always on top", L"始终置顶"));
+    AppendMenuW(menu, alwaysOnTopMenuState, kCommandAlwaysOnTop, LocalizeText(L"Always on top", L"始终置顶"));
     AppendMenuW(menu, MF_STRING | (lockPosition_ ? MF_CHECKED : MF_UNCHECKED),
         kCommandLockPosition, LocalizeText(L"Lock position", L"固定位置"));
-    AppendMenuW(menu, MF_STRING | (simpleMode_ ? MF_CHECKED : MF_UNCHECKED),
-        kCommandSimpleMode, LocalizeText(L"Simple mode", L"简单模式"));
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(displayModeMenu), LocalizeText(L"Display mode", L"显示模式"));
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(languageMenu), LocalizeText(L"Language", L"语言"));
     AppendMenuW(menu, MF_STRING, kCommandResetPosition, LocalizeText(L"Reset widget position", L"重置组件位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1440,11 +1618,12 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
     } else if (command == kCommandLockPosition) {
         lockPosition_ = !lockPosition_;
         SaveSettings();
+    } else if (command == kCommandFullMode) {
+        SetDisplayMode(false, false);
     } else if (command == kCommandSimpleMode) {
-        simpleMode_ = !simpleMode_;
-        UpdateWindowBounds(true);
-        SaveSettings();
-        InvalidateRect(hwnd_, nullptr, TRUE);
+        SetDisplayMode(true, false);
+    } else if (command == kCommandTaskbarMode) {
+        SetDisplayMode(false, true);
     } else if (command == kCommandLanguageEnglish) {
         SetLanguage(Language::English);
     } else if (command == kCommandLanguageChinese) {

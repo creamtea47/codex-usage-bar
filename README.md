@@ -40,14 +40,16 @@ The widget reads usage limits from the current Codex account and displays them i
 - No `C#`, no `WebView`
 - Reads `%USERPROFILE%\.codex\auth.json` or `%CODEX_HOME%\auth.json`
 - Requests `GET https://chatgpt.com/backend-api/wham/usage`
-- Two display modes:
+- Three display modes:
   - Standard mode: hero status, four metrics, weekly pace bar, budget marker, footer details, refresh time, and countdown
   - Simple mode: compact `5h left` and `Week left` cards with remaining percentages and status text
+  - Taskbar mode: a smaller remaining-quota strip that snaps near the current monitor's taskbar edge and stays docked there
 - Desktop overlay widget with drag and resize support
 - Dynamic coloring based on current pace
 - Launch at startup toggle
 - Always-on-top toggle
 - Lock-position toggle
+- Display mode switch for full, simple, and taskbar layouts
 - UI language switch between English and Chinese
 
 ## Refresh Behavior
@@ -64,12 +66,13 @@ The widget reads usage limits from the current Codex account and displays them i
 
 - Drag the widget body to move it
 - Drag the right edge, bottom edge, or bottom-right corner to resize it
+- Taskbar mode stays docked and does not support dragging or resizing
 - Right-click menu:
   - `Refresh now`
   - `Launch at startup`
   - `Always on top`
   - `Lock position`
-  - `Simple mode`
+  - `Display mode`
   - `Language`
   - `Reset widget position`
   - `Exit`

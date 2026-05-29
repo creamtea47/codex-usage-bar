@@ -42,9 +42,13 @@ private:
 
     void RegisterWindowClass();
     RECT GetDesktopClientRect() const;
+    bool GetCurrentMonitorInfo(MONITORINFO& monitorInfo) const;
+    RECT GetCurrentMonitorWorkRect() const;
     RECT BuildDefaultRect(const RECT& desktopRect) const;
+    RECT BuildTaskbarDockRect() const;
     RECT ClampRectToDesktop(RECT rect) const;
     void UpdateWindowBounds(bool useSavedPosition);
+    void SetDisplayMode(bool simpleMode, bool taskbarMode);
 
     void LoadSettings();
     void SaveSettings() const;
@@ -97,6 +101,7 @@ private:
     bool alwaysOnTop_ = false;
     bool lockPosition_ = false;
     bool simpleMode_ = false;
+    bool taskbarMode_ = false;
     bool hasReleaseCheckResult_ = false;
     bool updateAvailable_ = false;
     Language language_ = Language::English;
