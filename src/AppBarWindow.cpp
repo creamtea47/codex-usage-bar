@@ -1143,7 +1143,7 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
             clientRect.right - innerPad - ScaleForDpi(hwnd_, 66), clientRect.top + topBandHeight);
         RECT statusRect = MakeRect(clientRect.right - innerPad - ScaleForDpi(hwnd_, 54), clientRect.top + ScaleForDpi(hwnd_, 8),
             clientRect.right - innerPad, clientRect.top + ScaleForDpi(hwnd_, 28));
-        drawTextBlock(textFormatMetricValue_.Get(), LocalizeText(L"Usage", L"额度用量"), titleRect, textPrimary,
+        drawTextBlock(textFormatMetricValue_.Get(), LocalizeText(L"Remaining", L"剩余额度"), titleRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
         drawTextBlock(textFormatMetricLabel_.Get(), statusText, statusRect, statusColor,
             DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
@@ -1156,17 +1156,17 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         fillRect(dayRect, dayCard);
         fillRect(weekRect, weekCard);
 
-        const std::wstring dayValue = snapshot_.success ? FormatPercent(snapshot_.fiveHour.usedPercent) : L"--";
-        const std::wstring weekValue = snapshot_.success ? FormatPercent(snapshot_.weekly.usedPercent) : L"--";
+        const std::wstring dayValue = snapshot_.success ? FormatPercent(snapshot_.fiveHour.remainingPercent) : L"--";
+        const std::wstring weekValue = snapshot_.success ? FormatPercent(snapshot_.weekly.remainingPercent) : L"--";
         RECT dayLabelRect = MakeRect(dayRect.left + innerPad, dayRect.top + ScaleForDpi(hwnd_, 8), dayRect.right - innerPad, dayRect.top + ScaleForDpi(hwnd_, 24));
         RECT dayValueRect = MakeRect(dayRect.left + innerPad, dayRect.top + ScaleForDpi(hwnd_, 24), dayRect.right - innerPad, dayRect.bottom - ScaleForDpi(hwnd_, 8));
         RECT weekLabelRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 8), weekRect.right - innerPad, weekRect.top + ScaleForDpi(hwnd_, 24));
         RECT weekValueRect = MakeRect(weekRect.left + innerPad, weekRect.top + ScaleForDpi(hwnd_, 24), weekRect.right - innerPad, weekRect.bottom - ScaleForDpi(hwnd_, 8));
-        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"5 Hours", L"5小时"), dayLabelRect, textSecondary,
+        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"5h left", L"5小时剩余"), dayLabelRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         drawTextBlock(textFormatDelta_.Get(), dayValue, dayValueRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
-        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"This Week", L"本周"), weekLabelRect, textSecondary,
+        drawTextBlock(textFormatMetricLabel_.Get(), LocalizeText(L"Week left", L"本周剩余"), weekLabelRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         drawTextBlock(textFormatDelta_.Get(), weekValue, weekValueRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
@@ -1318,8 +1318,8 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         std::wstring(LocalizeText(L"Elapsed: ", L"已用时间: ")) + FormatDuration(pace.elapsedSeconds),
         std::wstring(LocalizeText(L"Remaining: ", L"剩余时间: ")) + FormatDuration(pace.remainingSeconds),
         language_ == Language::Chinese
-            ? (L"5 小时限额: " + FormatPercent(snapshot_.fiveHour.usedPercent) + L" 已用，" + FormatPercent(snapshot_.fiveHour.remainingPercent) + L" 剩余")
-            : (L"5-hour quota: " + FormatPercent(snapshot_.fiveHour.usedPercent) + L" used, " + FormatPercent(snapshot_.fiveHour.remainingPercent) + L" remaining"),
+            ? (L"5 小时剩余: " + FormatPercent(snapshot_.fiveHour.remainingPercent) + L"（已用 " + FormatPercent(snapshot_.fiveHour.usedPercent) + L"）")
+            : (L"5-hour remaining: " + FormatPercent(snapshot_.fiveHour.remainingPercent) + L" (" + FormatPercent(snapshot_.fiveHour.usedPercent) + L" used)"),
     };
 
     const std::wstring refreshTimeText = lastSuccessfulRefreshUnixSeconds_ > 0

@@ -42,7 +42,7 @@ The widget reads usage limits from the current Codex account and displays them i
 - Requests `GET https://chatgpt.com/backend-api/wham/usage`
 - Two display modes:
   - Standard mode: hero status, four metrics, weekly pace bar, budget marker, footer details, refresh time, and countdown
-  - Simple mode: compact `Today` and `This Week` cards with status text
+  - Simple mode: compact `5h left` and `Week left` cards with remaining percentages and status text
 - Desktop overlay widget with drag and resize support
 - Dynamic coloring based on current pace
 - Launch at startup toggle
