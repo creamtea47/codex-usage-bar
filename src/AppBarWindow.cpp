@@ -416,21 +416,7 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
 
         case WM_LBUTTONUP:
             if (dragMode_ != DragMode::None) {
-                POINT screenPoint = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-                ClientToScreen(hwnd_, &screenPoint);
-                const DragMode completedDragMode = dragMode_;
-                const int dragDistanceX = std::abs(screenPoint.x - dragStartPoint_.x);
-                const int dragDistanceY = std::abs(screenPoint.y - dragStartPoint_.y);
-                const int dragThresholdX = std::max(1, GetSystemMetrics(SM_CXDRAG));
-                const int dragThresholdY = std::max(1, GetSystemMetrics(SM_CYDRAG));
                 EndDrag(true);
-                if (completedDragMode == DragMode::Move
-                    && dragDistanceX < dragThresholdX
-                    && dragDistanceY < dragThresholdY) {
-                    RequestRefresh(true);
-                }
-            } else {
-                RequestRefresh(true);
             }
             return 0;
 

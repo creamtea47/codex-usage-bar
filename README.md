@@ -56,7 +56,6 @@ The widget reads usage limits from the current Codex account and displays them i
 
 - Remote usage API refresh: every `60` seconds
 - Local countdown repaint: every `1` second
-- Left click on the widget: force refresh immediately
 - Bottom-right area shows:
   - last successful refresh time
   - countdown to the next automatic refresh
