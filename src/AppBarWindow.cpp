@@ -416,7 +416,19 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
 
         case WM_LBUTTONUP:
             if (dragMode_ != DragMode::None) {
+                POINT screenPoint = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                ClientToScreen(hwnd_, &screenPoint);
+                const DragMode completedDragMode = dragMode_;
+                const int dragDistanceX = std::abs(screenPoint.x - dragStartPoint_.x);
+                const int dragDistanceY = std::abs(screenPoint.y - dragStartPoint_.y);
+                const int dragThresholdX = std::max(1, GetSystemMetrics(SM_CXDRAG));
+                const int dragThresholdY = std::max(1, GetSystemMetrics(SM_CYDRAG));
                 EndDrag(true);
+                if (completedDragMode == DragMode::Move
+                    && dragDistanceX < dragThresholdX
+                    && dragDistanceY < dragThresholdY) {
+                    RequestRefresh(true);
+                }
             } else {
                 RequestRefresh(true);
             }
@@ -1286,18 +1298,23 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         fillRect(clientRect, background);
         drawRectBorder(clientRect, border);
 
+        const bool loadFailed = !snapshot_.success && !snapshot_.errorMessage.empty();
         const bool exhausted = snapshot_.success &&
             (snapshot_.fiveHour.remainingPercent <= 0 || snapshot_.weekly.remainingPercent <= 0);
         const bool warning = snapshot_.success &&
             !exhausted &&
             (snapshot_.fiveHour.remainingPercent <= 15 || snapshot_.weekly.remainingPercent <= 15 || pace.isOver);
         const wchar_t* statusText = !snapshot_.success
-            ? LocalizeText(L"Loading", L"加载中")
+            ? (loadFailed
+                ? LocalizeText(L"Failed", L"失败")
+                : LocalizeText(L"Loading", L"加载中"))
             : (exhausted
                 ? LocalizeText(L"Exhausted", L"用尽")
                 : (warning ? LocalizeText(L"Tight", L"紧张") : LocalizeText(L"Normal", L"正常")));
         const COLORREF statusColor = !snapshot_.success
-            ? textSecondary
+            ? (loadFailed
+                ? (lightTheme_ ? RGB(196, 54, 32) : RGB(255, 144, 120))
+                : textSecondary)
             : (exhausted ? (lightTheme_ ? RGB(196, 54, 32) : RGB(255, 144, 120))
                          : (warning ? (lightTheme_ ? RGB(184, 121, 38) : RGB(233, 180, 91))
                                     : (lightTheme_ ? RGB(21, 148, 78) : RGB(118, 216, 163))));
@@ -1371,21 +1388,41 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         drawTextBlock(textFormatKicker_.Get(), LocalizeText(L"Codex Usage Budget", L"Codex 用量预算"), kickerRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
+        const bool loadFailed = !snapshot_.errorMessage.empty();
         RECT titleRect = MakeRect(heroRect.left + padX, kickerRect.bottom + ScaleForDpi(hwnd_, 6),
             heroRect.right - padX, heroRect.bottom - padY);
-        drawTextBlock(textFormatTitle_.Get(), LocalizeText(L"Loading usage data", L"正在加载用量信息"), titleRect, textPrimary,
+        drawTextBlock(textFormatTitle_.Get(),
+            loadFailed
+                ? LocalizeText(L"Failed to load usage data", L"加载用量失败")
+                : LocalizeText(L"Loading usage data", L"正在加载用量信息"),
+            titleRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP, false);
 
         if (!snapshot_.errorMessage.empty()) {
-            RECT errorRect = MakeRect(clientRect.left + padX, heroRect.bottom + sectionGap, clientRect.right - padX, clientRect.bottom - padY);
+            RECT errorRect = MakeRect(clientRect.left + padX, heroRect.bottom + sectionGap,
+                clientRect.right - padX, clientRect.bottom - ScaleForDpi(hwnd_, 42));
             drawTextBlock(textFormatFoot_.Get(), snapshot_.errorMessage, errorRect, RGB(215, 73, 73),
                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_WORD_WRAPPING_WRAP, false);
         }
 
+        const std::wstring refreshTimeText = lastSuccessfulRefreshUnixSeconds_ > 0
+            ? (std::wstring(LocalizeText(L"Refresh: ", L"刷新: ")) + FormatClockTime(lastSuccessfulRefreshUnixSeconds_))
+            : (std::wstring(LocalizeText(L"Refresh: ", L"刷新: ")) + L"--");
+        const std::wstring refreshCountdownText = refreshInFlight_
+            ? std::wstring(LocalizeText(L"Countdown: Refreshing...", L"倒计时: 刷新中..."))
+            : (std::wstring(LocalizeText(L"Countdown: ", L"倒计时: ")) + FormatRefreshCountdown(refreshCountdownSeconds_));
         RECT versionRect = MakeRect(clientRect.left + padX, clientRect.bottom - ScaleForDpi(hwnd_, 22),
             clientRect.left + padX + ScaleForDpi(hwnd_, 220), clientRect.bottom - ScaleForDpi(hwnd_, 6));
+        RECT refreshTimeRect = MakeRect(clientRect.right - ScaleForDpi(hwnd_, 232), clientRect.bottom - ScaleForDpi(hwnd_, 38),
+            clientRect.right - padX, clientRect.bottom - ScaleForDpi(hwnd_, 22));
+        RECT refreshCountdownRect = MakeRect(clientRect.right - ScaleForDpi(hwnd_, 232), clientRect.bottom - ScaleForDpi(hwnd_, 22),
+            clientRect.right - padX, clientRect.bottom - ScaleForDpi(hwnd_, 6));
         drawTextBlock(textFormatFoot_.Get(), GetVersionStatusText(true), versionRect, updateAvailable_ ? heroValue : textSecondary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        drawTextBlock(textFormatFoot_.Get(), refreshTimeText, refreshTimeRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        drawTextBlock(textFormatFoot_.Get(), refreshCountdownText, refreshCountdownRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
         return;
     }
 

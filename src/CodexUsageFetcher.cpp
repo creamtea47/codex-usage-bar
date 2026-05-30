@@ -153,6 +153,9 @@ std::optional<std::string> HttpGetJson(const std::wstring& userAgent,
         if (statusCode != 200) {
             if (errorMessage != nullptr) {
                 *errorMessage = host + path + L" returned HTTP " + std::to_wstring(statusCode);
+                if (statusCode == 401) {
+                    *errorMessage += L"; auth.json access_token may be expired and automatic refresh is not implemented";
+                }
             }
             break;
         }
