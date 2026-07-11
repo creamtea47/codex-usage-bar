@@ -21,8 +21,10 @@ public:
 private:
     static constexpr UINT kUsageUpdatedMessage = WM_APP + 1;
     static constexpr UINT kReleaseVersionUpdatedMessage = WM_APP + 2;
+    static constexpr UINT kResetCreditConsumedMessage = WM_APP + 3;
     static constexpr UINT_PTR kCountdownTimerId = 1;
     static constexpr UINT_PTR kRefreshTimerId = 2;
+    static constexpr UINT_PTR kResetConfirmTimerId = 3;
 
     enum class Language {
         English = 0,
@@ -68,6 +70,13 @@ private:
     void OnUsageUpdated(UsageSnapshot* snapshot);
     void RequestLatestReleaseCheck(bool force);
     void OnLatestReleaseChecked(ReleaseVersionInfo* info);
+    void OnResetCreditConsumed(ConsumeResetCreditResult* result);
+    void RequestConsumeResetCredit();
+    bool TryHandleResetCreditButtonClick(POINT clientPoint);
+    RECT GetResetCreditButtonRect(const RECT& clientRect) const;
+    std::wstring BuildResetCreditsSummaryText() const;
+    std::wstring BuildResetCreditsExpiryText() const;
+    std::wstring CreateRedeemRequestId() const;
 
     HRESULT CreateDeviceIndependentResources();
     HRESULT CreateDeviceResources();
@@ -97,6 +106,7 @@ private:
     HWND hwnd_ = nullptr;
     std::atomic_bool refreshInFlight_ = false;
     std::atomic_bool releaseCheckInFlight_ = false;
+    std::atomic_bool resetCreditInFlight_ = false;
     bool lightTheme_ = false;
     bool alwaysOnTop_ = false;
     bool lockPosition_ = false;
@@ -104,6 +114,8 @@ private:
     bool taskbarMode_ = false;
     bool hasReleaseCheckResult_ = false;
     bool updateAvailable_ = false;
+    // First click arms the button; second click within the window sends consume.
+    bool resetCreditConfirmArmed_ = false;
     Language language_ = Language::English;
     bool hasSavedRect_ = false;
     RECT savedRect_ = {};
@@ -118,6 +130,8 @@ private:
     int releaseCheckCountdownSeconds_ = 6 * 60 * 60;
     std::wstring latestReleaseTag_;
     std::wstring releaseCheckErrorMessage_;
+    std::wstring resetCreditActionMessage_;
+    RECT resetCreditButtonRect_ = {};
 
     UsageSnapshot snapshot_;
     CodexUsageFetcher fetcher_;

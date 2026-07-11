@@ -10,6 +10,8 @@
 #include <ctime>
 #include <filesystem>
 #include <memory>
+#include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -122,6 +124,7 @@ int CalculateDetailedMinimumWidgetHeight(HWND hwnd, int width) {
     const int heroHeight = ScaleForDpi(hwnd, 76);
     const int metricsHeight = ScaleForDpi(hwnd, 52);
     const int meterInfoHeight = ScaleForDpi(hwnd, 30);
+    const int resetCreditsHeight = ScaleForDpi(hwnd, 34);
     const int footerRows = width >= ScaleForDpi(hwnd, 1040) ? 2 : 3;
     const int footerHeight = ScaleForDpi(hwnd, 4) + footerRows * ScaleForDpi(hwnd, 18) + ScaleForDpi(hwnd, 8);
 
@@ -133,11 +136,13 @@ int CalculateDetailedMinimumWidgetHeight(HWND hwnd, int width) {
         + ScaleForDpi(hwnd, 6)
         + ScaleForDpi(hwnd, 10)
         + 1
+        + resetCreditsHeight
+        + 1
         + footerHeight;
 }
 
 int CalculateSimpleMinimumWidgetHeight(HWND hwnd) {
-    return ScaleForDpi(hwnd, 108);
+    return ScaleForDpi(hwnd, 132);
 }
 
 int CalculateTaskbarWidgetHeight(HWND hwnd) {
@@ -336,6 +341,10 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             } else if (wParam == kRefreshTimerId) {
                 refreshCountdownSeconds_ = refreshIntervalSeconds_;
                 RequestRefresh(false);
+            } else if (wParam == kResetConfirmTimerId) {
+                KillTimer(hwnd_, kResetConfirmTimerId);
+                resetCreditConfirmArmed_ = false;
+                InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
 
@@ -401,6 +410,9 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             POINT screenPoint = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ClientToScreen(hwnd_, &screenPoint);
             POINT clientPoint = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            if (TryHandleResetCreditButtonClick(clientPoint)) {
+                return 0;
+            }
             BeginDrag(HitTestDragMode(clientPoint), screenPoint);
             return 0;
         }
@@ -446,9 +458,14 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             OnLatestReleaseChecked(reinterpret_cast<ReleaseVersionInfo*>(lParam));
             return 0;
 
+        case kResetCreditConsumedMessage:
+            OnResetCreditConsumed(reinterpret_cast<ConsumeResetCreditResult*>(lParam));
+            return 0;
+
         case WM_DESTROY:
             KillTimer(hwnd_, kCountdownTimerId);
             KillTimer(hwnd_, kRefreshTimerId);
+            KillTimer(hwnd_, kResetConfirmTimerId);
             SaveSettings();
             DiscardTextFormats();
             DiscardDeviceResources();
@@ -1094,6 +1111,165 @@ void AppBarWindow::OnLatestReleaseChecked(ReleaseVersionInfo* info) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+std::wstring AppBarWindow::CreateRedeemRequestId() const {
+    static thread_local std::mt19937_64 rng{ std::random_device{}() };
+    std::uniform_int_distribution<uint32_t> dist32(0, 0xFFFFFFFFu);
+    std::uniform_int_distribution<uint16_t> dist16(0, 0xFFFFu);
+
+    const uint32_t a = dist32(rng);
+    const uint16_t b = dist16(rng);
+    const uint16_t c = static_cast<uint16_t>((dist16(rng) & 0x0FFFu) | 0x4000u);  // UUID version 4
+    const uint16_t d = static_cast<uint16_t>((dist16(rng) & 0x3FFFu) | 0x8000u);  // RFC 4122 variant
+    const uint16_t e1 = dist16(rng);
+    const uint32_t e2 = dist32(rng);
+
+    wchar_t buffer[64] = {};
+    swprintf_s(buffer, L"%08x-%04x-%04x-%04x-%04x%08x", a, b, c, d, e1, e2);
+    return buffer;
+}
+
+std::wstring AppBarWindow::BuildResetCreditsSummaryText() const {
+    if (!snapshot_.success) {
+        return LocalizeText(L"Reset credits: --", L"重置卡: --");
+    }
+    if (!snapshot_.resetCredits.fetched) {
+        if (!snapshot_.resetCredits.errorMessage.empty()) {
+            return LocalizeText(L"Reset credits: unavailable", L"重置卡: 不可用");
+        }
+        return LocalizeText(L"Reset credits: --", L"重置卡: --");
+    }
+    return std::wstring(LocalizeText(L"Reset credits: ", L"重置卡: "))
+        + std::to_wstring(snapshot_.resetCredits.availableCount)
+        + LocalizeText(L" available", L" 张可用");
+}
+
+std::wstring AppBarWindow::BuildResetCreditsExpiryText() const {
+    if (!snapshot_.success || !snapshot_.resetCredits.fetched) {
+        return LocalizeText(L"Expiry: --", L"过期: --");
+    }
+    if (snapshot_.resetCredits.availableCount <= 0) {
+        return LocalizeText(L"Expiry: none", L"过期: 无");
+    }
+    if (!snapshot_.resetCredits.hasNextExpiry) {
+        return LocalizeText(L"Next expiry: none", L"最近过期: 无期限");
+    }
+    return std::wstring(LocalizeText(L"Next expiry: ", L"最近过期: "))
+        + FormatDateTime(snapshot_.resetCredits.nextExpiresAtUnixSeconds);
+}
+
+RECT AppBarWindow::GetResetCreditButtonRect(const RECT& clientRect) const {
+    if (taskbarMode_) {
+        return {};
+    }
+
+    const int padX = ScaleForDpi(hwnd_, simpleMode_ ? 12 : kHorizontalPadding);
+    const int buttonWidth = ScaleForDpi(hwnd_, simpleMode_ ? 56 : 72);
+    const int buttonHeight = ScaleForDpi(hwnd_, simpleMode_ ? 18 : 22);
+
+    if (simpleMode_) {
+        const int footerHeight = ScaleForDpi(hwnd_, 16);
+        const int resetBandHeight = ScaleForDpi(hwnd_, 18);
+        const int buttonTop = clientRect.bottom - footerHeight - resetBandHeight - ScaleForDpi(hwnd_, 2);
+        return MakeRect(
+            clientRect.right - padX - buttonWidth,
+            buttonTop,
+            clientRect.right - padX,
+            buttonTop + buttonHeight);
+    }
+
+    // Full mode: button sits in the reset-credit strip above the footer.
+    // Approximate strip top from the bottom using the same reserved height as layout.
+    const int footerRows = RectWidth(clientRect) >= ScaleForDpi(hwnd_, 1040) ? 2 : 3;
+    const int footerHeight = ScaleForDpi(hwnd_, 4) + footerRows * ScaleForDpi(hwnd_, 18) + ScaleForDpi(hwnd_, 8);
+    const int resetStripHeight = ScaleForDpi(hwnd_, 28);
+    const int buttonTop = clientRect.bottom - footerHeight - resetStripHeight + ScaleForDpi(hwnd_, 3);
+    return MakeRect(
+        clientRect.right - padX - buttonWidth,
+        buttonTop,
+        clientRect.right - padX,
+        buttonTop + buttonHeight);
+}
+
+bool AppBarWindow::TryHandleResetCreditButtonClick(POINT clientPoint) {
+    if (taskbarMode_ || !snapshot_.success || !snapshot_.resetCredits.fetched) {
+        return false;
+    }
+    if (snapshot_.resetCredits.availableCount <= 0 || resetCreditInFlight_) {
+        return false;
+    }
+
+    RECT buttonRect = resetCreditButtonRect_;
+    if (buttonRect.right <= buttonRect.left) {
+        RECT clientRect = {};
+        GetClientRect(hwnd_, &clientRect);
+        buttonRect = GetResetCreditButtonRect(clientRect);
+    }
+    if (buttonRect.right <= buttonRect.left || !PtInRect(&buttonRect, clientPoint)) {
+        return false;
+    }
+
+    if (!resetCreditConfirmArmed_) {
+        resetCreditConfirmArmed_ = true;
+        resetCreditActionMessage_.clear();
+        KillTimer(hwnd_, kResetConfirmTimerId);
+        SetTimer(hwnd_, kResetConfirmTimerId, 4000, nullptr);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return true;
+    }
+
+    // Second click within the arm window: show a final confirmation dialog,
+    // then send the real consume request only if the user accepts.
+    KillTimer(hwnd_, kResetConfirmTimerId);
+    resetCreditConfirmArmed_ = false;
+
+    const int result = MessageBoxW(
+        hwnd_,
+        LocalizeText(
+            L"This will spend 1 rate-limit reset credit and force-reset the 5-hour window.\n\nContinue?",
+            L"将消耗 1 张额度重置卡，并强制重置 5 小时窗口。\n\n确认继续？"),
+        LocalizeText(L"Confirm use reset credit", L"确认使用重置卡"),
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (result != IDYES) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return true;
+    }
+
+    RequestConsumeResetCredit();
+    return true;
+}
+
+void AppBarWindow::RequestConsumeResetCredit() {
+    if (resetCreditInFlight_.exchange(true)) {
+        return;
+    }
+
+    resetCreditActionMessage_ = LocalizeText(L"Using reset credit...", L"正在使用重置卡...");
+    InvalidateRect(hwnd_, nullptr, FALSE);
+
+    const HWND target = hwnd_;
+    const std::wstring redeemId = CreateRedeemRequestId();
+    std::thread([this, target, redeemId]() {
+        auto* result = new ConsumeResetCreditResult(fetcher_.ConsumeRateLimitResetCredit(redeemId));
+        PostMessageW(target, kResetCreditConsumedMessage, 0, reinterpret_cast<LPARAM>(result));
+    }).detach();
+}
+
+void AppBarWindow::OnResetCreditConsumed(ConsumeResetCreditResult* result) {
+    std::unique_ptr<ConsumeResetCreditResult> holder(result);
+    resetCreditInFlight_ = false;
+    resetCreditConfirmArmed_ = false;
+
+    if (result != nullptr && result->success) {
+        resetCreditActionMessage_ = LocalizeText(L"Reset credit used. Refreshing...", L"重置卡已使用，正在刷新...");
+        RequestRefresh(true);
+    } else {
+        resetCreditActionMessage_ = result != nullptr && !result->errorMessage.empty()
+            ? result->errorMessage
+            : std::wstring(LocalizeText(L"Failed to use reset credit", L"使用重置卡失败"));
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void AppBarWindow::Paint(HDC hdc) {
     RECT clientRect = {};
     GetClientRect(hwnd_, &clientRect);
@@ -1126,6 +1302,7 @@ void AppBarWindow::Paint(HDC hdc) {
 }
 
 void AppBarWindow::PaintContent(const RECT& clientRect) {
+    resetCreditButtonRect_ = {};
     const PaceInfo pace = BuildPaceInfo(snapshot_);
     const int padX = ScaleForDpi(hwnd_, kHorizontalPadding);
     const int padY = ScaleForDpi(hwnd_, kVerticalPadding);
@@ -1321,8 +1498,10 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         drawTextBlock(textFormatMetricLabel_.Get(), statusText, statusRect, statusColor,
             DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
+        const int resetBandHeight = ScaleForDpi(hwnd_, 18);
         RECT cardsRect = MakeRect(clientRect.left + innerPad, clientRect.top + topBandHeight + ScaleForDpi(hwnd_, 2),
-            clientRect.right - innerPad, clientRect.bottom - footerHeight - ScaleForDpi(hwnd_, 4));
+            clientRect.right - innerPad,
+            clientRect.bottom - footerHeight - resetBandHeight - ScaleForDpi(hwnd_, 6));
         const int cardWidth = (RectWidth(cardsRect) - cardGap) / 2;
         RECT dayRect = MakeRect(cardsRect.left, cardsRect.top, cardsRect.left + cardWidth, cardsRect.bottom);
         RECT weekRect = MakeRect(dayRect.right + cardGap, cardsRect.top, cardsRect.right, cardsRect.bottom);
@@ -1344,9 +1523,41 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         drawTextBlock(textFormatDelta_.Get(), weekValue, weekValueRect, textPrimary,
             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
 
-        const std::wstring refreshTimeText = lastSuccessfulRefreshUnixSeconds_ > 0
-            ? FormatClockTime(lastSuccessfulRefreshUnixSeconds_)
-            : L"--";
+        const std::wstring resetSummary = BuildResetCreditsSummaryText();
+        const std::wstring resetExpiry = BuildResetCreditsExpiryText();
+        RECT resetSummaryRect = MakeRect(clientRect.left + innerPad, cardsRect.bottom + ScaleForDpi(hwnd_, 2),
+            clientRect.right - innerPad - ScaleForDpi(hwnd_, 60), cardsRect.bottom + resetBandHeight);
+        drawTextBlock(textFormatFoot_.Get(), resetSummary + L" · " + resetExpiry, resetSummaryRect, textSecondary,
+            DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
+
+        const bool canUseReset = snapshot_.success
+            && snapshot_.resetCredits.fetched
+            && snapshot_.resetCredits.availableCount > 0
+            && !resetCreditInFlight_;
+        RECT resetButtonRect = GetResetCreditButtonRect(clientRect);
+        resetCreditButtonRect_ = resetButtonRect;
+        if (resetButtonRect.right > resetButtonRect.left) {
+            const COLORREF buttonBg = !canUseReset
+                ? (lightTheme_ ? RGB(230, 233, 230) : RGB(48, 54, 50))
+                : (resetCreditConfirmArmed_
+                    ? (lightTheme_ ? RGB(255, 232, 214) : RGB(84, 52, 30))
+                    : (lightTheme_ ? RGB(224, 246, 239) : RGB(31, 58, 46)));
+            const COLORREF buttonText = !canUseReset
+                ? textSecondary
+                : (resetCreditConfirmArmed_
+                    ? (lightTheme_ ? RGB(176, 78, 18) : RGB(255, 186, 120))
+                    : heroValue);
+            fillRect(resetButtonRect, buttonBg);
+            drawRectBorder(resetButtonRect, border);
+            const wchar_t* buttonLabel = resetCreditInFlight_
+                ? LocalizeText(L"...", L"...")
+                : (resetCreditConfirmArmed_
+                    ? LocalizeText(L"Confirm", L"再确认")
+                    : LocalizeText(L"Use", L"使用"));
+            drawTextBlock(textFormatFoot_.Get(), buttonLabel, resetButtonRect, buttonText,
+                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        }
+
         const std::wstring refreshCountdownText = refreshInFlight_
             ? std::wstring(LocalizeText(L"Refreshing", L"刷新中"))
             : FormatRefreshCountdown(refreshCountdownSeconds_);
@@ -1499,7 +1710,60 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
         MakeRect(markerX - 1, meterRect.top - ScaleForDpi(hwnd_, 3), markerX + 1, meterRect.bottom + ScaleForDpi(hwnd_, 6)),
         lightTheme_ ? RGB(21, 27, 24) : RGB(240, 244, 241));
 
-    RECT footerLine = MakeRect(clientRect.left, meterRect.bottom + footerTop, clientRect.right, meterRect.bottom + footerTop + 1);
+    // Reset-credit strip sits above the footer metadata.
+    const int resetStripTop = meterRect.bottom + footerTop;
+    const int resetStripHeight = ScaleForDpi(hwnd_, 28);
+    RECT resetStripRect = MakeRect(clientRect.left, resetStripTop, clientRect.right, resetStripTop + resetStripHeight);
+    fillRect(MakeRect(resetStripRect.left, resetStripRect.top, resetStripRect.right, resetStripRect.top + 1), border);
+
+    const std::wstring resetSummary = BuildResetCreditsSummaryText();
+    const std::wstring resetExpiry = BuildResetCreditsExpiryText();
+    RECT resetSummaryRect = MakeRect(clientRect.left + padX, resetStripRect.top + ScaleForDpi(hwnd_, 4),
+        clientRect.right - padX - ScaleForDpi(hwnd_, 90), resetStripRect.bottom - ScaleForDpi(hwnd_, 4));
+    std::wstring resetLine = resetSummary + L"  ·  " + resetExpiry;
+    if (!resetCreditActionMessage_.empty()) {
+        resetLine += L"  ·  " + resetCreditActionMessage_;
+    }
+    drawTextBlock(textFormatFoot_.Get(), resetLine, resetSummaryRect, textSecondary,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
+
+    const bool canUseReset = snapshot_.resetCredits.fetched
+        && snapshot_.resetCredits.availableCount > 0
+        && !resetCreditInFlight_;
+    // Place the button inside the drawn reset strip so hit-testing matches paint.
+    {
+        const int buttonWidth = ScaleForDpi(hwnd_, 72);
+        const int buttonHeight = ScaleForDpi(hwnd_, 22);
+        RECT resetButtonRect = MakeRect(
+            clientRect.right - padX - buttonWidth,
+            resetStripRect.top + ScaleForDpi(hwnd_, 3),
+            clientRect.right - padX,
+            resetStripRect.top + ScaleForDpi(hwnd_, 3) + buttonHeight);
+        resetCreditButtonRect_ = resetButtonRect;
+        if (resetButtonRect.right > resetButtonRect.left) {
+            const COLORREF buttonBg = !canUseReset
+                ? (lightTheme_ ? RGB(230, 233, 230) : RGB(48, 54, 50))
+                : (resetCreditConfirmArmed_
+                    ? (lightTheme_ ? RGB(255, 232, 214) : RGB(84, 52, 30))
+                    : (lightTheme_ ? RGB(224, 246, 239) : RGB(31, 58, 46)));
+            const COLORREF buttonText = !canUseReset
+                ? textSecondary
+                : (resetCreditConfirmArmed_
+                    ? (lightTheme_ ? RGB(176, 78, 18) : RGB(255, 186, 120))
+                    : heroValue);
+            fillRect(resetButtonRect, buttonBg);
+            drawRectBorder(resetButtonRect, border);
+            const wchar_t* buttonLabel = resetCreditInFlight_
+                ? LocalizeText(L"Using...", L"使用中...")
+                : (resetCreditConfirmArmed_
+                    ? LocalizeText(L"Confirm", L"再确认")
+                    : LocalizeText(L"Use", L"使用"));
+            drawTextBlock(textFormatFoot_.Get(), buttonLabel, resetButtonRect, buttonText,
+                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
+        }
+    }
+
+    RECT footerLine = MakeRect(clientRect.left, resetStripRect.bottom, clientRect.right, resetStripRect.bottom + 1);
     fillRect(footerLine, border);
     const std::wstring versionStatusText = GetVersionStatusText(true);
     const std::wstring footerItems[6] = {

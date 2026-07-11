@@ -7,9 +7,11 @@
 #include <winhttp.h>
 
 #include <algorithm>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
@@ -48,6 +50,186 @@ std::optional<std::wstring> ReadEnv(const wchar_t* name) {
     return value;
 }
 
+// Parses ISO-8601 timestamps such as 2026-07-18T00:39:53Z or with fractional seconds.
+std::optional<long long> ParseIso8601UnixSeconds(const std::string& text) {
+    if (text.size() < 19) {
+        return std::nullopt;
+    }
+
+    try {
+        std::tm tm = {};
+        tm.tm_year = std::stoi(text.substr(0, 4)) - 1900;
+        tm.tm_mon = std::stoi(text.substr(5, 2)) - 1;
+        tm.tm_mday = std::stoi(text.substr(8, 2));
+        tm.tm_hour = std::stoi(text.substr(11, 2));
+        tm.tm_min = std::stoi(text.substr(14, 2));
+        tm.tm_sec = std::stoi(text.substr(17, 2));
+        tm.tm_isdst = 0;
+
+        const time_t utc = _mkgmtime(&tm);
+        if (utc == static_cast<time_t>(-1)) {
+            return std::nullopt;
+        }
+        return static_cast<long long>(utc);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> HttpExchange(
+    const std::wstring& userAgent,
+    const std::wstring& host,
+    const std::wstring& path,
+    const std::wstring& method,
+    const std::vector<std::wstring>& headers,
+    const std::string* body,
+    std::wstring* errorMessage) {
+    if (errorMessage != nullptr) {
+        errorMessage->clear();
+    }
+
+    HINTERNET session = WinHttpOpen(userAgent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (session == nullptr) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"WinHttpOpen failed";
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::string> responseBody;
+    HINTERNET connect = nullptr;
+    HINTERNET request = nullptr;
+
+    do {
+        connect = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+        if (connect == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpConnect failed";
+            }
+            break;
+        }
+
+        request = WinHttpOpenRequest(connect, method.c_str(), path.c_str(), nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (request == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpOpenRequest failed";
+            }
+            break;
+        }
+
+        for (const std::wstring& header : headers) {
+            if (!WinHttpAddRequestHeaders(request, header.c_str(), static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = L"WinHttpAddRequestHeaders failed";
+                }
+                break;
+            }
+        }
+        if (errorMessage != nullptr && !errorMessage->empty()) {
+            break;
+        }
+
+        DWORD timeout = 15000;
+        WinHttpSetTimeouts(request, timeout, timeout, timeout, timeout);
+
+        LPVOID bodyPtr = body != nullptr ? const_cast<char*>(body->data()) : WINHTTP_NO_REQUEST_DATA;
+        DWORD bodySize = body != nullptr ? static_cast<DWORD>(body->size()) : 0;
+        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, bodyPtr, bodySize, bodySize, 0)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpSendRequest failed";
+            }
+            break;
+        }
+
+        if (!WinHttpReceiveResponse(request, nullptr)) {
+            if (errorMessage != nullptr) {
+                *errorMessage = L"WinHttpReceiveResponse failed";
+            }
+            break;
+        }
+
+        DWORD statusCode = 0;
+        DWORD statusCodeSize = sizeof(statusCode);
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
+        if (statusCode < 200 || statusCode > 299) {
+            if (errorMessage != nullptr) {
+                *errorMessage = host + path + L" returned HTTP " + std::to_wstring(statusCode);
+                if (statusCode == 401) {
+                    *errorMessage += L"; auth.json access_token may be expired and automatic refresh is not implemented";
+                }
+            }
+            break;
+        }
+
+        std::string response;
+        for (;;) {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = L"WinHttpQueryDataAvailable failed";
+                }
+                break;
+            }
+            if (available == 0) {
+                responseBody = std::move(response);
+                break;
+            }
+
+            std::string chunk(static_cast<size_t>(available), '\0');
+            DWORD downloaded = 0;
+            if (!WinHttpReadData(request, chunk.data(), available, &downloaded)) {
+                if (errorMessage != nullptr) {
+                    *errorMessage = L"WinHttpReadData failed";
+                }
+                break;
+            }
+
+            chunk.resize(downloaded);
+            response.append(chunk);
+        }
+    } while (false);
+
+    if (request != nullptr) {
+        WinHttpCloseHandle(request);
+    }
+    if (connect != nullptr) {
+        WinHttpCloseHandle(connect);
+    }
+    WinHttpCloseHandle(session);
+
+    return responseBody;
+}
+
+std::optional<std::string> HttpGetJson(
+    const std::wstring& userAgent,
+    const std::wstring& host,
+    const std::wstring& path,
+    const std::vector<std::wstring>& headers,
+    std::wstring* errorMessage) {
+    return HttpExchange(userAgent, host, path, L"GET", headers, nullptr, errorMessage);
+}
+
+std::vector<std::wstring> BuildCodexAuthHeaders(
+    const std::string& accessToken,
+    const std::string& accountId,
+    bool forResetCredits) {
+    std::vector<std::wstring> headers = {
+        L"Authorization: Bearer " + Utf8ToWide(accessToken),
+        L"Accept: application/json",
+    };
+    if (forResetCredits) {
+        headers.push_back(L"OpenAI-Beta: codex-1");
+        headers.push_back(L"originator: Codex Desktop");
+    }
+    if (!accountId.empty()) {
+        headers.push_back(L"ChatGPT-Account-Id: " + Utf8ToWide(accountId));
+    }
+    return headers;
+}
+
 bool ExtractWindow(const jsonlite::Value* windowNode, UsageWindow* output) {
     if (windowNode == nullptr || output == nullptr) {
         return false;
@@ -77,141 +259,19 @@ bool ExtractWindow(const jsonlite::Value* windowNode, UsageWindow* output) {
     return true;
 }
 
-std::optional<std::string> HttpGetJson(const std::wstring& userAgent,
-                                       const std::wstring& host,
-                                       const std::wstring& path,
-                                       const std::vector<std::wstring>& headers,
-                                       std::wstring* errorMessage) {
-    if (errorMessage != nullptr) {
-        errorMessage->clear();
-    }
-
-    HINTERNET session = WinHttpOpen(userAgent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session == nullptr) {
-        if (errorMessage != nullptr) {
-            *errorMessage = L"WinHttpOpen failed";
-        }
-        return std::nullopt;
-    }
-
-    std::optional<std::string> responseBody;
-    HINTERNET connect = nullptr;
-    HINTERNET request = nullptr;
-
-    do {
-        connect = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
-        if (connect == nullptr) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpConnect failed";
-            }
-            break;
-        }
-
-        request = WinHttpOpenRequest(connect, L"GET", path.c_str(), nullptr,
-            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-        if (request == nullptr) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpOpenRequest failed";
-            }
-            break;
-        }
-
-        for (const std::wstring& header : headers) {
-            if (!WinHttpAddRequestHeaders(request, header.c_str(), static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD)) {
-                if (errorMessage != nullptr) {
-                    *errorMessage = L"WinHttpAddRequestHeaders failed";
-                }
-                break;
-            }
-        }
-        if (errorMessage != nullptr && !errorMessage->empty()) {
-            break;
-        }
-
-        DWORD timeout = 15000;
-        WinHttpSetTimeouts(request, timeout, timeout, timeout, timeout);
-
-        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpSendRequest failed";
-            }
-            break;
-        }
-
-        if (!WinHttpReceiveResponse(request, nullptr)) {
-            if (errorMessage != nullptr) {
-                *errorMessage = L"WinHttpReceiveResponse failed";
-            }
-            break;
-        }
-
-        DWORD statusCode = 0;
-        DWORD statusCodeSize = sizeof(statusCode);
-        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
-        if (statusCode != 200) {
-            if (errorMessage != nullptr) {
-                *errorMessage = host + path + L" returned HTTP " + std::to_wstring(statusCode);
-                if (statusCode == 401) {
-                    *errorMessage += L"; auth.json access_token may be expired and automatic refresh is not implemented";
-                }
-            }
-            break;
-        }
-
-        std::string body;
-        for (;;) {
-            DWORD available = 0;
-            if (!WinHttpQueryDataAvailable(request, &available)) {
-                if (errorMessage != nullptr) {
-                    *errorMessage = L"WinHttpQueryDataAvailable failed";
-                }
-                break;
-            }
-            if (available == 0) {
-                responseBody = std::move(body);
-                break;
-            }
-
-            std::string chunk(static_cast<size_t>(available), '\0');
-            DWORD downloaded = 0;
-            if (!WinHttpReadData(request, chunk.data(), available, &downloaded)) {
-                if (errorMessage != nullptr) {
-                    *errorMessage = L"WinHttpReadData failed";
-                }
-                break;
-            }
-
-            chunk.resize(downloaded);
-            body.append(chunk);
-        }
-    } while (false);
-
-    if (request != nullptr) {
-        WinHttpCloseHandle(request);
-    }
-    if (connect != nullptr) {
-        WinHttpCloseHandle(connect);
-    }
-    WinHttpCloseHandle(session);
-
-    return responseBody;
-}
-
 }  // namespace
 
 UsageSnapshot CodexUsageFetcher::Fetch() const {
     UsageSnapshot snapshot;
 
     std::wstring errorMessage;
-    std::optional<std::string> accessToken = ReadAccessToken(&errorMessage);
-    if (!accessToken.has_value()) {
+    std::optional<AuthCredentials> credentials = ReadAuthCredentials(&errorMessage);
+    if (!credentials.has_value()) {
         snapshot.errorMessage = errorMessage;
         return snapshot;
     }
 
-    std::optional<std::string> usageJson = HttpGetUsageJson(*accessToken, &errorMessage);
+    std::optional<std::string> usageJson = HttpGetUsageJson(*credentials, &errorMessage);
     if (!usageJson.has_value()) {
         snapshot.errorMessage = errorMessage;
         return snapshot;
@@ -220,9 +280,46 @@ UsageSnapshot CodexUsageFetcher::Fetch() const {
     snapshot = ParseUsageJson(*usageJson, &errorMessage);
     if (!snapshot.success) {
         snapshot.errorMessage = errorMessage;
+        return snapshot;
+    }
+
+    // Best-effort inventory; usage success is preserved even if this fails.
+    std::wstring resetError;
+    std::optional<std::string> resetJson = HttpGetRateLimitResetCreditsJson(*credentials, &resetError);
+    if (resetJson.has_value()) {
+        snapshot.resetCredits = ParseRateLimitResetCreditsJson(*resetJson, &resetError);
+        if (!snapshot.resetCredits.fetched) {
+            snapshot.resetCredits.errorMessage = resetError;
+        }
+    } else {
+        snapshot.resetCredits.fetched = false;
+        snapshot.resetCredits.errorMessage = resetError;
     }
 
     return snapshot;
+}
+
+ConsumeResetCreditResult CodexUsageFetcher::ConsumeRateLimitResetCredit(const std::wstring& redeemRequestId) const {
+    ConsumeResetCreditResult result;
+    if (redeemRequestId.empty()) {
+        result.errorMessage = L"redeem_request_id is required";
+        return result;
+    }
+
+    std::wstring errorMessage;
+    std::optional<AuthCredentials> credentials = ReadAuthCredentials(&errorMessage);
+    if (!credentials.has_value()) {
+        result.errorMessage = errorMessage;
+        return result;
+    }
+
+    if (!HttpPostConsumeRateLimitResetCredit(*credentials, redeemRequestId, &errorMessage)) {
+        result.errorMessage = errorMessage;
+        return result;
+    }
+
+    result.success = true;
+    return result;
 }
 
 ReleaseVersionInfo CodexUsageFetcher::FetchLatestRelease() const {
@@ -264,7 +361,8 @@ std::wstring CodexUsageFetcher::ResolveAuthJsonPath() const {
     return L".codex\\auth.json";
 }
 
-std::optional<std::string> CodexUsageFetcher::ReadAccessToken(std::wstring* errorMessage) const {
+std::optional<CodexUsageFetcher::AuthCredentials> CodexUsageFetcher::ReadAuthCredentials(
+    std::wstring* errorMessage) const {
     const std::wstring authPath = ResolveAuthJsonPath();
     std::optional<std::string> jsonText = LoadFileUtf8(authPath, errorMessage);
     if (!jsonText.has_value()) {
@@ -290,7 +388,19 @@ std::optional<std::string> CodexUsageFetcher::ReadAccessToken(std::wstring* erro
         return std::nullopt;
     }
 
-    return std::string(*token);
+    AuthCredentials credentials;
+    credentials.accessToken = std::string(*token);
+
+    const jsonlite::Value* accountIdNode = tokens != nullptr ? tokens->Find("account_id") : nullptr;
+    if (accountIdNode == nullptr) {
+        accountIdNode = root->Find("account_id");
+    }
+    if (auto accountId = accountIdNode != nullptr ? accountIdNode->AsString() : std::nullopt;
+        accountId.has_value()) {
+        credentials.accountId = std::string(*accountId);
+    }
+
+    return credentials;
 }
 
 std::optional<std::string> CodexUsageFetcher::LoadFileUtf8(const std::wstring& path, std::wstring* errorMessage) const {
@@ -307,13 +417,56 @@ std::optional<std::string> CodexUsageFetcher::LoadFileUtf8(const std::wstring& p
     return buffer.str();
 }
 
-std::optional<std::string> CodexUsageFetcher::HttpGetUsageJson(const std::string& accessToken, std::wstring* errorMessage) const {
+std::optional<std::string> CodexUsageFetcher::HttpGetUsageJson(
+    const AuthCredentials& credentials,
+    std::wstring* errorMessage) const {
     return HttpGetJson(
         L"CodexUsageBar/0.1",
         L"chatgpt.com",
         L"/backend-api/wham/usage",
-        { L"Authorization: Bearer " + Utf8ToWide(accessToken) },
+        BuildCodexAuthHeaders(credentials.accessToken, credentials.accountId, false),
         errorMessage);
+}
+
+std::optional<std::string> CodexUsageFetcher::HttpGetRateLimitResetCreditsJson(
+    const AuthCredentials& credentials,
+    std::wstring* errorMessage) const {
+    return HttpGetJson(
+        L"CodexUsageBar/0.1",
+        L"chatgpt.com",
+        L"/backend-api/wham/rate-limit-reset-credits",
+        BuildCodexAuthHeaders(credentials.accessToken, credentials.accountId, true),
+        errorMessage);
+}
+
+bool CodexUsageFetcher::HttpPostConsumeRateLimitResetCredit(
+    const AuthCredentials& credentials,
+    const std::wstring& redeemRequestId,
+    std::wstring* errorMessage) const {
+    // Body must be UTF-8 JSON. redeemRequestId is expected to be ASCII UUID text.
+    std::string body = "{\"redeem_request_id\":\"";
+    for (wchar_t ch : redeemRequestId) {
+        if (ch >= 32 && ch < 127 && ch != L'"' && ch != L'\\') {
+            body.push_back(static_cast<char>(ch));
+        }
+    }
+    body += "\"}";
+
+    std::vector<std::wstring> headers = BuildCodexAuthHeaders(
+        credentials.accessToken, credentials.accountId, true);
+    headers.push_back(L"Content-Type: application/json");
+    // Write path mirrors the official CLI user agent used by Quotio Desktop.
+    headers.push_back(L"User-Agent: codex_cli_rs/0.76.0 (Windows; x86_64) CodexUsageBar");
+
+    std::optional<std::string> response = HttpExchange(
+        L"CodexUsageBar/0.1",
+        L"chatgpt.com",
+        L"/backend-api/wham/rate-limit-reset-credits/consume",
+        L"POST",
+        headers,
+        &body,
+        errorMessage);
+    return response.has_value();
 }
 
 std::optional<std::string> CodexUsageFetcher::HttpGetLatestReleaseJson(std::wstring* errorMessage) const {
@@ -362,6 +515,115 @@ UsageSnapshot CodexUsageFetcher::ParseUsageJson(const std::string& jsonText, std
 
     snapshot.success = true;
     return snapshot;
+}
+
+RateLimitResetCreditsInfo CodexUsageFetcher::ParseRateLimitResetCreditsJson(
+    const std::string& jsonText,
+    std::wstring* errorMessage) const {
+    RateLimitResetCreditsInfo info;
+
+    jsonlite::Parser parser(jsonText);
+    std::optional<jsonlite::Value> root = parser.Parse();
+    if (!root.has_value()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"reset credits JSON parse failed: " + Utf8ToWide(parser.Error());
+        }
+        return info;
+    }
+
+    const jsonlite::Value* availableCountNode = root->Find("available_count");
+    auto availableCount = availableCountNode != nullptr ? availableCountNode->AsInt() : std::nullopt;
+    if (!availableCount.has_value() || *availableCount < 0) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"reset credits payload missing available_count";
+        }
+        return info;
+    }
+    info.availableCount = *availableCount;
+
+    const long long nowUnix = static_cast<long long>(std::time(nullptr));
+    const jsonlite::Value* creditsNode = root->Find("credits");
+    if (const auto* credits = creditsNode != nullptr ? creditsNode->AsArray() : nullptr; credits != nullptr) {
+        for (const jsonlite::Value& creditNode : *credits) {
+            const jsonlite::Value* statusNode = creditNode.Find("status");
+            auto status = statusNode != nullptr ? statusNode->AsString() : std::nullopt;
+            if (!status.has_value() || *status != "available") {
+                continue;
+            }
+
+            RateLimitResetCredit credit;
+            credit.status = L"available";
+
+            if (auto id = creditNode.Find("id") != nullptr ? creditNode.Find("id")->AsString() : std::nullopt;
+                id.has_value()) {
+                credit.id = Utf8ToWide(std::string(*id));
+            }
+            if (auto resetType = creditNode.Find("reset_type") != nullptr
+                    ? creditNode.Find("reset_type")->AsString()
+                    : std::nullopt;
+                resetType.has_value()) {
+                credit.resetType = Utf8ToWide(std::string(*resetType));
+            }
+            if (auto title = creditNode.Find("title") != nullptr ? creditNode.Find("title")->AsString() : std::nullopt;
+                title.has_value()) {
+                credit.title = Utf8ToWide(std::string(*title));
+            }
+            if (auto description = creditNode.Find("description") != nullptr
+                    ? creditNode.Find("description")->AsString()
+                    : std::nullopt;
+                description.has_value()) {
+                credit.description = Utf8ToWide(std::string(*description));
+            }
+            if (auto grantedAt = creditNode.Find("granted_at") != nullptr
+                    ? creditNode.Find("granted_at")->AsString()
+                    : std::nullopt;
+                grantedAt.has_value()) {
+                if (auto unix = ParseIso8601UnixSeconds(std::string(*grantedAt)); unix.has_value()) {
+                    credit.grantedAtUnixSeconds = *unix;
+                }
+            }
+
+            const jsonlite::Value* expiresAtNode = creditNode.Find("expires_at");
+            if (expiresAtNode != nullptr && !expiresAtNode->IsNull()) {
+                if (auto expiresAt = expiresAtNode->AsString(); expiresAt.has_value()) {
+                    if (auto unix = ParseIso8601UnixSeconds(std::string(*expiresAt)); unix.has_value()) {
+                        credit.hasExpiry = true;
+                        credit.expiresAtUnixSeconds = *unix;
+                    }
+                }
+            }
+
+            if (credit.hasExpiry && credit.expiresAtUnixSeconds <= nowUnix) {
+                continue;
+            }
+
+            info.availableCredits.push_back(std::move(credit));
+        }
+    }
+
+    std::sort(info.availableCredits.begin(), info.availableCredits.end(),
+        [](const RateLimitResetCredit& lhs, const RateLimitResetCredit& rhs) {
+            if (lhs.hasExpiry != rhs.hasExpiry) {
+                return lhs.hasExpiry && !rhs.hasExpiry;
+            }
+            if (lhs.hasExpiry && rhs.hasExpiry && lhs.expiresAtUnixSeconds != rhs.expiresAtUnixSeconds) {
+                return lhs.expiresAtUnixSeconds < rhs.expiresAtUnixSeconds;
+            }
+            return lhs.id < rhs.id;
+        });
+
+    // Prefer locally filtered inventory count when the list is present.
+    if (!info.availableCredits.empty() || creditsNode != nullptr) {
+        info.availableCount = static_cast<int>(info.availableCredits.size());
+    }
+
+    if (!info.availableCredits.empty() && info.availableCredits.front().hasExpiry) {
+        info.hasNextExpiry = true;
+        info.nextExpiresAtUnixSeconds = info.availableCredits.front().expiresAtUnixSeconds;
+    }
+
+    info.fetched = true;
+    return info;
 }
 
 ReleaseVersionInfo CodexUsageFetcher::ParseLatestReleaseJson(const std::string& jsonText, std::wstring* errorMessage) const {
