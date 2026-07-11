@@ -243,6 +243,16 @@ ReleaseVersionInfo CodexUsageFetcher::FetchLatestRelease() const {
 }
 
 std::wstring CodexUsageFetcher::ResolveAuthJsonPath() const {
+    // Prefer auth.json next to the executable; fall back to CODEX_HOME / ~/.codex.
+    wchar_t modulePath[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) > 0) {
+        const std::wstring localAuth =
+            JoinPath(std::filesystem::path(modulePath).parent_path().wstring(), L"auth.json");
+        if (std::filesystem::exists(localAuth)) {
+            return localAuth;
+        }
+    }
+
     if (auto codexHome = ReadEnv(L"CODEX_HOME"); codexHome.has_value() && !codexHome->empty()) {
         return JoinPath(*codexHome, L"auth.json");
     }
