@@ -938,7 +938,7 @@ HRESULT AppBarWindow::EnsureTextFormats() {
     if (FAILED(hr)) return hr;
     hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 28)), DWRITE_FONT_WEIGHT_BOLD, textFormatDelta_.GetAddressOf());
     if (FAILED(hr)) return hr;
-    hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 12)), DWRITE_FONT_WEIGHT_NORMAL, textFormatMetricLabel_.GetAddressOf());
+    hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 12)), DWRITE_FONT_WEIGHT_SEMI_BOLD, textFormatMetricLabel_.GetAddressOf());
     if (FAILED(hr)) return hr;
     hr = CreateTextFormat(static_cast<float>(ScaleForDpi(hwnd_, 17)), DWRITE_FONT_WEIGHT_BOLD, textFormatMetricValue_.GetAddressOf());
     if (FAILED(hr)) return hr;
@@ -1661,9 +1661,21 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
 
         const std::wstring percentText = FormatPercent(window.remainingPercent);
         const std::wstring resetText = FormatDateTime(window.resetAtUnixSeconds);
-        RECT percentRect = MakeRect(clientRect.right - padX - ScaleForDpi(hwnd_, 150), top,
-            clientRect.right - padX, top + ScaleForDpi(hwnd_, 16));
-        drawTextBlock(textFormatFoot_.Get(), percentText + L"  " + resetText, percentRect, textSecondary,
+        // Percent uses the same semi-bold primary style as the limit title.
+        // Reset time stays secondary on the far right.
+        RECT percentRect = MakeRect(
+            clientRect.right - padX - ScaleForDpi(hwnd_, 150),
+            top,
+            clientRect.right - padX - ScaleForDpi(hwnd_, 78),
+            top + ScaleForDpi(hwnd_, 16));
+        RECT resetTimeRect = MakeRect(
+            clientRect.right - padX - ScaleForDpi(hwnd_, 74),
+            top,
+            clientRect.right - padX,
+            top + ScaleForDpi(hwnd_, 16));
+        drawTextBlock(textFormatMetricLabel_.Get(), percentText, percentRect, textPrimary,
+            DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
+        drawTextBlock(textFormatFoot_.Get(), resetText, resetTimeRect, textSecondary,
             DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, true);
 
         const std::wstring startText = window.hasStartAt ? FormatDateTime(window.startAtUnixSeconds) : L"--";
@@ -1789,10 +1801,10 @@ void AppBarWindow::PaintContent(const RECT& clientRect) {
                 creditBox.left + ScaleForDpi(hwnd_, 72), creditY + creditRowH);
             RECT right = MakeRect(left.right, creditY, creditBox.right - ScaleForDpi(hwnd_, 8), creditY + creditRowH);
             const std::wstring indexText = language_ == Language::Chinese
-                ? (L"第 " + std::to_wstring(i + 1) + L" 次")
+                ? (L"第 " + std::to_wstring(i + 1) + L" 张")
                 : (L"#" + std::to_wstring(i + 1));
             const std::wstring expiryText = credit.hasExpiry
-                ? FormatDateTime(credit.expiresAtUnixSeconds)
+                ? FormatFullDateTime(credit.expiresAtUnixSeconds)
                 : LocalizeText(L"No expiry", L"无期限");
             drawTextBlock(textFormatFoot_.Get(), indexText, left, textPrimary,
                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP, false);
@@ -2028,6 +2040,21 @@ std::wstring AppBarWindow::FormatDateTime(long long unixSeconds) const {
 
     wchar_t buffer[64] = {};
     wcsftime(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%m/%d %H:%M", &localTime);
+    return buffer;
+}
+
+std::wstring AppBarWindow::FormatFullDateTime(long long unixSeconds) const {
+    if (unixSeconds <= 0) {
+        return L"--";
+    }
+
+    std::time_t t = static_cast<std::time_t>(unixSeconds);
+    std::tm localTime = {};
+    localtime_s(&localTime, &t);
+
+    wchar_t buffer[64] = {};
+    // Full local datetime, e.g. 2026-08-01 05:28
+    wcsftime(buffer, sizeof(buffer) / sizeof(buffer[0]), L"%Y-%m-%d %H:%M", &localTime);
     return buffer;
 }
 

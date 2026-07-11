@@ -99,6 +99,7 @@ private:
     std::wstring FormatDuration(int totalSeconds) const;
     std::wstring FormatRefreshCountdown(int totalSeconds) const;
     std::wstring FormatDateTime(long long unixSeconds) const;
+    std::wstring FormatFullDateTime(long long unixSeconds) const;
     std::wstring FormatClockTime(long long unixSeconds) const;
     std::wstring FormatPercent(double value) const;
     std::wstring FormatPlanDisplayName() const;
