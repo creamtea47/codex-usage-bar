@@ -10,6 +10,9 @@ struct UsageWindow {
     int windowSeconds = 0;
     int resetAfterSeconds = 0;
     long long resetAtUnixSeconds = 0;
+    // Derived: resetAt - windowSeconds when both are valid.
+    long long startAtUnixSeconds = 0;
+    bool hasStartAt = false;
 };
 
 struct RateLimitResetCredit {
@@ -39,6 +42,11 @@ struct UsageSnapshot {
     bool success = false;
     std::wstring email;
     std::wstring planType;
+    // From id_token chatgpt_subscription_active_start / until when present.
+    long long planStartUnixSeconds = 0;
+    long long planUntilUnixSeconds = 0;
+    bool hasPlanStart = false;
+    bool hasPlanUntil = false;
     std::wstring errorMessage;
     UsageWindow fiveHour;
     UsageWindow weekly;
@@ -61,6 +69,7 @@ public:
     struct AuthCredentials {
         std::string accessToken;
         std::string accountId;
+        std::string idToken;
     };
 
     UsageSnapshot Fetch() const;
@@ -83,6 +92,7 @@ private:
         const std::wstring& redeemRequestId,
         std::wstring* errorMessage) const;
     UsageSnapshot ParseUsageJson(const std::string& jsonText, std::wstring* errorMessage) const;
+    void EnrichSubscriptionFromIdToken(UsageSnapshot* snapshot, const std::string& idToken) const;
     RateLimitResetCreditsInfo ParseRateLimitResetCreditsJson(const std::string& jsonText, std::wstring* errorMessage) const;
     ReleaseVersionInfo ParseLatestReleaseJson(const std::string& jsonText, std::wstring* errorMessage) const;
 };

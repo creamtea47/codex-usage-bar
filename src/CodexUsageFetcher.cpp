@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 #include <Shlwapi.h>
+#include <wincrypt.h>
 #include <winhttp.h>
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "crypt32.lib")
 
 namespace {
 
@@ -50,7 +52,10 @@ std::optional<std::wstring> ReadEnv(const wchar_t* name) {
     return value;
 }
 
-// Parses ISO-8601 timestamps such as 2026-07-18T00:39:53Z or with fractional seconds.
+// Parses ISO-8601 timestamps:
+// - 2026-07-18T00:39:53Z
+// - 2026-07-18T00:39:53.868059Z
+// - 2026-06-14T09:54:55+08:00
 std::optional<long long> ParseIso8601UnixSeconds(const std::string& text) {
     if (text.size() < 19) {
         return std::nullopt;
@@ -66,11 +71,36 @@ std::optional<long long> ParseIso8601UnixSeconds(const std::string& text) {
         tm.tm_sec = std::stoi(text.substr(17, 2));
         tm.tm_isdst = 0;
 
+        long long offsetSeconds = 0;
+        size_t pos = 19;
+        if (pos < text.size() && text[pos] == '.') {
+            ++pos;
+            while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+                ++pos;
+            }
+        }
+        if (pos < text.size()) {
+            if (text[pos] == 'Z' || text[pos] == 'z') {
+                // UTC
+            } else if ((text[pos] == '+' || text[pos] == '-') && pos + 5 < text.size()) {
+                const int sign = text[pos] == '+' ? 1 : -1;
+                const int oh = std::stoi(text.substr(pos + 1, 2));
+                int om = 0;
+                if (text[pos + 3] == ':' && pos + 5 < text.size()) {
+                    om = std::stoi(text.substr(pos + 4, 2));
+                } else {
+                    om = std::stoi(text.substr(pos + 3, 2));
+                }
+                // Value is local wall time in that offset; convert to UTC.
+                offsetSeconds = -static_cast<long long>(sign) * (oh * 3600LL + om * 60LL);
+            }
+        }
+
         const time_t utc = _mkgmtime(&tm);
         if (utc == static_cast<time_t>(-1)) {
             return std::nullopt;
         }
-        return static_cast<long long>(utc);
+        return static_cast<long long>(utc) + offsetSeconds;
     } catch (const std::exception&) {
         return std::nullopt;
     }
@@ -256,7 +286,66 @@ bool ExtractWindow(const jsonlite::Value* windowNode, UsageWindow* output) {
     output->windowSeconds = std::max(*limit, 0);
     output->resetAfterSeconds = std::max(*resetAfter, 0);
     output->resetAtUnixSeconds = static_cast<long long>(*resetAtValue);
+    if (output->windowSeconds > 0 && output->resetAtUnixSeconds > 0) {
+        output->startAtUnixSeconds = output->resetAtUnixSeconds - output->windowSeconds;
+        output->hasStartAt = true;
+    }
     return true;
+}
+
+std::optional<std::string> Base64UrlDecode(const std::string& input) {
+    std::string normalized;
+    normalized.reserve(input.size() + 4);
+    for (char ch : input) {
+        if (ch == '-') {
+            normalized.push_back('+');
+        } else if (ch == '_') {
+            normalized.push_back('/');
+        } else {
+            normalized.push_back(ch);
+        }
+    }
+    while (normalized.size() % 4 != 0) {
+        normalized.push_back('=');
+    }
+
+    DWORD required = 0;
+    if (!CryptStringToBinaryA(
+            normalized.c_str(),
+            static_cast<DWORD>(normalized.size()),
+            CRYPT_STRING_BASE64,
+            nullptr,
+            &required,
+            nullptr,
+            nullptr) || required == 0) {
+        return std::nullopt;
+    }
+
+    std::string output(required, '\0');
+    if (!CryptStringToBinaryA(
+            normalized.c_str(),
+            static_cast<DWORD>(normalized.size()),
+            CRYPT_STRING_BASE64,
+            reinterpret_cast<BYTE*>(output.data()),
+            &required,
+            nullptr,
+            nullptr)) {
+        return std::nullopt;
+    }
+    output.resize(required);
+    return output;
+}
+
+std::optional<std::string> DecodeJwtPayloadJson(const std::string& jwt) {
+    const size_t firstDot = jwt.find('.');
+    if (firstDot == std::string::npos) {
+        return std::nullopt;
+    }
+    const size_t secondDot = jwt.find('.', firstDot + 1);
+    if (secondDot == std::string::npos) {
+        return std::nullopt;
+    }
+    return Base64UrlDecode(jwt.substr(firstDot + 1, secondDot - firstDot - 1));
 }
 
 }  // namespace
@@ -281,6 +370,10 @@ UsageSnapshot CodexUsageFetcher::Fetch() const {
     if (!snapshot.success) {
         snapshot.errorMessage = errorMessage;
         return snapshot;
+    }
+
+    if (!credentials->idToken.empty()) {
+        EnrichSubscriptionFromIdToken(&snapshot, credentials->idToken);
     }
 
     // Best-effort inventory; usage success is preserved even if this fails.
@@ -400,6 +493,12 @@ std::optional<CodexUsageFetcher::AuthCredentials> CodexUsageFetcher::ReadAuthCre
         credentials.accountId = std::string(*accountId);
     }
 
+    const jsonlite::Value* idTokenNode = tokens != nullptr ? tokens->Find("id_token") : nullptr;
+    if (auto idToken = idTokenNode != nullptr ? idTokenNode->AsString() : std::nullopt;
+        idToken.has_value()) {
+        credentials.idToken = std::string(*idToken);
+    }
+
     return credentials;
 }
 
@@ -515,6 +614,59 @@ UsageSnapshot CodexUsageFetcher::ParseUsageJson(const std::string& jsonText, std
 
     snapshot.success = true;
     return snapshot;
+}
+
+void CodexUsageFetcher::EnrichSubscriptionFromIdToken(
+    UsageSnapshot* snapshot,
+    const std::string& idToken) const {
+    if (snapshot == nullptr || idToken.empty()) {
+        return;
+    }
+
+    std::optional<std::string> payloadJson = DecodeJwtPayloadJson(idToken);
+    if (!payloadJson.has_value()) {
+        return;
+    }
+
+    jsonlite::Parser parser(*payloadJson);
+    std::optional<jsonlite::Value> root = parser.Parse();
+    if (!root.has_value()) {
+        return;
+    }
+
+    const jsonlite::Value* auth = root->Find("https://api.openai.com/auth");
+    if (auth == nullptr) {
+        return;
+    }
+
+    if (snapshot->planType.empty()) {
+        if (auto plan = auth->Find("chatgpt_plan_type") != nullptr
+                ? auth->Find("chatgpt_plan_type")->AsString()
+                : std::nullopt;
+            plan.has_value() && !plan->empty()) {
+            snapshot->planType = Utf8ToWide(std::string(*plan));
+        }
+    }
+
+    if (auto start = auth->Find("chatgpt_subscription_active_start") != nullptr
+            ? auth->Find("chatgpt_subscription_active_start")->AsString()
+            : std::nullopt;
+        start.has_value()) {
+        if (auto unix = ParseIso8601UnixSeconds(std::string(*start)); unix.has_value()) {
+            snapshot->planStartUnixSeconds = *unix;
+            snapshot->hasPlanStart = true;
+        }
+    }
+
+    if (auto until = auth->Find("chatgpt_subscription_active_until") != nullptr
+            ? auth->Find("chatgpt_subscription_active_until")->AsString()
+            : std::nullopt;
+        until.has_value()) {
+        if (auto unix = ParseIso8601UnixSeconds(std::string(*until)); unix.has_value()) {
+            snapshot->planUntilUnixSeconds = *unix;
+            snapshot->hasPlanUntil = true;
+        }
+    }
 }
 
 RateLimitResetCreditsInfo CodexUsageFetcher::ParseRateLimitResetCreditsJson(

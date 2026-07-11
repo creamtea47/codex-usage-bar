@@ -72,7 +72,7 @@ private:
     void OnLatestReleaseChecked(ReleaseVersionInfo* info);
     void OnResetCreditConsumed(ConsumeResetCreditResult* result);
     void RequestConsumeResetCredit();
-    bool TryHandleResetCreditButtonClick(POINT clientPoint);
+    bool TryHandleActionButtonClick(POINT clientPoint);
     RECT GetResetCreditButtonRect(const RECT& clientRect) const;
     std::wstring BuildResetCreditsSummaryText() const;
     std::wstring BuildResetCreditsExpiryText() const;
@@ -101,6 +101,9 @@ private:
     std::wstring FormatDateTime(long long unixSeconds) const;
     std::wstring FormatClockTime(long long unixSeconds) const;
     std::wstring FormatPercent(double value) const;
+    std::wstring FormatPlanDisplayName() const;
+    // remainingPercent: 100 = healthy green, 0 = critical red (soft, not pure).
+    COLORREF ColorForRemainingPercent(int remainingPercent, bool forBackground) const;
 
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -114,8 +117,8 @@ private:
     bool taskbarMode_ = false;
     bool hasReleaseCheckResult_ = false;
     bool updateAvailable_ = false;
-    // First click arms the button; second click within the window sends consume.
-    bool resetCreditConfirmArmed_ = false;
+    // 0 = idle, 1/2 = armed steps, 3rd click opens MessageBox before consume.
+    int resetCreditConfirmStep_ = 0;
     Language language_ = Language::English;
     bool hasSavedRect_ = false;
     RECT savedRect_ = {};
@@ -132,6 +135,7 @@ private:
     std::wstring releaseCheckErrorMessage_;
     std::wstring resetCreditActionMessage_;
     RECT resetCreditButtonRect_ = {};
+    RECT refreshButtonRect_ = {};
 
     UsageSnapshot snapshot_;
     CodexUsageFetcher fetcher_;
