@@ -261,7 +261,7 @@ std::vector<std::wstring> BuildCodexAuthHeaders(
 }
 
 bool ExtractWindow(const jsonlite::Value* windowNode, UsageWindow* output) {
-    if (windowNode == nullptr || output == nullptr) {
+    if (windowNode == nullptr || output == nullptr || windowNode->IsNull()) {
         return false;
     }
 
@@ -290,7 +290,61 @@ bool ExtractWindow(const jsonlite::Value* windowNode, UsageWindow* output) {
         output->startAtUnixSeconds = output->resetAtUnixSeconds - output->windowSeconds;
         output->hasStartAt = true;
     }
+    output->available = true;
     return true;
+}
+
+// Windows shorter than this are treated as the 5-hour session lane.
+constexpr int kShortRateLimitWindowMaxSeconds = 12 * 60 * 60;
+
+bool IsShortRateLimitWindow(const UsageWindow& window) {
+    return window.available && window.windowSeconds > 0
+        && window.windowSeconds <= kShortRateLimitWindowMaxSeconds;
+}
+
+void AssignRateLimitWindows(UsageWindow primary, UsageWindow secondary, UsageSnapshot* snapshot) {
+    if (snapshot == nullptr) {
+        return;
+    }
+
+    snapshot->fiveHour = {};
+    snapshot->weekly = {};
+
+    if (primary.available && secondary.available) {
+        // Prefer duration classification; fall back to classic primary=session, secondary=weekly.
+        if (IsShortRateLimitWindow(primary) && !IsShortRateLimitWindow(secondary)) {
+            snapshot->fiveHour = primary;
+            snapshot->weekly = secondary;
+        } else if (!IsShortRateLimitWindow(primary) && IsShortRateLimitWindow(secondary)) {
+            snapshot->weekly = primary;
+            snapshot->fiveHour = secondary;
+        } else if (primary.windowSeconds <= secondary.windowSeconds) {
+            snapshot->fiveHour = primary;
+            snapshot->weekly = secondary;
+        } else {
+            snapshot->weekly = primary;
+            snapshot->fiveHour = secondary;
+        }
+        return;
+    }
+
+    if (primary.available) {
+        if (IsShortRateLimitWindow(primary)) {
+            snapshot->fiveHour = primary;
+        } else {
+            // Current Codex API: only weekly remains, returned as primary_window.
+            snapshot->weekly = primary;
+        }
+        return;
+    }
+
+    if (secondary.available) {
+        if (IsShortRateLimitWindow(secondary)) {
+            snapshot->fiveHour = secondary;
+        } else {
+            snapshot->weekly = secondary;
+        }
+    }
 }
 
 std::optional<std::string> Base64UrlDecode(const std::string& input) {
@@ -598,7 +652,13 @@ UsageSnapshot CodexUsageFetcher::ParseUsageJson(const std::string& jsonText, std
     const jsonlite::Value* rateLimit = root->Find("rate_limit");
     const jsonlite::Value* primaryWindow = rateLimit != nullptr ? rateLimit->Find("primary_window") : nullptr;
     const jsonlite::Value* secondaryWindow = rateLimit != nullptr ? rateLimit->Find("secondary_window") : nullptr;
-    if (!ExtractWindow(primaryWindow, &snapshot.fiveHour) || !ExtractWindow(secondaryWindow, &snapshot.weekly)) {
+
+    UsageWindow primary;
+    UsageWindow secondary;
+    ExtractWindow(primaryWindow, &primary);
+    ExtractWindow(secondaryWindow, &secondary);
+    AssignRateLimitWindows(primary, secondary, &snapshot);
+    if (!snapshot.fiveHour.available && !snapshot.weekly.available) {
         if (errorMessage != nullptr) {
             *errorMessage = L"usage payload missing rate_limit windows";
         }

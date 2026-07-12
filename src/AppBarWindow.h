@@ -50,6 +50,8 @@ private:
     RECT BuildTaskbarDockRect() const;
     RECT ClampRectToDesktop(RECT rect) const;
     void UpdateWindowBounds(bool useSavedPosition);
+    // Recompute height from current snapshot (e.g. hide 5h bar) while keeping position.
+    void FitWindowToContent();
     void SetDisplayMode(bool simpleMode, bool taskbarMode);
 
     void LoadSettings();

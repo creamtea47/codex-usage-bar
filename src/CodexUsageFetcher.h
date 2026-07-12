@@ -5,6 +5,8 @@
 #include <vector>
 
 struct UsageWindow {
+    // False when the API omits this window (e.g. 5h primary removed).
+    bool available = false;
     int usedPercent = 0;
     int remainingPercent = 100;
     int windowSeconds = 0;
