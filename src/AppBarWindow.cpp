@@ -39,6 +39,7 @@ constexpr UINT kCommandRefreshInterval30Minutes = 14;
 constexpr UINT kCommandCheckVersion = 15;
 constexpr UINT kCommandFullMode = 16;
 constexpr UINT kCommandTaskbarMode = 17;
+constexpr UINT kCommandRefreshToken = 18;
 constexpr int kDefaultWidgetWidth = 420;
 constexpr int kMinimumWidgetWidth = 360;
 constexpr int kSimpleDefaultWidgetWidth = 240;
@@ -468,6 +469,10 @@ LRESULT AppBarWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
 
         case kResetCreditConsumedMessage:
             OnResetCreditConsumed(reinterpret_cast<ConsumeResetCreditResult*>(lParam));
+            return 0;
+
+        case kTokenRefreshedMessage:
+            OnTokenRefreshed(reinterpret_cast<TokenRefreshResult*>(lParam));
             return 0;
 
         case WM_DESTROY:
@@ -1325,6 +1330,41 @@ void AppBarWindow::OnResetCreditConsumed(ConsumeResetCreditResult* result) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void AppBarWindow::RequestRefreshToken() {
+    if (tokenRefreshInFlight_.exchange(true)) {
+        return;
+    }
+
+    resetCreditActionMessage_ = LocalizeText(L"Refreshing token...", L"正在刷新 Token...");
+    InvalidateRect(hwnd_, nullptr, FALSE);
+
+    const HWND target = hwnd_;
+    std::thread([this, target]() {
+        auto* result = new TokenRefreshResult(fetcher_.ForceRefreshAuthTokens());
+        PostMessageW(target, kTokenRefreshedMessage, 0, reinterpret_cast<LPARAM>(result));
+    }).detach();
+}
+
+void AppBarWindow::OnTokenRefreshed(TokenRefreshResult* result) {
+    std::unique_ptr<TokenRefreshResult> holder(result);
+    tokenRefreshInFlight_ = false;
+
+    if (result != nullptr && result->success) {
+        resetCreditActionMessage_ = result->wroteAuthFile
+            ? LocalizeText(L"Token refreshed. Updating usage...", L"Token 已刷新，正在更新额度...")
+            : LocalizeText(L"Token refreshed (auth.json not written). Updating usage...",
+                L"Token 已刷新（未写回 auth.json），正在更新额度...");
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        RequestRefresh(true);
+        return;
+    }
+
+    resetCreditActionMessage_ = result != nullptr && !result->errorMessage.empty()
+        ? result->errorMessage
+        : std::wstring(LocalizeText(L"Failed to refresh token", L"刷新 Token 失败"));
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void AppBarWindow::Paint(HDC hdc) {
     RECT clientRect = {};
     GetClientRect(hwnd_, &clientRect);
@@ -2019,6 +2059,8 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
         kCommandTaskbarMode, LocalizeText(L"Taskbar mode", L"任务栏模式"));
 
     AppendMenuW(menu, MF_STRING, kCommandRefresh, LocalizeText(L"Refresh now", L"立即刷新"));
+    AppendMenuW(menu, MF_STRING | (tokenRefreshInFlight_ ? MF_GRAYED : 0),
+        kCommandRefreshToken, LocalizeText(L"Refresh token", L"刷新 Token"));
     AppendMenuW(menu, MF_STRING, kCommandCheckVersion, LocalizeText(L"Check version", L"检查版本"));
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(refreshIntervalMenu), LocalizeText(L"Refresh interval", L"刷新间隔"));
     AppendMenuW(menu, MF_STRING | (launchAtStartup ? MF_CHECKED : MF_UNCHECKED),
@@ -2037,6 +2079,8 @@ void AppBarWindow::ShowContextMenu(POINT screenPoint) {
 
     if (command == kCommandRefresh) {
         RequestRefresh(true);
+    } else if (command == kCommandRefreshToken) {
+        RequestRefreshToken();
     } else if (command == kCommandCheckVersion) {
         RequestLatestReleaseCheck(true);
     } else if (command == kCommandRefreshInterval1Minute) {

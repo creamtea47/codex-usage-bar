@@ -66,16 +66,27 @@ struct ConsumeResetCreditResult {
     std::wstring errorMessage;
 };
 
+struct TokenRefreshResult {
+    bool success = false;
+    bool wroteAuthFile = false;
+    std::wstring errorMessage;
+};
+
 class CodexUsageFetcher {
 public:
     struct AuthCredentials {
         std::string accessToken;
         std::string accountId;
         std::string idToken;
+        std::string refreshToken;
+        std::wstring authPath;
     };
 
     UsageSnapshot Fetch() const;
     ReleaseVersionInfo FetchLatestRelease() const;
+
+    // Force OAuth refresh and write tokens back to auth.json (manual menu action).
+    TokenRefreshResult ForceRefreshAuthTokens() const;
 
     // Spends one real rate-limit reset credit. Do not call casually.
     ConsumeResetCreditResult ConsumeRateLimitResetCredit(const std::wstring& redeemRequestId) const;
@@ -83,7 +94,11 @@ public:
 private:
     std::wstring ResolveAuthJsonPath() const;
     std::optional<AuthCredentials> ReadAuthCredentials(std::wstring* errorMessage) const;
+    // Refresh OAuth tokens and persist updated tokens/id_token back to auth.json.
+    bool RefreshAuthCredentials(AuthCredentials* credentials, std::wstring* errorMessage) const;
+    bool PersistAuthCredentials(const AuthCredentials& credentials, std::wstring* errorMessage) const;
     std::optional<std::string> LoadFileUtf8(const std::wstring& path, std::wstring* errorMessage) const;
+    bool WriteFileUtf8(const std::wstring& path, const std::string& content, std::wstring* errorMessage) const;
     std::optional<std::string> HttpGetUsageJson(const AuthCredentials& credentials, std::wstring* errorMessage) const;
     std::optional<std::string> HttpGetRateLimitResetCreditsJson(
         const AuthCredentials& credentials,

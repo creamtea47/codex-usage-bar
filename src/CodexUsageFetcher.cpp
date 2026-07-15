@@ -188,7 +188,7 @@ std::optional<std::string> HttpExchange(
             if (errorMessage != nullptr) {
                 *errorMessage = host + path + L" returned HTTP " + std::to_wstring(statusCode);
                 if (statusCode == 401) {
-                    *errorMessage += L"; auth.json access_token may be expired and automatic refresh is not implemented";
+                    *errorMessage += L"; auth.json access_token may be expired (auto-refresh runs within 1 day of JWT exp or on 401/403)";
                 }
             }
             break;
@@ -402,6 +402,124 @@ std::optional<std::string> DecodeJwtPayloadJson(const std::string& jwt) {
     return Base64UrlDecode(jwt.substr(firstDot + 1, secondDot - firstDot - 1));
 }
 
+std::optional<long long> JwtExpUnixSeconds(const std::string& jwt) {
+    std::optional<std::string> payloadJson = DecodeJwtPayloadJson(jwt);
+    if (!payloadJson.has_value()) {
+        return std::nullopt;
+    }
+    jsonlite::Parser parser(*payloadJson);
+    std::optional<jsonlite::Value> root = parser.Parse();
+    if (!root.has_value()) {
+        return std::nullopt;
+    }
+    const jsonlite::Value* exp = root->Find("exp");
+    if (exp == nullptr) {
+        return std::nullopt;
+    }
+    if (auto asInt = exp->AsInt(); asInt.has_value()) {
+        return static_cast<long long>(*asInt);
+    }
+    if (auto asNum = exp->AsNumber(); asNum.has_value()) {
+        return static_cast<long long>(*asNum);
+    }
+    return std::nullopt;
+}
+
+bool ReplaceJsonStringField(std::string* json, const std::string& key, const std::string& newValue) {
+    if (json == nullptr || key.empty()) {
+        return false;
+    }
+    const std::string needle = "\"" + key + "\"";
+    size_t pos = json->find(needle);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    pos = json->find(':', pos + needle.size());
+    if (pos == std::string::npos) {
+        return false;
+    }
+    ++pos;
+    while (pos < json->size() && ((*json)[pos] == ' ' || (*json)[pos] == '\t' || (*json)[pos] == '\r' || (*json)[pos] == '\n')) {
+        ++pos;
+    }
+    if (pos >= json->size() || (*json)[pos] != '"') {
+        return false;
+    }
+    const size_t valueStart = pos + 1;
+    size_t valueEnd = valueStart;
+    while (valueEnd < json->size()) {
+        if ((*json)[valueEnd] == '\\' && valueEnd + 1 < json->size()) {
+            valueEnd += 2;
+            continue;
+        }
+        if ((*json)[valueEnd] == '"') {
+            break;
+        }
+        ++valueEnd;
+    }
+    if (valueEnd >= json->size()) {
+        return false;
+    }
+
+    std::string escaped;
+    escaped.reserve(newValue.size() + 8);
+    for (char ch : newValue) {
+        if (ch == '\\' || ch == '"') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(ch);
+    }
+    json->replace(valueStart, valueEnd - valueStart, escaped);
+    return true;
+}
+
+std::string EscapeJsonString(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (char ch : value) {
+        if (ch == '\\' || ch == '"') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(ch);
+    }
+    return escaped;
+}
+
+std::string CurrentUtcIso8601() {
+    const std::time_t now = std::time(nullptr);
+    std::tm utc = {};
+    gmtime_s(&utc, &now);
+    char buffer[40] = {};
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return buffer;
+}
+
+// Refresh one day before JWT exp (also covers already-expired tokens).
+constexpr long long kAuthRefreshLeadSeconds = 24LL * 60 * 60;
+
+bool TokenNeedsProactiveRefresh(const std::string& jwt, long long nowUnix) {
+    const auto exp = JwtExpUnixSeconds(jwt);
+    if (!exp.has_value()) {
+        // Unknown expiry: do not thrash refresh every poll; rely on 401 retry.
+        return false;
+    }
+    return *exp <= nowUnix + kAuthRefreshLeadSeconds;
+}
+
+bool CredentialsNeedProactiveRefresh(const CodexUsageFetcher::AuthCredentials& credentials) {
+    if (credentials.refreshToken.empty()) {
+        return false;
+    }
+    const long long nowUnix = static_cast<long long>(std::time(nullptr));
+    if (!credentials.accessToken.empty() && TokenNeedsProactiveRefresh(credentials.accessToken, nowUnix)) {
+        return true;
+    }
+    if (!credentials.idToken.empty() && TokenNeedsProactiveRefresh(credentials.idToken, nowUnix)) {
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 UsageSnapshot CodexUsageFetcher::Fetch() const {
@@ -414,18 +532,38 @@ UsageSnapshot CodexUsageFetcher::Fetch() const {
         return snapshot;
     }
 
-    std::optional<std::string> usageJson = HttpGetUsageJson(*credentials, &errorMessage);
-    if (!usageJson.has_value()) {
-        snapshot.errorMessage = errorMessage;
-        return snapshot;
+    // Proactive OAuth refresh only when access/id token is within 1 day of exp.
+    // Failures fall back to existing tokens so usage still loads.
+    if (CredentialsNeedProactiveRefresh(*credentials)) {
+        std::wstring refreshError;
+        RefreshAuthCredentials(&*credentials, &refreshError);
     }
 
+    std::optional<std::string> usageJson = HttpGetUsageJson(*credentials, &errorMessage);
+    if (!usageJson.has_value()) {
+        // Reactive refresh on auth failures even if not yet inside the 1-day window.
+        if (!credentials->refreshToken.empty()
+            && (errorMessage.find(L"HTTP 401") != std::wstring::npos
+                || errorMessage.find(L"HTTP 403") != std::wstring::npos)) {
+            std::wstring refreshError;
+            if (RefreshAuthCredentials(&*credentials, &refreshError)) {
+                usageJson = HttpGetUsageJson(*credentials, &errorMessage);
+            }
+        }
+        if (!usageJson.has_value()) {
+            snapshot.errorMessage = errorMessage;
+            return snapshot;
+        }
+    }
+
+    // Full replace from live usage every refresh.
     snapshot = ParseUsageJson(*usageJson, &errorMessage);
     if (!snapshot.success) {
         snapshot.errorMessage = errorMessage;
         return snapshot;
     }
 
+    // Always re-apply plan dates/type from the freshest id_token (overwrites stale values).
     if (!credentials->idToken.empty()) {
         EnrichSubscriptionFromIdToken(&snapshot, credentials->idToken);
     }
@@ -439,11 +577,36 @@ UsageSnapshot CodexUsageFetcher::Fetch() const {
             snapshot.resetCredits.errorMessage = resetError;
         }
     } else {
+        snapshot.resetCredits = {};
         snapshot.resetCredits.fetched = false;
         snapshot.resetCredits.errorMessage = resetError;
     }
 
     return snapshot;
+}
+
+TokenRefreshResult CodexUsageFetcher::ForceRefreshAuthTokens() const {
+    TokenRefreshResult result;
+
+    std::wstring errorMessage;
+    std::optional<AuthCredentials> credentials = ReadAuthCredentials(&errorMessage);
+    if (!credentials.has_value()) {
+        result.errorMessage = errorMessage;
+        return result;
+    }
+    if (credentials->refreshToken.empty()) {
+        result.errorMessage = L"auth.json missing tokens.refresh_token";
+        return result;
+    }
+
+    if (!RefreshAuthCredentials(&*credentials, &errorMessage)) {
+        result.errorMessage = errorMessage.empty() ? L"token refresh failed" : errorMessage;
+        return result;
+    }
+
+    result.success = true;
+    result.wroteAuthFile = !credentials->authPath.empty();
+    return result;
 }
 
 ConsumeResetCreditResult CodexUsageFetcher::ConsumeRateLimitResetCredit(const std::wstring& redeemRequestId) const {
@@ -460,7 +623,25 @@ ConsumeResetCreditResult CodexUsageFetcher::ConsumeRateLimitResetCredit(const st
         return result;
     }
 
+    // Prefer a fresh access token for write paths (spend must not fail on near-expiry).
+    if (!credentials->refreshToken.empty()) {
+        std::wstring refreshError;
+        RefreshAuthCredentials(&*credentials, &refreshError);
+    }
+
     if (!HttpPostConsumeRateLimitResetCredit(*credentials, redeemRequestId, &errorMessage)) {
+        if (!credentials->refreshToken.empty()
+            && (errorMessage.find(L"HTTP 401") != std::wstring::npos
+                || errorMessage.find(L"HTTP 403") != std::wstring::npos)) {
+            std::wstring refreshError;
+            if (RefreshAuthCredentials(&*credentials, &refreshError)) {
+                errorMessage.clear();
+                if (HttpPostConsumeRateLimitResetCredit(*credentials, redeemRequestId, &errorMessage)) {
+                    result.success = true;
+                    return result;
+                }
+            }
+        }
         result.errorMessage = errorMessage;
         return result;
     }
@@ -536,6 +717,7 @@ std::optional<CodexUsageFetcher::AuthCredentials> CodexUsageFetcher::ReadAuthCre
     }
 
     AuthCredentials credentials;
+    credentials.authPath = authPath;
     credentials.accessToken = std::string(*token);
 
     const jsonlite::Value* accountIdNode = tokens != nullptr ? tokens->Find("account_id") : nullptr;
@@ -553,7 +735,114 @@ std::optional<CodexUsageFetcher::AuthCredentials> CodexUsageFetcher::ReadAuthCre
         credentials.idToken = std::string(*idToken);
     }
 
+    const jsonlite::Value* refreshTokenNode = tokens != nullptr ? tokens->Find("refresh_token") : nullptr;
+    if (auto refreshToken = refreshTokenNode != nullptr ? refreshTokenNode->AsString() : std::nullopt;
+        refreshToken.has_value()) {
+        credentials.refreshToken = std::string(*refreshToken);
+    }
+
     return credentials;
+}
+
+bool CodexUsageFetcher::RefreshAuthCredentials(AuthCredentials* credentials, std::wstring* errorMessage) const {
+    if (credentials == nullptr || credentials->refreshToken.empty()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"missing refresh_token";
+        }
+        return false;
+    }
+
+    const std::string body =
+        std::string("{\"client_id\":\"app_EMoamEEZ73f0CkXaXp7hrann\",")
+        + "\"grant_type\":\"refresh_token\","
+        + "\"refresh_token\":\"" + EscapeJsonString(credentials->refreshToken) + "\","
+        + "\"scope\":\"openid profile email offline_access\"}";
+
+    std::vector<std::wstring> headers = {
+        L"Content-Type: application/json",
+        L"Accept: application/json",
+    };
+
+    std::optional<std::string> response = HttpExchange(
+        L"CodexUsageBar/0.1",
+        L"auth.openai.com",
+        L"/oauth/token",
+        L"POST",
+        headers,
+        &body,
+        errorMessage);
+    if (!response.has_value()) {
+        return false;
+    }
+
+    jsonlite::Parser parser(*response);
+    std::optional<jsonlite::Value> root = parser.Parse();
+    if (!root.has_value()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"token refresh JSON parse failed: " + Utf8ToWide(parser.Error());
+        }
+        return false;
+    }
+
+    const jsonlite::Value* accessToken = root->Find("access_token");
+    auto access = accessToken != nullptr ? accessToken->AsString() : std::nullopt;
+    if (!access.has_value() || access->empty()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"token refresh missing access_token";
+        }
+        return false;
+    }
+
+    credentials->accessToken = std::string(*access);
+
+    if (const jsonlite::Value* idToken = root->Find("id_token"); idToken != nullptr) {
+        if (auto id = idToken->AsString(); id.has_value() && !id->empty()) {
+            credentials->idToken = std::string(*id);
+        }
+    }
+    if (const jsonlite::Value* refreshToken = root->Find("refresh_token"); refreshToken != nullptr) {
+        if (auto refresh = refreshToken->AsString(); refresh.has_value() && !refresh->empty()) {
+            credentials->refreshToken = std::string(*refresh);
+        }
+    }
+
+    // Best-effort persist so the next refresh and external tools see the new claims.
+    PersistAuthCredentials(*credentials, errorMessage);
+    return true;
+}
+
+bool CodexUsageFetcher::PersistAuthCredentials(
+    const AuthCredentials& credentials,
+    std::wstring* errorMessage) const {
+    if (credentials.authPath.empty()) {
+        return false;
+    }
+
+    std::optional<std::string> jsonText = LoadFileUtf8(credentials.authPath, errorMessage);
+    if (!jsonText.has_value()) {
+        return false;
+    }
+
+    std::string updated = *jsonText;
+    bool changed = false;
+    if (!credentials.accessToken.empty()) {
+        changed = ReplaceJsonStringField(&updated, "access_token", credentials.accessToken) || changed;
+    }
+    if (!credentials.idToken.empty()) {
+        changed = ReplaceJsonStringField(&updated, "id_token", credentials.idToken) || changed;
+    }
+    if (!credentials.refreshToken.empty()) {
+        changed = ReplaceJsonStringField(&updated, "refresh_token", credentials.refreshToken) || changed;
+    }
+    // last_refresh may be ISO string at root.
+    if (!ReplaceJsonStringField(&updated, "last_refresh", CurrentUtcIso8601())) {
+        // optional field
+    }
+
+    if (!changed) {
+        return false;
+    }
+    return WriteFileUtf8(credentials.authPath, updated, errorMessage);
 }
 
 std::optional<std::string> CodexUsageFetcher::LoadFileUtf8(const std::wstring& path, std::wstring* errorMessage) const {
@@ -570,25 +859,52 @@ std::optional<std::string> CodexUsageFetcher::LoadFileUtf8(const std::wstring& p
     return buffer.str();
 }
 
+bool CodexUsageFetcher::WriteFileUtf8(
+    const std::wstring& path,
+    const std::string& content,
+    std::wstring* errorMessage) const {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"cannot write " + path;
+        }
+        return false;
+    }
+    output.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!output) {
+        if (errorMessage != nullptr) {
+            *errorMessage = L"failed writing " + path;
+        }
+        return false;
+    }
+    return true;
+}
+
 std::optional<std::string> CodexUsageFetcher::HttpGetUsageJson(
     const AuthCredentials& credentials,
     std::wstring* errorMessage) const {
+    auto headers = BuildCodexAuthHeaders(credentials.accessToken, credentials.accountId, false);
+    headers.push_back(L"Cache-Control: no-cache");
+    headers.push_back(L"Pragma: no-cache");
     return HttpGetJson(
         L"CodexUsageBar/0.1",
         L"chatgpt.com",
         L"/backend-api/wham/usage",
-        BuildCodexAuthHeaders(credentials.accessToken, credentials.accountId, false),
+        headers,
         errorMessage);
 }
 
 std::optional<std::string> CodexUsageFetcher::HttpGetRateLimitResetCreditsJson(
     const AuthCredentials& credentials,
     std::wstring* errorMessage) const {
+    auto headers = BuildCodexAuthHeaders(credentials.accessToken, credentials.accountId, true);
+    headers.push_back(L"Cache-Control: no-cache");
+    headers.push_back(L"Pragma: no-cache");
     return HttpGetJson(
         L"CodexUsageBar/0.1",
         L"chatgpt.com",
         L"/backend-api/wham/rate-limit-reset-credits",
-        BuildCodexAuthHeaders(credentials.accessToken, credentials.accountId, true),
+        headers,
         errorMessage);
 }
 
@@ -683,6 +999,12 @@ void CodexUsageFetcher::EnrichSubscriptionFromIdToken(
         return;
     }
 
+    // Always clear previous plan period so a failed re-parse cannot keep stale dates.
+    snapshot->hasPlanStart = false;
+    snapshot->hasPlanUntil = false;
+    snapshot->planStartUnixSeconds = 0;
+    snapshot->planUntilUnixSeconds = 0;
+
     std::optional<std::string> payloadJson = DecodeJwtPayloadJson(idToken);
     if (!payloadJson.has_value()) {
         return;
@@ -694,22 +1016,25 @@ void CodexUsageFetcher::EnrichSubscriptionFromIdToken(
         return;
     }
 
+    // Prefer nested OpenAI auth claim; also accept root-level aliases if present.
     const jsonlite::Value* auth = root->Find("https://api.openai.com/auth");
-    if (auth == nullptr) {
-        return;
+    const jsonlite::Value* claimRoot = auth != nullptr ? auth : &*root;
+
+    if (auto plan = claimRoot->Find("chatgpt_plan_type") != nullptr
+            ? claimRoot->Find("chatgpt_plan_type")->AsString()
+            : std::nullopt;
+        plan.has_value() && !plan->empty()) {
+        // Live claim wins over usage payload for plan label when present.
+        snapshot->planType = Utf8ToWide(std::string(*plan));
     }
 
-    if (snapshot->planType.empty()) {
-        if (auto plan = auth->Find("chatgpt_plan_type") != nullptr
-                ? auth->Find("chatgpt_plan_type")->AsString()
-                : std::nullopt;
-            plan.has_value() && !plan->empty()) {
-            snapshot->planType = Utf8ToWide(std::string(*plan));
-        }
+    if (auto email = root->Find("email") != nullptr ? root->Find("email")->AsString() : std::nullopt;
+        email.has_value() && !email->empty()) {
+        snapshot->email = Utf8ToWide(std::string(*email));
     }
 
-    if (auto start = auth->Find("chatgpt_subscription_active_start") != nullptr
-            ? auth->Find("chatgpt_subscription_active_start")->AsString()
+    if (auto start = claimRoot->Find("chatgpt_subscription_active_start") != nullptr
+            ? claimRoot->Find("chatgpt_subscription_active_start")->AsString()
             : std::nullopt;
         start.has_value()) {
         if (auto unix = ParseIso8601UnixSeconds(std::string(*start)); unix.has_value()) {
@@ -718,8 +1043,8 @@ void CodexUsageFetcher::EnrichSubscriptionFromIdToken(
         }
     }
 
-    if (auto until = auth->Find("chatgpt_subscription_active_until") != nullptr
-            ? auth->Find("chatgpt_subscription_active_until")->AsString()
+    if (auto until = claimRoot->Find("chatgpt_subscription_active_until") != nullptr
+            ? claimRoot->Find("chatgpt_subscription_active_until")->AsString()
             : std::nullopt;
         until.has_value()) {
         if (auto unix = ParseIso8601UnixSeconds(std::string(*until)); unix.has_value()) {

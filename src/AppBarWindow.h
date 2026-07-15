@@ -22,6 +22,7 @@ private:
     static constexpr UINT kUsageUpdatedMessage = WM_APP + 1;
     static constexpr UINT kReleaseVersionUpdatedMessage = WM_APP + 2;
     static constexpr UINT kResetCreditConsumedMessage = WM_APP + 3;
+    static constexpr UINT kTokenRefreshedMessage = WM_APP + 4;
     static constexpr UINT_PTR kCountdownTimerId = 1;
     static constexpr UINT_PTR kRefreshTimerId = 2;
     static constexpr UINT_PTR kResetConfirmTimerId = 3;
@@ -74,6 +75,8 @@ private:
     void OnLatestReleaseChecked(ReleaseVersionInfo* info);
     void OnResetCreditConsumed(ConsumeResetCreditResult* result);
     void RequestConsumeResetCredit();
+    void RequestRefreshToken();
+    void OnTokenRefreshed(TokenRefreshResult* result);
     bool TryHandleActionButtonClick(POINT clientPoint);
     RECT GetResetCreditButtonRect(const RECT& clientRect) const;
     std::wstring BuildResetCreditsSummaryText() const;
@@ -113,6 +116,7 @@ private:
     std::atomic_bool refreshInFlight_ = false;
     std::atomic_bool releaseCheckInFlight_ = false;
     std::atomic_bool resetCreditInFlight_ = false;
+    std::atomic_bool tokenRefreshInFlight_ = false;
     bool lightTheme_ = false;
     bool alwaysOnTop_ = false;
     bool lockPosition_ = false;
