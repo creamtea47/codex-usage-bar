@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import SettingsWindow from './SettingsWindow';
@@ -23,8 +23,10 @@ const bridgeMocks = vi.hoisted(() => ({
 }));
 
 const openerMocks = vi.hoisted(() => ({ openUrl: vi.fn() }));
+const windowMocks = vi.hoisted(() => ({ setBackgroundColor: vi.fn(), setTheme: vi.fn() }));
 
 vi.mock('./bridge', () => ({ usageBridge: bridgeMocks }));
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => windowMocks }));
 vi.mock('@tauri-apps/plugin-opener', () => openerMocks);
 
 const availableUpdate: AppUpdateInfo = {
@@ -34,11 +36,11 @@ const availableUpdate: AppUpdateInfo = {
   checkedAt: '2030-01-04T12:00:00Z',
 };
 
-function installMatchMedia() {
+function installMatchMedia(prefersDark = false) {
   vi.stubGlobal(
     'matchMedia',
     vi.fn(() => ({
-      matches: false,
+      matches: prefersDark,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     })),
@@ -53,6 +55,8 @@ function prepareBridge(settings: Settings = defaultSettings) {
   bridgeMocks.getAppUpdateInfo.mockResolvedValue({ ...availableUpdate, updateAvailable: false, latestVersion: '0.2.5' });
   bridgeMocks.checkAppUpdate.mockResolvedValue(availableUpdate);
   bridgeMocks.installAppUpdate.mockResolvedValue(undefined);
+  windowMocks.setBackgroundColor.mockResolvedValue(undefined);
+  windowMocks.setTheme.mockResolvedValue(undefined);
   bridgeMocks.listenForSettings.mockResolvedValue(() => undefined);
   bridgeMocks.listenForAppUpdate.mockResolvedValue(() => undefined);
   bridgeMocks.listenForAppUpdateProgress.mockResolvedValue(() => undefined);
@@ -73,6 +77,23 @@ afterEach(() => {
 });
 
 describe('SettingsWindow', () => {
+  it.each([
+    ['light', 'light'],
+    ['dark', 'dark'],
+  ] as const)('keeps the native title bar in sync with the %s theme', async (theme, expectedTheme) => {
+    await renderLoaded({ ...defaultSettings, theme });
+
+    await waitFor(() => expect(windowMocks.setTheme).toHaveBeenLastCalledWith(expectedTheme));
+    expect(windowMocks.setBackgroundColor).toHaveBeenLastCalledWith(theme === 'dark' ? '#1b1f24' : '#fbfcff');
+  });
+
+  it('leaves the native title bar in automatic mode when following the system theme', async () => {
+    installMatchMedia(true);
+    await renderLoaded({ ...defaultSettings, theme: 'system' });
+
+    await waitFor(() => expect(windowMocks.setTheme).toHaveBeenLastCalledWith(null));
+  });
+
   it('provides four real sidebar categories', async () => {
     await renderLoaded();
 
@@ -122,6 +143,25 @@ describe('SettingsWindow', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '下载并安装' }));
     await waitFor(() => expect(bridgeMocks.installAppUpdate).toHaveBeenCalledTimes(1));
+  });
+
+  it('opens the available-update dialog when the main card navigates to updates', async () => {
+    let navigate: ((section: 'about') => void) | undefined;
+    prepareBridge();
+    bridgeMocks.getAppUpdateInfo.mockResolvedValue(availableUpdate);
+    bridgeMocks.listenForSettingsNavigation.mockImplementation(async (handler: (section: 'about') => void) => {
+      navigate = handler;
+      return () => undefined;
+    });
+    render(<SettingsWindow />);
+    await waitFor(() => expect(navigate).toBeTypeOf('function'));
+
+    await act(async () => navigate?.('about'));
+
+    expect(await screen.findByRole('heading', { name: '发现新版本 v0.2.6' })).toBeTruthy();
+    expect(bridgeMocks.installAppUpdate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    expect(await screen.findByRole('heading', { name: '关于与更新' })).toBeTruthy();
   });
 
   it('shows the safe signature-verification failure without exposing transport details', async () => {

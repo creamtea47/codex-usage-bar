@@ -7,6 +7,8 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:window:allow-close",
+    "core:window:allow-set-background-color",
+    "core:window:allow-set-theme",
     {
       "identifier": "opener:allow-open-url",
       "allow": [

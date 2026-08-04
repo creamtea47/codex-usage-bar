@@ -1,3 +1,4 @@
+import ArrowCircleUpRoundedIcon from '@mui/icons-material/ArrowCircleUpRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
@@ -5,7 +6,6 @@ import {
   Alert,
   AppBar,
   Box,
-  Button,
   CircularProgress,
   CssBaseline,
   GlobalStyles,
@@ -92,6 +92,9 @@ export default function App() {
     let removeDashboardListener: (() => void) | undefined;
     let removeSettingsListener: (() => void) | undefined;
     let removeUpdateListener: (() => void) | undefined;
+    let dashboardEventReceived = false;
+    let settingsEventReceived = false;
+    let updateEventReceived = false;
 
     void (async () => {
       try {
@@ -100,13 +103,16 @@ export default function App() {
           usageBridge.getSettings(),
           usageBridge.getAppUpdateInfo(),
           usageBridge.listenForDashboard((next) => {
+            dashboardEventReceived = true;
             if (!disposed) setSnapshot(next);
           }),
           usageBridge.listenForSettings((next) => {
+            settingsEventReceived = true;
             if (!disposed) setSettings(next);
           }),
           usageBridge.listenForAppUpdate((next) => {
-            if (!disposed && next.updateAvailable) setUpdateNotice(next);
+            updateEventReceived = true;
+            if (!disposed) setUpdateNotice(next.updateAvailable ? next : null);
           }),
         ]);
         if (disposed) {
@@ -115,9 +121,11 @@ export default function App() {
           removeUpdate();
           return;
         }
-        setSnapshot(dashboard);
-        setSettings(persistedSettings);
-        if (pendingUpdate.updateAvailable) setUpdateNotice(pendingUpdate);
+        // An event can arrive while the initial command snapshot is still in flight.
+        // Keep the event because it represents the newer state.
+        if (!dashboardEventReceived) setSnapshot(dashboard);
+        if (!settingsEventReceived) setSettings(persistedSettings);
+        if (!updateEventReceived) setUpdateNotice(pendingUpdate.updateAvailable ? pendingUpdate : null);
         removeDashboardListener = removeDashboard;
         removeSettingsListener = removeSettings;
         removeUpdateListener = removeUpdate;
@@ -233,6 +241,37 @@ export default function App() {
                   Codex 用量
                 </Typography>
               </Stack>
+              <Box
+                component="span"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                sx={{
+                  position: 'absolute',
+                  width: 1,
+                  height: 1,
+                  p: 0,
+                  m: -1,
+                  overflow: 'hidden',
+                  clipPath: 'inset(50%)',
+                  whiteSpace: 'nowrap',
+                  border: 0,
+                }}
+              >
+                {updateNotice ? `发现新版本 v${updateNotice.latestVersion}，可打开更新设置` : ''}
+              </Box>
+              {updateNotice && (
+                <Tooltip title={`发现新版本 v${updateNotice.latestVersion}，点击打开更新设置`}>
+                  <IconButton
+                    aria-label={`发现新版本 v${updateNotice.latestVersion}，打开更新设置`}
+                    color="success"
+                    size="small"
+                    onClick={() => void openSettings('about')}
+                  >
+                    <ArrowCircleUpRoundedIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              )}
               <Tooltip title={isRefreshing ? '正在刷新用量' : '刷新用量'}>
                 <span>
                   <IconButton
@@ -335,32 +374,6 @@ export default function App() {
         </Alert>
       </Snackbar>
 
-      <Snackbar
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-        autoHideDuration={8_000}
-        open={Boolean(updateNotice)}
-        onClose={() => setUpdateNotice(null)}
-      >
-        <Alert
-          severity="info"
-          variant="filled"
-          action={
-            <Button
-              color="inherit"
-              size="small"
-              onClick={() => {
-                setUpdateNotice(null);
-                void openSettings('about');
-              }}
-            >
-              查看更新
-            </Button>
-          }
-          onClose={() => setUpdateNotice(null)}
-        >
-          {updateNotice ? `发现新版本 v${updateNotice.latestVersion}，可在设置中下载并验证签名。` : ''}
-        </Alert>
-      </Snackbar>
     </ThemeProvider>
   );
 }

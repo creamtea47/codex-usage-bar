@@ -194,7 +194,7 @@ describe('App', () => {
     expect(await screen.findByText('无法打开设置窗口，请稍后重试。')).toBeTruthy();
   });
 
-  it('announces an automatically detected signed update and opens settings on demand', async () => {
+  it('shows a persistent top-right update icon and opens settings on demand', async () => {
     let updateHandler: ((info: AppUpdateInfo) => void) | undefined;
     prepareBridge();
     bridgeMocks.listenForAppUpdate.mockImplementation(async (handler: (info: AppUpdateInfo) => void) => {
@@ -211,8 +211,72 @@ describe('App', () => {
         checkedAt: '2030-01-04T12:00:00Z',
       });
     });
-    expect(await screen.findByText('发现新版本 v0.2.7，可在设置中下载并验证签名。')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '查看更新' }));
+    const updateButton = await screen.findByRole('button', { name: '发现新版本 v0.2.7，打开更新设置' });
+    expect(screen.getByRole('status').textContent).toBe('发现新版本 v0.2.7，可打开更新设置');
+    expect(screen.queryByText('发现新版本 v0.2.7，可在设置中下载并验证签名。')).toBeNull();
+    fireEvent.click(updateButton);
     await waitFor(() => expect(bridgeMocks.openSettingsWindow).toHaveBeenCalledWith('about'));
+    expect(screen.getByRole('button', { name: '发现新版本 v0.2.7，打开更新设置' })).toBeTruthy();
+
+    await act(async () => {
+      updateHandler?.({
+        currentVersion: '0.2.7',
+        latestVersion: '0.2.7',
+        updateAvailable: false,
+        checkedAt: '2030-01-04T12:01:00Z',
+      });
+    });
+    expect(screen.queryByRole('button', { name: '发现新版本 v0.2.7，打开更新设置' })).toBeNull();
+    expect(screen.getByRole('status').textContent).toBe('');
+  });
+
+  it('restores a pending update icon from the startup snapshot', async () => {
+    prepareBridge();
+    bridgeMocks.getAppUpdateInfo.mockResolvedValue({
+      currentVersion: '0.2.6',
+      latestVersion: '0.2.7',
+      updateAvailable: true,
+      checkedAt: '2030-01-04T12:00:00Z',
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole('button', { name: '发现新版本 v0.2.7，打开更新设置' })).toBeTruthy();
+  });
+
+  it('does not let an older startup snapshot overwrite a newer update event', async () => {
+    let updateHandler: ((info: AppUpdateInfo) => void) | undefined;
+    let finishUpdateLookup: ((info: AppUpdateInfo) => void) | undefined;
+    prepareBridge();
+    bridgeMocks.getAppUpdateInfo.mockImplementation(
+      () =>
+        new Promise<AppUpdateInfo>((resolve) => {
+          finishUpdateLookup = (info) => resolve(info);
+        }),
+    );
+    bridgeMocks.listenForAppUpdate.mockImplementation(async (handler: (info: AppUpdateInfo) => void) => {
+      updateHandler = handler;
+      return () => undefined;
+    });
+    render(<App />);
+    await waitFor(() => expect(updateHandler).toBeTypeOf('function'));
+
+    await act(async () => {
+      updateHandler?.({
+        currentVersion: '0.2.6',
+        latestVersion: '0.2.6',
+        updateAvailable: false,
+        checkedAt: '2030-01-04T12:01:00Z',
+      });
+      finishUpdateLookup?.({
+        currentVersion: '0.2.6',
+        latestVersion: '0.2.7',
+        updateAvailable: true,
+        checkedAt: '2030-01-04T12:00:00Z',
+      });
+    });
+
+    await screen.findByText('j***@example.com · Plus');
+    expect(screen.queryByRole('button', { name: '发现新版本 v0.2.7，打开更新设置' })).toBeNull();
   });
 });

@@ -4,6 +4,8 @@ use crate::{
 };
 use chrono::Utc;
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::{ffi::OsStr, path::Path};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::{Error as UpdaterError, Update, UpdaterExt};
 use tokio::sync::Mutex as AsyncMutex;
@@ -12,18 +14,10 @@ pub const APP_UPDATE_EVENT: &str = "app-update-updated";
 pub const APP_UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 
 /// 待安装对象只保存在内存中。它带有下载地址和签名，因此绝不经 IPC、日志或设置文件输出。
+#[derive(Default)]
 struct PendingAppUpdate {
     update: Option<Update>,
     info: AppUpdateInfo,
-}
-
-impl Default for PendingAppUpdate {
-    fn default() -> Self {
-        Self {
-            update: None,
-            info: AppUpdateInfo::default(),
-        }
-    }
 }
 
 /// 更新检查与下载共用操作锁，避免并发命令重复下载或替换应用。
@@ -88,7 +82,15 @@ pub async fn check_for_update(
     {
         Ok(updater) => updater,
         Err(error) => {
-            return record_check_failure(state, current_version, checked_at, automatic, &error).await;
+            return record_check_failure(
+                app,
+                state,
+                current_version,
+                checked_at,
+                automatic,
+                &error,
+            )
+            .await;
         }
     };
 
@@ -113,17 +115,24 @@ pub async fn check_for_update(
             log::info!(
                 "应用更新检查完成：来源={}，结果={}，当前版本={}，最新版本={}",
                 if automatic { "自动" } else { "手动" },
-                if info.update_available { "发现新版本" } else { "已是最新" },
+                if info.update_available {
+                    "发现新版本"
+                } else {
+                    "已是最新"
+                },
                 info.current_version,
                 info.latest_version
             );
             Ok(info)
         }
-        Err(error) => record_check_failure(state, current_version, checked_at, automatic, &error).await,
+        Err(error) => {
+            record_check_failure(app, state, current_version, checked_at, automatic, &error).await
+        }
     }
 }
 
 async fn record_check_failure(
+    app: &AppHandle,
     state: &AppUpdateState,
     current_version: String,
     checked_at: chrono::DateTime<Utc>,
@@ -136,7 +145,9 @@ async fn record_check_failure(
         update_available: false,
         checked_at: Some(checked_at),
     };
-    state.replace_pending(None, info).await;
+    state.replace_pending(None, info.clone()).await;
+    // 失败时旧候选已失效；同步清除前端提示，避免留下无法安装的更新入口。
+    emit_update_info(app, &info);
     // 仅保存归类结果，避免第三方错误文本把 URL、代理细节或远端响应写入本地日志。
     log::warn!(
         "应用更新检查失败：来源={}，类别={}",
@@ -149,6 +160,9 @@ async fn record_check_failure(
 /// 下载、验签和安装都在 Rust 中完成。Windows 交接安装器时会由插件结束当前进程；
 /// macOS 在替换 App 后显式重启。失败时保留同一个已检查候选，允许用户重新下载并验签。
 pub async fn install_pending_update(app: &AppHandle, state: &AppUpdateState) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    ensure_macos_app_bundle_install()?;
+
     let _operation = state
         .operation_guard
         .try_lock()
@@ -214,7 +228,10 @@ pub async fn install_pending_update(app: &AppHandle, state: &AppUpdateState) -> 
             total_bytes: None,
         },
     );
-    log::info!("应用更新已完成签名验证，正在交接安装：目标版本={}", update.version);
+    log::info!(
+        "应用更新已完成签名验证，正在交接安装：目标版本={}",
+        update.version
+    );
 
     if let Err(error) = update.install(bytes) {
         log::warn!("应用更新安装交接失败：类别={}", error_category(&error));
@@ -231,6 +248,38 @@ pub async fn install_pending_update(app: &AppHandle, state: &AppUpdateState) -> 
     // Windows 的 `install` 会接管 NSIS 安装器并结束进程；其余桌面平台保留安全成功返回。
     #[cfg(not(target_os = "macos"))]
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_app_bundle_install() -> Result<(), String> {
+    let is_app_bundle = std::env::current_exe()
+        .ok()
+        .is_some_and(|path| is_macos_app_bundle_executable(&path));
+    if is_app_bundle {
+        return Ok(());
+    }
+
+    // Updater 会把裸二进制的父目录当作替换目标。开发态通常位于 target/debug，
+    // 必须在下载前拒绝，避免把整个构建目录误当成 .app 更新。
+    log::warn!("拒绝应用内更新安装：macOS 当前可执行文件不在 App 包中。");
+    Err("当前程序不是从 macOS App 包运行，已取消更新。请通过 DMG 安装后重试。".to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_app_bundle_executable(path: &Path) -> bool {
+    let Some(macos_directory) = path.parent() else {
+        return false;
+    };
+    let Some(contents_directory) = macos_directory.parent() else {
+        return false;
+    };
+    let Some(app_directory) = contents_directory.parent() else {
+        return false;
+    };
+
+    macos_directory.file_name() == Some(OsStr::new("MacOS"))
+        && contents_directory.file_name() == Some(OsStr::new("Contents"))
+        && app_directory.extension() == Some(OsStr::new("app"))
 }
 
 fn emit_update_info(app: &AppHandle, info: &AppUpdateInfo) {
@@ -295,6 +344,26 @@ mod tests {
     fn signature_failures_have_a_safe_specific_message() {
         let error = UpdaterError::SignatureUtf8("not-a-real-signature".to_owned());
         assert_eq!(error_category(&error), "签名");
-        assert_eq!(user_message_for_error(&error), "更新包的签名验证失败，已取消安装。");
+        assert_eq!(
+            user_message_for_error(&error),
+            "更新包的签名验证失败，已取消安装。"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_macos_app_bundle_executables_can_install_updates() {
+        assert!(is_macos_app_bundle_executable(Path::new(
+            "/Applications/CodexUsageBar.app/Contents/MacOS/codex_usage_bar"
+        )));
+        assert!(is_macos_app_bundle_executable(Path::new(
+            "/Applications/My Widgets/CodexUsageBar.app/Contents/MacOS/codex_usage_bar"
+        )));
+        assert!(!is_macos_app_bundle_executable(Path::new(
+            "/workspace/src-tauri/target/debug/codex_usage_bar"
+        )));
+        assert!(!is_macos_app_bundle_executable(Path::new(
+            "/Applications/CodexUsageBar.app/Contents/Resources/codex_usage_bar"
+        )));
     }
 }

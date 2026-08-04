@@ -35,9 +35,9 @@
 - 动态显示接口返回的全部额度窗口、剩余百分比、重置时间和本地倒计时。
 - 成功刷新后展示如 `j***@example.com · Pro` 的掩码账号摘要，以及下次自动刷新倒计时和最近刷新时间。
 - 启动立即刷新，并可按 1 / 3 / 5 / 10 / 30 分钟自动刷新；两次请求之间只更新本地倒计时。
-- 右上角提供“刷新、设置、关闭”按钮；请求进行中会禁用刷新，避免重复请求。
+- 右上角提供“刷新、设置、关闭”按钮；发现新版本时显示绿色小更新图标，点击后再由你确认安装；请求进行中会禁用刷新，避免重复请求。
 - 长周期额度显示控量线；悬停提示会说明它是按额度窗口已过去的时间计算出的“建议最低剩余额度”，仅用于本地节奏参考，不是官方阈值。
-- 无边框、可拖动、可缩放的桌面悬浮卡，支持跟随系统、浅色、深色主题、置顶和位置 / 大小锁定。
+- 无边框、可拖动、可缩放的桌面悬浮卡，支持跟随系统、浅色、深色主题、置顶和位置 / 大小锁定；在 macOS 失焦状态下首次点击也会直接响应。
 - 关闭窗口即退出，不创建托盘常驻进程；可选当前用户登录时自启。
 - 设置以独立、不透明的原生窗口打开，左侧分为“显示”“数据与刷新”“启动”“关于与更新”四类。
 - 默认在启动后自动检查一次、之后最多每 6 小时检查一次；可在“关于与更新”中关闭。自动检查只读取包含各平台更新包签名的公开 HTTPS `latest.json` 清单，不会下载、安装或重启应用。
@@ -121,7 +121,11 @@ Windows 安装包的发布者为 `creamtea47`。为兼容旧版本升级，早�
 
 ## 开发
 
-开发环境需要 Node.js 22+、pnpm 10 和稳定版 Rust。Windows 还需要 MSVC 工具链与 WebView2 Runtime；macOS 需要 Xcode Command Line Tools。不需要全局安装 Tauri CLI。
+开发环境需要 Node.js 22.13+ 或 24+、pnpm 10 和稳定版 Rust。Windows 还需要 MSVC 工具链与 WebView2 Runtime；macOS 需要 Xcode Command Line Tools。不需要全局安装 Tauri CLI。
+
+主悬浮卡依赖真正的原生透明窗口来呈现 CSS 圆角。Tauri 在 macOS 上需要 `app.macOSPrivateApi: true` 才能透明化 WKWebView 背景；缺少该项会在四角露出白色矩形底层。该私有 API 不适用于 Mac App Store，但不影响当前 GitHub Release 的 DMG 分发方式。
+
+macOS 的应用内更新只允许从标准 `.app/Contents/MacOS` 包内执行。`tauri dev` 的裸调试二进制会在下载前拒绝安装，避免更新器把 `target/debug` 误当成需要替换的 App 目录；请使用本地 DMG 验证完整安装流程。
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -133,12 +137,14 @@ pnpm tauri dev
 
 构建当前系统的发行包：
 
+仓库会自动合并 `tauri.windows.conf.json` 或 `tauri.macos.conf.json`，为 Tauri 构建选择当前系统的原生安装包。普通本地构建没有发布私钥，因此应使用下列 CI 等价命令关闭发布签名与更新产物：
+
 ```powershell
 # Windows：普通本地包（不需要发布私钥）
-pnpm tauri build --bundles nsis --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
+pnpm tauri build --bundles nsis --no-sign --config src-tauri/tauri.unsigned.conf.json
 
 # macOS：普通本地包（不需要发布私钥）
-pnpm tauri build --bundles dmg --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
+pnpm tauri build --bundles dmg --no-sign --config src-tauri/tauri.unsigned.conf.json
 ```
 
 产物位于 `src-tauri\target\release\bundle\nsis\` 或 `src-tauri/target/release/bundle/dmg/`。
@@ -160,9 +166,9 @@ pnpm tauri build --bundles dmg --no-sign --config '{"bundle":{"createUpdaterArti
 维护者发布示例：
 
 ```powershell
-git tag -a v0.2.6 -m "v0.2.6 签名自动检测与确认更新"
+git tag -a v0.2.7 -m "v0.2.7 macOS 兼容与更新提示"
 git push origin master
-git push origin v0.2.6
+git push origin v0.2.7
 ```
 
 ## 不包含的能力

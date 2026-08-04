@@ -37,6 +37,7 @@ import {
   useMediaQuery,
   type AlertColor,
 } from '@mui/material';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -128,6 +129,8 @@ export default function SettingsWindow() {
     let removeUpdateListener: (() => void) | undefined;
     let removeUpdateProgressListener: (() => void) | undefined;
     let removeNavigationListener: (() => void) | undefined;
+    let settingsEventReceived = false;
+    let updateEventReceived = false;
 
     void (async () => {
       try {
@@ -136,16 +139,21 @@ export default function SettingsWindow() {
           usageBridge.getAutostart(),
           usageBridge.getAppUpdateInfo(),
           usageBridge.listenForSettings((next) => {
+            settingsEventReceived = true;
             if (!disposed) setSettings(next);
           }),
           usageBridge.listenForAppUpdate((next) => {
+            updateEventReceived = true;
             if (!disposed) setUpdateInfo(next);
           }),
           usageBridge.listenForAppUpdateProgress((next) => {
             if (!disposed) setUpdateProgress(next);
           }),
           usageBridge.listenForSettingsNavigation((section) => {
-            if (!disposed) setActiveSection(section);
+            if (!disposed) {
+              setActiveSection(section);
+              setIsUpdateDialogOpen(section === 'about');
+            }
           }),
         ]);
         if (disposed) {
@@ -155,9 +163,10 @@ export default function SettingsWindow() {
           removeNavigation();
           return;
         }
-        setSettings(persistedSettings);
+        // Prefer events received during startup over command snapshots captured earlier.
+        if (!settingsEventReceived) setSettings(persistedSettings);
         setAutostart(autostartEnabled);
-        setUpdateInfo(existingUpdate);
+        if (!updateEventReceived) setUpdateInfo(existingUpdate);
         removeSettingsListener = removeListener;
         removeUpdateListener = removeUpdate;
         removeUpdateProgressListener = removeUpdateProgress;
@@ -178,6 +187,18 @@ export default function SettingsWindow() {
 
   const activeTheme = useMemo(() => resolveTheme(settings.theme, prefersDark), [settings.theme, prefersDark]);
   const muiTheme = useMemo(() => createUsageTheme(activeTheme), [activeTheme]);
+  const nativeTheme = settings.theme === 'system' ? null : settings.theme;
+
+  useEffect(() => {
+    // MUI only themes the webview. Keep the native macOS/Windows title bar in sync too.
+    // `null` lets the native window keep tracking system appearance changes.
+    const currentWindow = getCurrentWindow();
+    void Promise.all([
+      currentWindow.setTheme(nativeTheme),
+      currentWindow.setBackgroundColor(muiTheme.palette.background.paper),
+    ])
+      .catch(() => setFeedback({ message: '原生窗口主题同步失败。', severity: 'error' }));
+  }, [muiTheme.palette.background.paper, nativeTheme]);
 
   const updateSettings = async (partial: Partial<Settings>) => {
     if (isSaving) return;

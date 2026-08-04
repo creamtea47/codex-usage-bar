@@ -68,7 +68,7 @@ jobs:
         shell: powershell
         run: |
           # PR/分支构建不读取正式私钥，也不生成会被发布的 updater 产物。
-          pnpm exec tauri build --bundles nsis --no-sign --ci --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          pnpm exec tauri build --bundles nsis --no-sign --ci --config src-tauri/tauri.unsigned.conf.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build signed NSIS installer
@@ -172,7 +172,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pnpm exec tauri build --bundles dmg --no-sign --ci --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          pnpm exec tauri build --bundles dmg --no-sign --ci --config src-tauri/tauri.unsigned.conf.json
 
       - name: Build DMG and signed updater payload
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}

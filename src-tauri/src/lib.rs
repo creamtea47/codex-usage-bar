@@ -1,5 +1,5 @@
-mod auth;
 mod app_update;
+mod auth;
 mod models;
 mod settings;
 mod usage;
@@ -7,8 +7,8 @@ mod usage;
 use crate::{
     app_update::{check_for_update, install_pending_update, AppUpdateState},
     models::{
-        DashboardSnapshot, DashboardStatus, MainWindowSizeMode, Settings, StoredSettings,
-        AppUpdateInfo, WindowPlacement,
+        AppUpdateInfo, DashboardSnapshot, DashboardStatus, MainWindowSizeMode, Settings,
+        StoredSettings, WindowPlacement,
     },
     settings::{
         apply_compact_layout_migration, cleanup_logs, load_settings,
@@ -72,8 +72,10 @@ impl AppState {
         stored_settings: StoredSettings,
         settings_path: PathBuf,
     ) -> Self {
-        let (interval_sender, _) = watch::channel(stored_settings.preferences.refresh_interval_seconds);
-        let (update_check_sender, _) = watch::channel(stored_settings.preferences.auto_check_updates);
+        let (interval_sender, _) =
+            watch::channel(stored_settings.preferences.refresh_interval_seconds);
+        let (update_check_sender, _) =
+            watch::channel(stored_settings.preferences.auto_check_updates);
         Self {
             usage_client,
             snapshot: AsyncMutex::new(DashboardSnapshot::default()),
@@ -738,6 +740,62 @@ mod tests {
         assert!(is_known_window_label(MAIN_WINDOW_LABEL));
         assert!(is_known_window_label(SETTINGS_WINDOW_LABEL));
         assert!(!is_known_window_label("untrusted-window"));
+    }
+
+    #[test]
+    fn macos_transparent_main_window_enables_private_api() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main_window = config["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["label"] == MAIN_WINDOW_LABEL)
+            .unwrap();
+
+        assert_eq!(main_window["transparent"], true);
+        assert_eq!(main_window["acceptFirstMouse"], true);
+        assert_eq!(config["app"]["macOSPrivateApi"], true);
+    }
+
+    #[test]
+    fn settings_titlebar_can_follow_the_webview_theme() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let settings_window = config["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["label"] == SETTINGS_WINDOW_LABEL)
+            .unwrap();
+        assert_eq!(settings_window["titleBarStyle"], "Transparent");
+
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/settings.json")).unwrap();
+        let permissions = capability["permissions"].as_array().unwrap();
+        assert!(permissions
+            .iter()
+            .any(|permission| permission == "core:window:allow-set-theme"));
+        assert!(permissions
+            .iter()
+            .any(|permission| { permission == "core:window:allow-set-background-color" }));
+    }
+
+    #[test]
+    fn native_bundle_defaults_are_platform_specific() {
+        let base: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.windows.conf.json")).unwrap();
+        let macos: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.macos.conf.json")).unwrap();
+        let unsigned: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.unsigned.conf.json")).unwrap();
+
+        assert!(base["bundle"].get("targets").is_none());
+        assert_eq!(windows["bundle"]["targets"], serde_json::json!(["nsis"]));
+        assert_eq!(macos["bundle"]["targets"], serde_json::json!(["dmg"]));
+        assert_eq!(unsigned["bundle"]["createUpdaterArtifacts"], false);
     }
 
     #[tokio::test]

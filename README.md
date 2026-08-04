@@ -35,9 +35,9 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 - Displays every quota window returned by the usage API, its remaining percentage, reset time, and local countdown.
 - Shows a masked account summary such as `j***@example.com · Pro` after a successful refresh, together with the next automatic-refresh countdown and most recent refresh time.
 - Refreshes at launch and on a configurable 1 / 3 / 5 / 10 / 30 minute interval; only the local countdown changes between requests.
-- Keeps **Refresh**, **Settings**, and **Close** in the upper-right corner. Refresh is disabled while a request is running to prevent duplicate requests.
+- Keeps **Refresh**, **Settings**, and **Close** in the upper-right corner. A green update icon appears when a new version is available and opens the user-confirmed install flow. Refresh is disabled while a request is running to prevent duplicate requests.
 - Draws a pace marker for long quota windows. Its tooltip explains that the marker is the suggested minimum remaining quota calculated from elapsed window time; it is a local pacing estimate, not an official limit.
-- Uses a borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position / size lock.
+- Uses a borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position / size lock, and responds to the first click while unfocused on macOS.
 - Closes completely with its window—no tray-resident process. Autostart for the current account is optional.
 - Opens Settings in a separate opaque native window with sidebar categories: **Display**, **Data & refresh**, **Startup**, and **About & updates**.
 - Checks once shortly after launch and then at most every six hours by default; it can be disabled in **About & updates**. Automatic checks read only the public HTTPS `latest.json` manifest containing signatures for each platform update payload; they never download, install, or restart the app.
@@ -121,7 +121,11 @@ The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_
 
 ## Development
 
-Development requires Node.js 22+, pnpm 10, and stable Rust. Windows additionally needs the MSVC toolchain and WebView2 Runtime; macOS needs Xcode Command Line Tools. A global Tauri CLI is not required.
+Development requires Node.js 22.13+ or 24+, pnpm 10, and stable Rust. Windows additionally needs the MSVC toolchain and WebView2 Runtime; macOS needs Xcode Command Line Tools. A global Tauri CLI is not required.
+
+The main card relies on a genuinely transparent native window for its CSS-rounded corners. On macOS, Tauri requires `app.macOSPrivateApi: true` to make the WKWebView background transparent; without it, an opaque white rectangle shows through at all four corners. This private API is not compatible with Mac App Store distribution, but it is compatible with the project's current GitHub Release DMGs.
+
+In-app updates on macOS are allowed only when the executable is running from a standard `.app/Contents/MacOS` bundle. The raw `tauri dev` binary rejects installation before downloading so the updater cannot mistake `target/debug` for the App directory; use a local DMG to test the complete install flow.
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -133,12 +137,14 @@ pnpm tauri dev
 
 Build the native package for the current platform with:
 
+The repository automatically merges `tauri.windows.conf.json` or `tauri.macos.conf.json` to select the native installer for the current platform. Ordinary local builds do not have the release key, so use the following CI-equivalent commands to disable release signing and updater artifacts:
+
 ```powershell
 # Windows: ordinary local bundle (no release key required)
-pnpm tauri build --bundles nsis --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
+pnpm tauri build --bundles nsis --no-sign --config src-tauri/tauri.unsigned.conf.json
 
 # macOS: ordinary local bundle (no release key required)
-pnpm tauri build --bundles dmg --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
+pnpm tauri build --bundles dmg --no-sign --config src-tauri/tauri.unsigned.conf.json
 ```
 
 Output is written below `src-tauri\target\release\bundle\nsis\` or `src-tauri/target/release/bundle/dmg/`.
@@ -160,9 +166,9 @@ The current signing key has no password. If a future encrypted key is used, conf
 Example maintainer release:
 
 ```powershell
-git tag -a v0.2.6 -m "v0.2.6 signed update detection and confirmation"
+git tag -a v0.2.7 -m "v0.2.7 macOS compatibility and update indicator"
 git push origin master
-git push origin v0.2.6
+git push origin v0.2.7
 ```
 
 ## Intentionally excluded

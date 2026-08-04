@@ -228,7 +228,7 @@ fn label_for_window(id: &str, seconds: i64) -> String {
     if seconds <= 12 * 60 * 60 {
         return "短周期限额".to_owned();
     }
-    if seconds >= 6 * 24 * 60 * 60 && seconds <= 8 * 24 * 60 * 60 {
+    if (6 * 24 * 60 * 60..=8 * 24 * 60 * 60).contains(&seconds) {
         return "周限额".to_owned();
     }
     if seconds >= 24 * 60 * 60 {
