@@ -212,7 +212,7 @@ jobs:
             cp "$signature" "$updater_destination.sig"
           fi
 
-          printf 'Staged DMG: %s\\n' "$destination"
+          printf 'Staged DMG: %s\n' "$destination"
           shasum -a 256 "$destination"
 
       - name: Upload macOS artifact
@@ -277,12 +277,16 @@ jobs:
           for asset in "${expected[@]}"; do
             test -s "release-assets/$asset"
           done
-          expected_files="$(printf '%s\\n' "${expected[@]}" | sort)"
-          actual_files="$(find release-assets -maxdepth 1 -type f -printf '%f\\n' | sort)"
-          test "$actual_files" = "$expected_files"
+          expected_files="$(printf '%s\n' "${expected[@]}" | sort)"
+          actual_files="$(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "$actual_files" != "$expected_files" ]]; then
+            echo 'Unexpected release asset set:' >&2
+            diff -u <(printf '%s\n' "${expected[@]}" | sort) <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort) || true
+            exit 1
+          fi
           node scripts/generate-updater-manifest.mjs --assets-dir release-assets --tag "$GITHUB_REF_NAME"
           node -e "const fs=require('fs'); const manifest=JSON.parse(fs.readFileSync('release-assets/latest.json')); const expected=['windows-x86_64','windows-aarch64','darwin-x86_64','darwin-aarch64']; if (JSON.stringify(Object.keys(manifest.platforms)) !== JSON.stringify(expected)) process.exit(1); for (const key of expected) if (!manifest.platforms[key].url || !manifest.platforms[key].signature) process.exit(1);"
-          find release-assets -maxdepth 1 -type f -printf '%f\\n' | sort
+          find release-assets -maxdepth 1 -type f -printf '%f\n' | sort
 
       - name: Verify all updater payload signatures against the embedded public key
         uses: dtolnay/rust-toolchain@stable
@@ -339,7 +343,7 @@ jobs:
           set -euo pipefail
           test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" = true
           actual="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
-          expected="$(find release-assets -maxdepth 1 -type f -printf '%f\\n' | sort)"
+          expected="$(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)"
           test "$actual" = "$expected"
 
       - name: Publish complete release
