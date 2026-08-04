@@ -20,6 +20,7 @@ import {
   FormControl,
   FormControlLabel,
   InputLabel,
+  LinearProgress,
   List,
   ListItemButton,
   ListItemIcon,
@@ -42,7 +43,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { usageBridge } from './bridge';
 import { formatDateTime } from './format';
 import { createUsageTheme } from './theme';
-import { defaultSettings, type Settings, type Theme, type UpdateInfo } from './types';
+import {
+  defaultSettings,
+  type AppUpdateInfo,
+  type AppUpdateProgress,
+  type Settings,
+  type Theme,
+} from './types';
 
 type SettingsSection = 'display' | 'data' | 'startup' | 'about';
 
@@ -52,6 +59,7 @@ interface Feedback {
 }
 
 const drawerWidth = 208;
+const releasePageUrl = 'https://github.com/creamtea47/codex-usage-bar/releases';
 
 const refreshOptions = [
   { seconds: 60, label: '1 分钟' },
@@ -72,6 +80,31 @@ function resolveTheme(theme: Theme, prefersDark: boolean): Exclude<Theme, 'syste
   return theme === 'system' ? (prefersDark ? 'dark' : 'light') : theme;
 }
 
+function formatUpdateProgress(progress: AppUpdateProgress | null): string {
+  if (!progress) return '正在准备更新…';
+  if (progress.stage === 'verifying') return '正在验证更新包签名…';
+  if (progress.stage === 'installing') return '正在交接系统安装程序…';
+  if (progress.totalBytes && progress.totalBytes > 0) {
+    return `正在下载更新：${Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))}%`;
+  }
+  return '正在下载更新…';
+}
+
+/** Rust 只会返回这些固定更新错误；前端白名单展示，避免意外回显第三方网络异常细节。 */
+function safeUpdateErrorMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const safeMessages = [
+    '更新包的签名验证失败，已取消安装。',
+    '暂时没有适用于当前设备的有效更新。',
+    '无法连接更新服务，请检查网络或代理后重试。',
+    '更新服务配置不可用，请稍后重试。',
+    '更新安装未完成，请稍后重试。',
+    '更新操作正在进行，请稍后再试。',
+    '没有待安装的更新，请先重新检查更新。',
+  ];
+  return safeMessages.find((candidate) => message.includes(candidate)) ?? fallback;
+}
+
 /**
  * 设置页运行在独立、非透明的 Tauri 窗口中。左侧导航现在已是实际设置分类，后续新增项可以继续归类，
  * 而不再挤入悬浮卡的 Popover。所有持久化仍由 Rust command 完成。
@@ -82,30 +115,53 @@ export default function SettingsWindow() {
   const [activeSection, setActiveSection] = useState<SettingsSection>('display');
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const prefersDark = useMediaQuery('(prefers-color-scheme: dark)', { noSsr: true });
 
   useEffect(() => {
     let disposed = false;
     let removeSettingsListener: (() => void) | undefined;
+    let removeUpdateListener: (() => void) | undefined;
+    let removeUpdateProgressListener: (() => void) | undefined;
+    let removeNavigationListener: (() => void) | undefined;
 
     void (async () => {
       try {
-        const [persistedSettings, autostartEnabled, removeListener] = await Promise.all([
+        const [persistedSettings, autostartEnabled, existingUpdate, removeListener, removeUpdate, removeUpdateProgress, removeNavigation] = await Promise.all([
           usageBridge.getSettings(),
           usageBridge.getAutostart(),
+          usageBridge.getAppUpdateInfo(),
           usageBridge.listenForSettings((next) => {
             if (!disposed) setSettings(next);
+          }),
+          usageBridge.listenForAppUpdate((next) => {
+            if (!disposed) setUpdateInfo(next);
+          }),
+          usageBridge.listenForAppUpdateProgress((next) => {
+            if (!disposed) setUpdateProgress(next);
+          }),
+          usageBridge.listenForSettingsNavigation((section) => {
+            if (!disposed) setActiveSection(section);
           }),
         ]);
         if (disposed) {
           removeListener();
+          removeUpdate();
+          removeUpdateProgress();
+          removeNavigation();
           return;
         }
         setSettings(persistedSettings);
         setAutostart(autostartEnabled);
+        setUpdateInfo(existingUpdate);
         removeSettingsListener = removeListener;
+        removeUpdateListener = removeUpdate;
+        removeUpdateProgressListener = removeUpdateProgress;
+        removeNavigationListener = removeNavigation;
       } catch {
         if (!disposed) setFeedback({ message: '无法读取当前设置，请稍后重试。', severity: 'error' });
       }
@@ -114,6 +170,9 @@ export default function SettingsWindow() {
     return () => {
       disposed = true;
       removeSettingsListener?.();
+      removeUpdateListener?.();
+      removeUpdateProgressListener?.();
+      removeNavigationListener?.();
     };
   }, []);
 
@@ -150,19 +209,34 @@ export default function SettingsWindow() {
   const checkUpdate = async () => {
     if (isCheckingUpdate) return;
     setIsCheckingUpdate(true);
+    setUpdateProgress(null);
     try {
-      setUpdateInfo(await usageBridge.checkUpdate());
-    } catch {
-      setFeedback({ message: '暂时无法检查更新，请稍后重试。', severity: 'error' });
+      setUpdateInfo(await usageBridge.checkAppUpdate());
+      setIsUpdateDialogOpen(true);
+    } catch (error) {
+      setFeedback({ message: safeUpdateErrorMessage(error, '暂时无法检查更新，请稍后重试。'), severity: 'error' });
     } finally {
       setIsCheckingUpdate(false);
     }
   };
 
-  const openReleasePage = async () => {
-    if (!updateInfo) return;
+  const installUpdate = async () => {
+    if (!updateInfo?.updateAvailable || isInstallingUpdate) return;
+    setIsInstallingUpdate(true);
+    setUpdateProgress({ stage: 'downloading', downloadedBytes: 0, totalBytes: null });
     try {
-      await openUrl(updateInfo.downloadUrl ?? updateInfo.releaseUrl);
+      await usageBridge.installAppUpdate();
+      setFeedback({ message: '更新已交接给系统安装程序。', severity: 'success' });
+    } catch (error) {
+      setFeedback({ message: safeUpdateErrorMessage(error, '更新未完成，请检查网络后重试。'), severity: 'error' });
+    } finally {
+      setIsInstallingUpdate(false);
+    }
+  };
+
+  const openReleasePage = async () => {
+    try {
+      await openUrl(releasePageUrl);
     } catch {
       setFeedback({ message: '无法打开发布页面，请稍后重试。', severity: 'error' });
     }
@@ -332,14 +406,42 @@ export default function SettingsWindow() {
                     关于与更新
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    仅查询公开 GitHub Release，不会自动下载、替换或重启应用。
+                    通过公开 HTTPS 更新清单检查；下载后验证更新包签名，不会读取或发送 Codex 认证信息。
                   </Typography>
                 </Box>
                 <Paper variant="outlined" sx={{ p: 2 }}>
-                  <Stack spacing={1.25}>
+                  <Stack spacing={1.5}>
                     <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
                       应用更新
                     </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      当前版本 v{updateInfo?.currentVersion ?? '—'}
+                    </Typography>
+                    <FormControlLabel
+                      control={<Switch checked={settings.autoCheckUpdates} disabled={isSaving} onChange={(event) => void updateSettings({ autoCheckUpdates: event.target.checked })} />}
+                      label="自动检查更新"
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+                      启动后会检查一次，之后最多每 6 小时检查一次；仅检测，不会自动下载、安装或重启。
+                    </Typography>
+                    {updateInfo?.checkedAt && (
+                      <Typography variant="caption" color="text.secondary">
+                        最近检查：{formatDateTime(updateInfo.checkedAt)}
+                      </Typography>
+                    )}
+                    {updateInfo?.updateAvailable && (
+                      <Alert
+                        severity="info"
+                        variant="outlined"
+                        action={
+                          <Button color="inherit" size="small" onClick={() => setIsUpdateDialogOpen(true)}>
+                            查看
+                          </Button>
+                        }
+                      >
+                        发现新版本 v{updateInfo.latestVersion}
+                      </Alert>
+                    )}
                     <Button
                       disabled={isCheckingUpdate}
                       startIcon={isCheckingUpdate ? <CircularProgress color="inherit" size={16} /> : <SystemUpdateAltRoundedIcon />}
@@ -357,33 +459,58 @@ export default function SettingsWindow() {
         </Box>
       </Box>
 
-      <Dialog fullWidth maxWidth="xs" open={Boolean(updateInfo)} onClose={() => setUpdateInfo(null)}>
+      <Dialog fullWidth maxWidth="xs" open={isUpdateDialogOpen} onClose={() => !isInstallingUpdate && setIsUpdateDialogOpen(false)}>
         <DialogTitle>检查更新</DialogTitle>
         <DialogContent dividers>
-          <Stack spacing={1}>
+          <Stack spacing={1.25}>
             <Typography variant="h6" sx={{ fontWeight: 800 }}>
               {updateInfo?.updateAvailable ? `发现新版本 v${updateInfo.latestVersion}` : '当前已是最新版本'}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               当前版本 v{updateInfo?.currentVersion} · 最新版本 v{updateInfo?.latestVersion}
             </Typography>
-            {updateInfo?.publishedAt && (
+            {updateInfo?.checkedAt && (
               <Typography variant="body2" color="text.secondary">
-                发布于 {formatDateTime(updateInfo.publishedAt)}
+                检查时间 {formatDateTime(updateInfo.checkedAt)}
               </Typography>
             )}
             {updateInfo?.updateAvailable && (
               <Alert severity="info" variant="outlined">
-                请在发布页下载安装包。应用不会自动下载、替换或重启自身。
+                点击“下载并安装”后会下载并验证签名。Windows 将在开始安装时关闭应用；macOS 完成替换后会重新启动。
               </Alert>
+            )}
+            {isInstallingUpdate && (
+              <Stack spacing={0.75}>
+                <LinearProgress
+                  variant={updateProgress?.totalBytes ? 'determinate' : 'indeterminate'}
+                  value={
+                    updateProgress?.totalBytes
+                      ? Math.min(100, (updateProgress.downloadedBytes / updateProgress.totalBytes) * 100)
+                      : undefined
+                  }
+                />
+                <Typography variant="caption" color="text.secondary">
+                  {formatUpdateProgress(updateProgress)}
+                </Typography>
+              </Stack>
             )}
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setUpdateInfo(null)}>关闭</Button>
+          <Button disabled={isInstallingUpdate} onClick={() => setIsUpdateDialogOpen(false)}>
+            关闭
+          </Button>
+          <Button disabled={isInstallingUpdate} endIcon={<LaunchRoundedIcon />} onClick={() => void openReleasePage()}>
+            发布页
+          </Button>
           {updateInfo?.updateAvailable && (
-            <Button endIcon={<LaunchRoundedIcon />} variant="contained" onClick={() => void openReleasePage()}>
-              打开发布页
+            <Button
+              disabled={isInstallingUpdate}
+              startIcon={isInstallingUpdate ? <CircularProgress color="inherit" size={16} /> : <SystemUpdateAltRoundedIcon />}
+              variant="contained"
+              onClick={() => void installUpdate()}
+            >
+              {isInstallingUpdate ? '正在更新…' : '下载并安装'}
             </Button>
           )}
         </DialogActions>

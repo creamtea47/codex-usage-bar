@@ -131,6 +131,7 @@ mod tests {
         assert_eq!(result.window_placement, None);
         assert_eq!(result.settings_window_placement, None);
         assert_eq!(result.preferences.theme, Theme::System);
+        assert!(result.preferences.auto_check_updates);
     }
 
     #[test]
@@ -206,6 +207,8 @@ mod tests {
         assert_eq!(settings.window_placement.as_ref().unwrap().x, 120);
         assert_eq!(settings.settings_window_placement, None);
         assert!(!settings.compact_layout_migration_completed);
+        // 旧设置文件没有此字段时保持新版默认，避免升级后意外关闭自动检查。
+        assert!(settings.preferences.auto_check_updates);
     }
 
     #[test]

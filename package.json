@@ -1,7 +1,7 @@
 {
   "name": "codex-usage-bar",
   "private": true,
-  "version": "0.2.5",
+  "version": "0.2.6",
   "author": "creamtea47",
   "description": "A privacy-first desktop floating usage card for Codex.",
   "homepage": "https://github.com/creamtea47/codex-usage-bar",
@@ -17,7 +17,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint . --max-warnings=0",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/generate-updater-manifest.node-test.mjs",
     "test:watch": "vitest",
     "tauri": "tauri"
   },

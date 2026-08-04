@@ -25,9 +25,9 @@
 
 ![CodexUsageBar 紧凑主界面：显示动态额度窗口、剩余额度、重置时间和右上角刷新控件](docs/images/dashboard-light.png)
 
-### 独立设置窗口与手动检查更新
+### 独立设置窗口与自动更新设置
 
-![CodexUsageBar 独立设置窗口：左侧分类导航，包含显示、刷新、启动和更新设置](docs/images/settings-update.png)
+![CodexUsageBar 独立设置窗口：自动检测开关、六小时检查节奏与手动更新入口；更新包在下载后验签](docs/images/settings-update.png)
 
 ## 功能
 
@@ -40,7 +40,8 @@
 - 无边框、可拖动、可缩放的桌面悬浮卡，支持跟随系统、浅色、深色主题、置顶和位置 / 大小锁定。
 - 关闭窗口即退出，不创建托盘常驻进程；可选当前用户登录时自启。
 - 设置以独立、不透明的原生窗口打开，左侧分为“显示”“数据与刷新”“启动”“关于与更新”四类。
-- 设置窗口提供**手动检查更新**：只检查本仓库公开 GitHub Release，不会在后台轮询、自动下载、替换或重启应用。
+- 默认在启动后自动检查一次、之后最多每 6 小时检查一次；可在“关于与更新”中关闭。自动检查只读取包含各平台更新包签名的公开 HTTPS `latest.json` 清单，不会下载、安装或重启应用。
+- 发现新版时主卡会提示；在设置窗口确认“下载并安装”后，Rust 后端才会下载并验证 Tauri 签名。Windows 会交接当前用户 NSIS 安装器，macOS 会在必要时请求系统授权、替换 App 后重启。
 
 ## 安装
 
@@ -55,7 +56,9 @@
 
 2. 确保 Codex 已在本机登录，再启动 **CodexUsageBar**。
 
-当前 macOS DMG 采用临时代码签名，尚未经过 Apple 公证；首次打开若被 Gatekeeper 拦截，请在“系统设置 → 隐私与安全性”允许打开，或按住 Control 点击 App 后选择“打开”。正式公证需要 Apple Developer ID 证书和公证凭据。
+> 从 v0.2.5 或更早版本升级时，请先手动安装首个启用应用内更新器的版本（v0.2.6 或更高）。安装完成后，后续版本才可以通过应用自动检测并由你确认安装。
+
+当前 macOS DMG 采用临时代码签名，尚未经过 Apple 公证；首次打开若被 Gatekeeper 拦截，请在“系统设置 → 隐私与安全性”允许打开，或按住 Control 点击 App 后选择“打开”。应用内更新的 Tauri 签名用于验证更新包完整性，不能替代 Apple Developer ID 签名与公证。
 
 安装后的新版本会使用新的应用标识和配置目录，不依赖原来的 `luodaoyi/codex-useage-win` 仓库，也不会迁移或清理旧版设置、自启项。
 
@@ -69,13 +72,13 @@ Windows 安装包的发布者为 `creamtea47`。为兼容旧版本升级，早�
 
 打开后，卡片会立即尝试读取用量。右上角“刷新”可手动重试；旁边的“设置”会打开独立窗口，其中按“显示”“数据与刷新”“启动”“关于与更新”分类。
 
-“显示”页可切换主题、置顶、位置 / 大小锁定；“数据与刷新”页设置刷新间隔；“启动”页控制开机自启；“关于与更新”页显示版本和手动检查更新。关闭设置窗口只会隐藏设置页，悬浮卡会继续运行；关闭悬浮卡才会退出应用。
+“显示”页可切换主题、置顶、位置 / 大小锁定；“数据与刷新”页设置刷新间隔；“启动”页控制开机自启；“关于与更新”页显示当前版本、自动检查开关和更新操作。关闭设置窗口只会隐藏设置页，悬浮卡会继续运行；关闭悬浮卡才会退出应用。
 
-需要查看新版本时，打开设置并点击“检查更新”：
+应用默认会在启动后自动检查一次、之后最多每 6 小时检查一次，也可以在设置中关闭。需要立即检查时，打开设置并点击“检查更新”：
 
-- 已有新版本时，应用只会打开本仓库的 Release 下载页，由你自行下载和安装。
-- 已是最新版本时，会显示当前版本与最新版本。
-- 暂无公开 Release 或网络不可用时，不会影响已显示的用量数据。
+- 已有新版本时，主卡会给出提示；设置页显示版本信息。你点击“下载并安装”后，应用才会下载并验证更新包签名，再交接原生安装流程。
+- Windows 开始安装时会关闭 CodexUsageBar；macOS 替换 App 后会重启。应用不会在未确认时静默下载、替换或重启。
+- 已是最新版本、网络不可用或签名验证失败时，不会影响已显示的用量数据；签名失败会取消安装。
 
 ## 隐私与只读边界
 
@@ -87,13 +90,13 @@ Windows 安装包的发布者为 `creamtea47`。为兼容旧版本升级，早�
 2. `%CODEX_HOME%\auth.json`。
 3. Windows：`%USERPROFILE%\.codex\auth.json`；macOS：`~/.codex/auth.json`。
 
-应用只读取 `GET https://chatgpt.com/backend-api/wham/usage` 的用量结果，并且：
+用量功能仅读取 `GET https://chatgpt.com/backend-api/wham/usage` 的用量结果；更新功能独立读取公开 HTTPS `latest.json` 清单，并且：
 
 - 不刷新 OAuth Token，不写回或修改 `auth.json`。
 - 不查询或消耗重置卡，不发起 OAuth 登录流程。
 - 不安装前端文件系统或 HTTP 权限插件；敏感 I/O 保持在 Rust 后端。
 - 掩码账号摘要仅在用量请求成功且接口提供账号邮箱时生成；不会从 `auth.json` 读取邮箱，不持久化未掩码邮箱，也不会将任一种邮箱写入运行日志。
-- 更新检查只访问 `creamtea47/codex-usage-bar` 的公开 GitHub Release 信息，不携带 Codex 认证数据。
+- 更新检查只访问 `creamtea47/codex-usage-bar` 的包含各平台更新包签名的公开 HTTPS `latest.json` 清单，不携带 `auth.json`、Token、邮箱或用量数据。下载包必须与内置公钥匹配才会安装。
 
 认证文件缺失、Token 失效或接口返回未授权时，最后一次成功数据会保留并标记为“已过期”。请在 Codex 中重新登录后，再点击右上角“刷新”。
 
@@ -105,13 +108,13 @@ Windows 安装包的发布者为 `creamtea47`。为兼容旧版本升级，早�
 | 原生边界 | Tauri 2 command / capability | 最小化 IPC，限定窗口与打开 Release 链接的能力 |
 | 数据与持久化 | Rust + Tokio + Reqwest + Serde | 只读认证、用量请求去重、内存快照、设置、自启、脱敏日志 |
 
-对前端开放的 IPC 为 `get_dashboard`、`refresh_dashboard`、`get_settings`、`save_settings`、`get_autostart`、`set_autostart`、`open_settings_window`、`mark_main_size_manual` 与 `check_update`。凭据和未掩码账号信息永不跨越 Rust 边界。
+对前端开放的 IPC 为 `get_dashboard`、`refresh_dashboard`、`get_settings`、`save_settings`、`get_autostart`、`set_autostart`、`open_settings_window`、`mark_main_size_manual`、`get_app_update_info`、`check_app_update` 与 `install_app_update`。更新 IPC 只返回版本摘要和下载进度；URL、签名、原始清单、凭据和未掩码账号信息永不跨越 Rust 边界。
 
 ## 日志与排查
 
 - 设置及主卡 / 设置窗口的位置：Windows 为 `%APPDATA%\com.creamtea47.codexusagebar\settings.json`；macOS 为 `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json`。
 - 运行日志：Windows 为 `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log`；macOS 为 `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log`；均保留 14 天。
-- 日志只记录时间、操作结果、HTTP 状态或传输类别和脱敏错误；绝不记录 Token、Authorization 请求头或认证文件内容。
+- 日志只记录时间、操作结果、HTTP 状态或传输类别和脱敏错误；更新日志仅记录版本号及“发现版本 / 网络 / 签名 / 安装”等脱敏类别，绝不记录 Token、Authorization 请求头、认证文件内容、更新 URL 或签名内容。
 - 受代理网络限制时，原生请求会遵循 Windows/macOS 系统代理与 `HTTP_PROXY` / `HTTPS_PROXY`；代理地址和凭据不会写入日志。
 - 无法读取用量时，先确认 Codex 已登录，再点击右上角“刷新”。请勿将认证信息粘贴到 Issue、截图或日志中。
 - 若旧 Win32 版开通过自启，旧的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 项不会被新版迁移或删除；确认新版可用后请自行关闭旧项，避免两个悬浮窗同时启动。
@@ -131,32 +134,37 @@ pnpm tauri dev
 构建当前系统的发行包：
 
 ```powershell
-# Windows：NSIS 安装包
-pnpm tauri build --bundles nsis
+# Windows：普通本地包（不需要发布私钥）
+pnpm tauri build --bundles nsis --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
-# macOS：DMG 安装包
-pnpm tauri build --bundles dmg
+# macOS：普通本地包（不需要发布私钥）
+pnpm tauri build --bundles dmg --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 产物位于 `src-tauri\target\release\bundle\nsis\` 或 `src-tauri/target/release/bundle/dmg/`。
 
 ## CI 与发布
 
-推送到 `main` / `master` 或创建 Pull Request 时，GitHub Actions 会在原生 Windows x64、Windows ARM64、Intel Mac 与 Apple 芯片 Mac 运行器上执行前端 lint、前端测试、Rust 单测和原生打包。推送 `v*` 标签后，工作流会发布以下资产及 SHA-256 校验文件：
+推送到 `main` / `master` 或创建 Pull Request 时，GitHub Actions 会在原生 Windows x64、Windows ARM64、Intel Mac 与 Apple 芯片 Mac 运行器上执行前端 lint、前端测试、Rust 单测和未签名的原生打包。推送 `v*` 标签后，工作流只在 tag 构建步骤读取 GitHub Actions Secret 中的 `TAURI_SIGNING_PRIVATE_KEY`，为四个应用内更新载荷生成 Tauri 签名，再先创建草稿 Release、最后原子发布完整更新集。macOS DMG 仅用于手动安装，尚未经过 Apple 公证：
+
+当前签名私钥不带口令；若未来改用带口令的私钥，还需在 GitHub Actions 配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。稳定更新标签必须使用 `vX.Y.Z` 格式，避免预发布版本进入稳定更新通道。
 
 - `CodexUsageBar-x64-setup.exe`
 - `CodexUsageBar-arm64-setup.exe`
 - `CodexUsageBar-macos-x64.dmg`
 - `CodexUsageBar-macos-arm64.dmg`
+- 两个 Windows 安装包对应的 `.sig`
+- 两个 macOS `.app.tar.gz` 自动更新包及对应 `.sig`
+- `latest.json`（包含四个平台更新包签名的公开更新清单）
 
 维护者发布示例：
 
 ```powershell
-git tag -a v0.2.5 -m "v0.2.5 紧凑主卡与独立设置窗口"
+git tag -a v0.2.6 -m "v0.2.6 签名自动检测与确认更新"
 git push origin master
-git push origin v0.2.5
+git push origin v0.2.6
 ```
 
 ## 不包含的能力
 
-不提供静默自动更新、自动下载安装、任务栏停靠模式、通用旧布局迁移、界面中英文切换、OAuth Token 续期或重置卡操作。已有安装仅会按上述规则进行一次紧凑高度调整。
+不提供未确认的静默下载或更新、任务栏停靠模式、通用旧布局迁移、界面中英文切换、OAuth Token 续期或重置卡操作。已有安装仅会按上述规则进行一次紧凑高度调整。

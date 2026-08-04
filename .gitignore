@@ -10,6 +10,8 @@ npm-debug.log*
 # Rust and Tauri generated files. Cargo.lock is intentionally tracked for repeatable builds.
 src-tauri/target/
 src-tauri/gen/
+# 发布签名验证器是独立 Cargo 工具；其本地 target 目录同样不应进入仓库。
+scripts/verify-updater-signature/target/
 
 # Keep the source SVG plus the two desktop bundle icons. Other generated mobile icons stay local.
 src-tauri/icons/*

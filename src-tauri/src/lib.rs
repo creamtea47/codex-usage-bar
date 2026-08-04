@@ -1,20 +1,20 @@
 mod auth;
+mod app_update;
 mod models;
 mod settings;
-mod update;
 mod usage;
 
 use crate::{
+    app_update::{check_for_update, install_pending_update, AppUpdateState},
     models::{
         DashboardSnapshot, DashboardStatus, MainWindowSizeMode, Settings, StoredSettings,
-        UpdateInfo, WindowPlacement,
+        AppUpdateInfo, WindowPlacement,
     },
     settings::{
         apply_compact_layout_migration, cleanup_logs, load_settings,
         save_settings as persist_settings, update_main_window_placement, update_preferences,
         update_settings_window_placement,
     },
-    update::UpdateClient,
     usage::UsageClient,
 };
 use chrono::{Duration as ChronoDuration, Utc};
@@ -35,9 +35,12 @@ use tokio::sync::{watch, Mutex as AsyncMutex};
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const MAIN_WINDOW_LABEL: &str = "main";
-const SETTINGS_WINDOW_LABEL: &str = "settings";
+pub(crate) const SETTINGS_WINDOW_LABEL: &str = "settings";
 const GEOMETRY_SAVE_DELAY: Duration = Duration::from_millis(250);
 const LOG_RETENTION: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+// 自动检查只读取公开 HTTPS 更新清单；不下载、不安装，更新包签名会在用户确认下载后验证。
+const AUTO_UPDATE_CHECK_START_DELAY: Duration = Duration::from_secs(8);
+const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 // 悬浮卡的一张额度窗口尺寸。260px 恰好容纳成功态的一张额度卡，避免底部无效留白；
 // 窗口数量增加时只扩展高度，最高后由前端滚动额度区域。
@@ -57,6 +60,8 @@ struct AppState {
     stored_settings: StdMutex<StoredSettings>,
     settings_path: PathBuf,
     interval_sender: watch::Sender<u64>,
+    update_check_sender: watch::Sender<bool>,
+    app_update: AppUpdateState,
     // 每个窗口独立去抖，避免设置窗口的调整取消主悬浮卡的几何保存。
     geometry_generations: StdMutex<HashMap<String, u64>>,
 }
@@ -67,8 +72,8 @@ impl AppState {
         stored_settings: StoredSettings,
         settings_path: PathBuf,
     ) -> Self {
-        let (interval_sender, _) =
-            watch::channel(stored_settings.preferences.refresh_interval_seconds);
+        let (interval_sender, _) = watch::channel(stored_settings.preferences.refresh_interval_seconds);
+        let (update_check_sender, _) = watch::channel(stored_settings.preferences.auto_check_updates);
         Self {
             usage_client,
             snapshot: AsyncMutex::new(DashboardSnapshot::default()),
@@ -76,6 +81,8 @@ impl AppState {
             stored_settings: StdMutex::new(stored_settings),
             settings_path,
             interval_sender,
+            update_check_sender,
+            app_update: AppUpdateState::default(),
             geometry_generations: StdMutex::new(HashMap::new()),
         }
     }
@@ -144,11 +151,13 @@ impl AppState {
             result
         };
         let _ = self.interval_sender.send(result.refresh_interval_seconds);
+        let _ = self.update_check_sender.send(result.auto_check_updates);
         log::info!(
-            "已保存挂件设置：置顶={}、锁定={}、刷新间隔={}秒",
+            "已保存挂件设置：置顶={}、锁定={}、刷新间隔={}秒、自动检查更新={}",
             result.always_on_top,
             result.lock_position,
-            result.refresh_interval_seconds
+            result.refresh_interval_seconds,
+            result.auto_check_updates
         );
         Ok(result)
     }
@@ -351,8 +360,15 @@ async fn save_settings(
 }
 
 #[tauri::command]
-fn open_settings_window(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+fn open_settings_window(
+    section: Option<String>,
+    window: WebviewWindow,
+    app: AppHandle,
+) -> Result<(), String> {
     require_window_label(&window, MAIN_WINDOW_LABEL)?;
+    if section.as_deref().is_some_and(|value| value != "about") {
+        return Err("无法打开指定的设置页面。".to_owned());
+    }
     let window = app
         .get_webview_window(SETTINGS_WINDOW_LABEL)
         .ok_or_else(|| "无法创建设置窗口。".to_owned())?;
@@ -360,6 +376,13 @@ fn open_settings_window(window: WebviewWindow, app: AppHandle) -> Result<(), Str
     window
         .set_focus()
         .map_err(|_| "无法聚焦设置窗口。".to_owned())?;
+    if section.as_deref() == Some("about")
+        && app
+            .emit_to(SETTINGS_WINDOW_LABEL, "settings-navigate", "about")
+            .is_err()
+    {
+        log::warn!("无法导航到更新设置页面。");
+    }
     log::info!("已打开设置窗口。");
     Ok(())
 }
@@ -396,25 +419,33 @@ fn set_autostart(enabled: bool, window: WebviewWindow, app: AppHandle) -> Result
 }
 
 #[tauri::command]
-async fn check_update(window: WebviewWindow) -> Result<UpdateInfo, String> {
+async fn get_app_update_info(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AppUpdateInfo, String> {
+    // 主卡只读取安全摘要以显示发现新版本的提醒；下载和安装始终限定在设置窗口。
+    require_known_window(&window)?;
+    Ok(state.app_update.current_info().await)
+}
+
+#[tauri::command]
+async fn check_app_update(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AppUpdateInfo, String> {
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
-    let client = UpdateClient::new().map_err(|error| error.to_string())?;
-    match client.check().await {
-        Ok(update) => {
-            log::info!(
-                "更新检查完成：当前版本={}，最新版本={}，可更新={}",
-                update.current_version,
-                update.latest_version,
-                update.update_available
-            );
-            Ok(update)
-        }
-        Err(error) => {
-            // 错误文本是固定的脱敏提示，日志不记录 URL、响应体或任何认证数据。
-            log::warn!("更新检查失败：{}", error);
-            Err(error.to_string())
-        }
-    }
+    check_for_update(&app, &state.app_update, false).await
+}
+
+#[tauri::command]
+async fn install_app_update(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
+    install_pending_update(&app, &state.app_update).await
 }
 
 fn start_refresh_loop(app: AppHandle, state: Arc<AppState>) {
@@ -428,6 +459,30 @@ fn start_refresh_loop(app: AppHandle, state: Arc<AppState>) {
                     refresh_and_emit(&app, &state).await;
                 }
                 changed = interval_receiver.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn start_update_check_loop(app: AppHandle, state: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        // 不与主卡首屏初始化抢资源；启动后的短延迟可避免网络尚未恢复时产生无意义失败。
+        tokio::time::sleep(AUTO_UPDATE_CHECK_START_DELAY).await;
+        let mut enabled_receiver = state.update_check_sender.subscribe();
+        loop {
+            if *enabled_receiver.borrow_and_update() {
+                if let Err(message) = check_for_update(&app, &state.app_update, true).await {
+                    // command 返回的文案固定且不含 URL、签名或网络实现细节，可安全用于诊断日志。
+                    log::info!("自动检查应用更新未完成：{}", message);
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(AUTO_UPDATE_CHECK_INTERVAL) => {}
+                changed = enabled_receiver.changed() => {
                     if changed.is_err() {
                         break;
                     }
@@ -536,6 +591,7 @@ fn schedule_geometry_save(window: Window) {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -548,6 +604,9 @@ pub fn run() {
                     file_name: Some("codex-usage-bar".into()),
                 })])
                 .level(log::LevelFilter::Info)
+                // Updater 依赖可能记录远端 URL 或响应解析细节；本应用已自行写入脱敏的结果类别，
+                // 因此不把该依赖的原始日志落盘，保证日志边界不随第三方实现变化。
+                .filter(|metadata| !metadata.target().starts_with("tauri_plugin_updater"))
                 .build(),
         )
         .setup(|app| {
@@ -588,7 +647,8 @@ pub fn run() {
             // 静态窗口在配置中默认隐藏；显式隐藏保证升级时不会与主卡同时出现。
             let _ = settings_window.hide();
             main_window.show()?;
-            start_refresh_loop(app.handle().clone(), state);
+            start_refresh_loop(app.handle().clone(), state.clone());
+            start_update_check_loop(app.handle().clone(), state);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -629,7 +689,9 @@ pub fn run() {
             mark_main_size_manual,
             get_autostart,
             set_autostart,
-            check_update
+            get_app_update_info,
+            check_app_update,
+            install_app_update
         ])
         .run(tauri::generate_context!())
         .expect("启动 CodexUsageBar 失败");
@@ -647,10 +709,12 @@ mod tests {
             lock_position: false,
             refresh_interval_seconds: 99,
             theme: Theme::Dark,
+            auto_check_updates: false,
         }
         .normalized();
         assert_eq!(result.refresh_interval_seconds, 60);
         assert!(result.always_on_top);
+        assert!(!result.auto_check_updates);
     }
 
     #[test]

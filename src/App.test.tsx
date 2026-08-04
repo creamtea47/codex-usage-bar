@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from './App';
-import { defaultSettings, loadingSnapshot, type DashboardSnapshot, type Settings } from './types';
+import { defaultSettings, loadingSnapshot, type AppUpdateInfo, type DashboardSnapshot, type Settings } from './types';
 
 const bridgeMocks = vi.hoisted(() => ({
   getDashboard: vi.fn(),
@@ -11,11 +11,15 @@ const bridgeMocks = vi.hoisted(() => ({
   saveSettings: vi.fn(),
   getAutostart: vi.fn(),
   setAutostart: vi.fn(),
-  checkUpdate: vi.fn(),
+  getAppUpdateInfo: vi.fn(),
+  checkAppUpdate: vi.fn(),
+  installAppUpdate: vi.fn(),
   openSettingsWindow: vi.fn(),
   markMainSizeManual: vi.fn(),
   listenForDashboard: vi.fn(),
   listenForSettings: vi.fn(),
+  listenForAppUpdate: vi.fn(),
+  listenForAppUpdateProgress: vi.fn(),
 }));
 
 const windowMocks = vi.hoisted(() => ({
@@ -67,11 +71,20 @@ function prepareBridge(snapshot: DashboardSnapshot = readySnapshot, settings: Se
   bridgeMocks.saveSettings.mockImplementation(async (next: Settings) => next);
   bridgeMocks.getAutostart.mockResolvedValue(false);
   bridgeMocks.setAutostart.mockImplementation(async (enabled: boolean) => enabled);
-  bridgeMocks.checkUpdate.mockResolvedValue(null);
+  bridgeMocks.getAppUpdateInfo.mockResolvedValue({
+    currentVersion: '0.2.6',
+    latestVersion: '0.2.6',
+    updateAvailable: false,
+    checkedAt: null,
+  });
+  bridgeMocks.checkAppUpdate.mockResolvedValue(null);
+  bridgeMocks.installAppUpdate.mockResolvedValue(undefined);
   bridgeMocks.openSettingsWindow.mockResolvedValue(undefined);
   bridgeMocks.markMainSizeManual.mockResolvedValue(undefined);
   bridgeMocks.listenForDashboard.mockResolvedValue(() => undefined);
   bridgeMocks.listenForSettings.mockResolvedValue(() => undefined);
+  bridgeMocks.listenForAppUpdate.mockResolvedValue(() => undefined);
+  bridgeMocks.listenForAppUpdateProgress.mockResolvedValue(() => undefined);
 }
 
 async function renderLoaded(settings: Settings = defaultSettings) {
@@ -179,5 +192,27 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
     expect(await screen.findByText('无法打开设置窗口，请稍后重试。')).toBeTruthy();
+  });
+
+  it('announces an automatically detected signed update and opens settings on demand', async () => {
+    let updateHandler: ((info: AppUpdateInfo) => void) | undefined;
+    prepareBridge();
+    bridgeMocks.listenForAppUpdate.mockImplementation(async (handler: (info: AppUpdateInfo) => void) => {
+      updateHandler = handler;
+      return () => undefined;
+    });
+    render(<App />);
+    await screen.findByText('j***@example.com · Plus');
+    await act(async () => {
+      updateHandler?.({
+        currentVersion: '0.2.6',
+        latestVersion: '0.2.7',
+        updateAvailable: true,
+        checkedAt: '2030-01-04T12:00:00Z',
+      });
+    });
+    expect(await screen.findByText('发现新版本 v0.2.7，可在设置中下载并验证签名。')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '查看更新' }));
+    await waitFor(() => expect(bridgeMocks.openSettingsWindow).toHaveBeenCalledWith('about'));
   });
 });

@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+# 同一分支或标签的工作流串行执行，避免并发任务争用同一个草稿 Release。
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows-validate-and-bundle:
     name: Windows ${{ matrix.arch }} / validate and bundle
@@ -52,38 +57,65 @@ jobs:
       - name: Lint frontend
         run: pnpm lint
 
-      - name: Test frontend
+      - name: Test frontend and updater manifest generator
         run: pnpm test
 
       - name: Test Rust backend
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
-      - name: Build NSIS installer
-        run: pnpm exec tauri build --bundles nsis
-
-      - name: Stage installer and checksum
+      - name: Build unsigned NSIS installer
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         shell: powershell
         run: |
-          # 不依赖 Tauri 生成文件名，避免版本号或架构后缀变化导致发布丢失产物。
-          $installer = Get-ChildItem -Path "src-tauri\target" -Recurse -File -Filter "*.exe" |
-            Where-Object { $_.FullName -match '[\\/]bundle[\\/]nsis[\\/]' } |
-            Select-Object -First 1
+          # PR/分支构建不读取正式私钥，也不生成会被发布的 updater 产物。
+          pnpm exec tauri build --bundles nsis --no-sign --ci --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          if ($null -eq $installer) {
-            throw "NSIS installer was not found under src-tauri\\target."
+      - name: Build signed NSIS installer
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: powershell
+        env:
+          # 私钥仅在受信任 tag 构建中短暂注入；不会写入产物、日志或工作区文件。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 当前密钥无口令；保留该变量以兼容未来改用加密私钥的发布流程。
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY is required for signed tag releases.'
           }
+          pnpm exec tauri build --bundles nsis --ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $outDir = "artifacts\windows-${{ matrix.arch }}"
+      - name: Stage installer, checksum, and tag signature
+        shell: powershell
+        run: |
+          $installerCandidates = @(
+            Get-ChildItem -Path 'src-tauri\target' -Recurse -File -Filter '*.exe' |
+              Where-Object { $_.FullName -match '[\\/]bundle[\\/]nsis[\\/]' }
+          )
+          if ($installerCandidates.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installerCandidates.Count)."
+          }
+          $installer = $installerCandidates[0]
+          $outDir = 'artifacts\windows-${{ matrix.arch }}'
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-          $destination = Join-Path $outDir "CodexUsageBar-${{ matrix.arch }}-setup.exe"
+          $destination = Join-Path $outDir 'CodexUsageBar-${{ matrix.arch }}-setup.exe'
           Copy-Item -LiteralPath $installer.FullName -Destination $destination
           (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash |
             Set-Content -LiteralPath "$destination.sha256" -NoNewline
 
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $signature = "$($installer.FullName).sig"
+            if (-not (Test-Path -LiteralPath $signature) -or (Get-Item -LiteralPath $signature).Length -eq 0) {
+              throw 'A signed updater artifact must have a non-empty .sig file.'
+            }
+            Copy-Item -LiteralPath $signature -Destination "$destination.sig"
+          }
+
           Write-Host "Staged installer: $destination"
           Get-FileHash -LiteralPath $destination -Algorithm SHA256 | Format-List
 
-      - name: Upload NSIS artifact
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexUsageBar-windows-${{ matrix.arch }}-nsis
@@ -129,31 +161,60 @@ jobs:
       - name: Lint frontend
         run: pnpm lint
 
-      - name: Test frontend
+      - name: Test frontend and updater manifest generator
         run: pnpm test
 
       - name: Test Rust backend
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
-      - name: Build DMG
-        run: pnpm exec tauri build --bundles dmg
-
-      - name: Stage DMG and checksum
+      - name: Build unsigned DMG
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         shell: bash
         run: |
           set -euo pipefail
-          # 不依赖 Tauri 生成文件名，避免版本号变化时发布任务找不到产物。
-          dmg="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
-          test -n "$dmg"
+          pnpm exec tauri build --bundles dmg --no-sign --ci --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Build DMG and signed updater payload
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          # macOS 同样只在 tag 使用 Tauri 更新私钥；Apple 公证可后续独立接入。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 当前密钥无口令；仅为未来加密私钥预留。
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${TAURI_SIGNING_PRIVATE_KEY:-}"
+          pnpm exec tauri build --bundles dmg --ci
+
+      - name: Stage DMG, checksum, and tag updater payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_count="$(find src-tauri/target/release/bundle -type f -name '*.dmg' -print | wc -l | tr -d ' ')"
+          test "$dmg_count" -eq 1
+          dmg="$(find src-tauri/target/release/bundle -type f -name '*.dmg' -print -quit)"
           out_dir="artifacts/macos-${{ matrix.arch }}"
           mkdir -p "$out_dir"
           destination="$out_dir/CodexUsageBar-macos-${{ matrix.arch }}.dmg"
           cp "$dmg" "$destination"
           shasum -a 256 "$destination" | awk '{print $1}' > "$destination.sha256"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            updater_count="$(find src-tauri/target/release/bundle -type f -name '*.app.tar.gz' -print | wc -l | tr -d ' ')"
+            test "$updater_count" -eq 1
+            updater="$(find src-tauri/target/release/bundle -type f -name '*.app.tar.gz' -print -quit)"
+            updater_destination="$out_dir/CodexUsageBar-macos-${{ matrix.arch }}.app.tar.gz"
+            cp "$updater" "$updater_destination"
+            signature="$updater.sig"
+            test -s "$signature"
+            cp "$signature" "$updater_destination.sig"
+          fi
+
           printf 'Staged DMG: %s\\n' "$destination"
           shasum -a 256 "$destination"
 
-      - name: Upload DMG artifact
+      - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexUsageBar-macos-${{ matrix.arch }}-dmg
@@ -168,6 +229,14 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout release metadata generator
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -175,18 +244,105 @@ jobs:
           pattern: CodexUsageBar-*
           merge-multiple: true
 
-      - name: List release assets
+      - name: Validate stable release tag
         shell: bash
         run: |
           set -euo pipefail
-          find release-assets -maxdepth 1 -type f -printf '%f\\n'
-          test -f release-assets/CodexUsageBar-x64-setup.exe
-          test -f release-assets/CodexUsageBar-arm64-setup.exe
-          test -f release-assets/CodexUsageBar-macos-x64.dmg
-          test -f release-assets/CodexUsageBar-macos-arm64.dmg
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Stable updater releases must use a vX.Y.Z tag.' >&2
+            exit 1
+          }
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: release-assets/*
+      - name: Validate signed payload set and generate latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            CodexUsageBar-x64-setup.exe
+            CodexUsageBar-x64-setup.exe.sha256
+            CodexUsageBar-x64-setup.exe.sig
+            CodexUsageBar-arm64-setup.exe
+            CodexUsageBar-arm64-setup.exe.sha256
+            CodexUsageBar-arm64-setup.exe.sig
+            CodexUsageBar-macos-x64.dmg
+            CodexUsageBar-macos-x64.dmg.sha256
+            CodexUsageBar-macos-x64.app.tar.gz
+            CodexUsageBar-macos-x64.app.tar.gz.sig
+            CodexUsageBar-macos-arm64.dmg
+            CodexUsageBar-macos-arm64.dmg.sha256
+            CodexUsageBar-macos-arm64.app.tar.gz
+            CodexUsageBar-macos-arm64.app.tar.gz.sig
+          )
+          for asset in "${expected[@]}"; do
+            test -s "release-assets/$asset"
+          done
+          expected_files="$(printf '%s\\n' "${expected[@]}" | sort)"
+          actual_files="$(find release-assets -maxdepth 1 -type f -printf '%f\\n' | sort)"
+          test "$actual_files" = "$expected_files"
+          node scripts/generate-updater-manifest.mjs --assets-dir release-assets --tag "$GITHUB_REF_NAME"
+          node -e "const fs=require('fs'); const manifest=JSON.parse(fs.readFileSync('release-assets/latest.json')); const expected=['windows-x86_64','windows-aarch64','darwin-x86_64','darwin-aarch64']; if (JSON.stringify(Object.keys(manifest.platforms)) !== JSON.stringify(expected)) process.exit(1); for (const key of expected) if (!manifest.platforms[key].url || !manifest.platforms[key].signature) process.exit(1);"
+          find release-assets -maxdepth 1 -type f -printf '%f\\n' | sort
+
+      - name: Verify all updater payload signatures against the embedded public key
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run signature verification gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for payload in \
+            CodexUsageBar-x64-setup.exe \
+            CodexUsageBar-arm64-setup.exe \
+            CodexUsageBar-macos-x64.app.tar.gz \
+            CodexUsageBar-macos-arm64.app.tar.gz; do
+            cargo run --locked --quiet \
+              --manifest-path scripts/verify-updater-signature/Cargo.toml \
+              -- "release-assets/$payload" "release-assets/$payload.sig"
+          done
+
+      - name: Create or resume draft release with complete update set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft >/dev/null 2>&1; then
+            is_draft="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+            test "$is_draft" = true || {
+              echo "Release $GITHUB_REF_NAME is already published; refusing to overwrite it." >&2
+              exit 1
+            }
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            release_notes="$(cat <<'EOF'
+          ## 自动更新已启用
+
+          - 从 v0.2.5 或更早版本升级时，请先手动安装本版本；之后的版本会在启动后自动检测，并由你确认下载与安装。
+          - 更新包下载完成后会使用应用内嵌公钥验证 Tauri 签名；未确认时应用不会静默下载、替换或重启。
+          - `latest.json` 是公开 HTTPS 清单，其中包含各平台更新载荷的签名；macOS DMG 仍是手动安装产物，尚未经过 Apple 公证。
+          EOF
+          )"
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "CodexUsageBar $GITHUB_REF_NAME" \
+              --notes "$release_notes" \
+              --generate-notes \
+              --draft
+          fi
+
+      - name: Verify draft assets before publishing latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" = true
+          actual="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
+          expected="$(find release-assets -maxdepth 1 -type f -printf '%f\\n' | sort)"
+          test "$actual" = "$expected"
+
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

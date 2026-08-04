@@ -25,9 +25,9 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
 ![CodexUsageBar compact dashboard showing dynamic quota windows, remaining usage, reset time, and top-right refresh controls](docs/images/dashboard-light.png)
 
-### Separate settings window and manual update check
+### Separate settings window and automatic-update controls
 
-![CodexUsageBar separate settings window with sidebar categories for display, refresh, startup, and updates](docs/images/settings-update.png)
+![CodexUsageBar separate settings window with automatic-check controls, six-hour cadence, and a manual update entry point; payload signatures are verified after download](docs/images/settings-update.png)
 
 ## Features
 
@@ -40,7 +40,8 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 - Uses a borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position / size lock.
 - Closes completely with its window—no tray-resident process. Autostart for the current account is optional.
 - Opens Settings in a separate opaque native window with sidebar categories: **Display**, **Data & refresh**, **Startup**, and **About & updates**.
-- Provides a **manual update check** in Settings. It only checks the public releases of this repository; there is no background polling, auto-download, self-replacement, or restart.
+- Checks once shortly after launch and then at most every six hours by default; it can be disabled in **About & updates**. Automatic checks read only the public HTTPS `latest.json` manifest containing signatures for each platform update payload; they never download, install, or restart the app.
+- When a new version is found, the card notifies you. Only after confirming **Download and install** in Settings does Rust download and verify the Tauri signature. Windows hands off to the current-user NSIS installer; macOS may request authorization, replaces the app, and restarts.
 
 ## Install
 
@@ -55,7 +56,9 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
 2. Sign in to Codex on this computer, then start **CodexUsageBar**.
 
-The current macOS DMGs are ad-hoc signed and not Apple-notarized. If Gatekeeper blocks the first launch, allow the app in **System Settings → Privacy & Security**, or Control-click it and choose **Open**. Apple Developer ID signing and notarization require separately supplied Apple credentials.
+> When upgrading from v0.2.5 or earlier, manually install the first updater-enabled version (v0.2.6 or newer). Automatic detection and user-confirmed installation are available only after that bootstrap upgrade.
+
+The current macOS DMGs are ad-hoc signed and not Apple-notarized. If Gatekeeper blocks the first launch, allow the app in **System Settings → Privacy & Security**, or Control-click it and choose **Open**. The Tauri updater signature verifies update payload integrity; it does not replace Apple Developer ID signing or notarization.
 
 The application uses a new application identifier and configuration directory. It is independent of the former `luodaoyi/codex-useage-win` repository and deliberately does not migrate or remove old settings or autostart entries.
 
@@ -69,13 +72,13 @@ If an old v0.2.1 installer is currently showing that error, exit it and download
 
 The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry. The adjacent **Settings** button opens a separate window where settings are organized into **Display**, **Data & refresh**, **Startup**, and **About & updates**.
 
-The Display page controls the theme, always-on-top, and position / size lock. The Data & refresh page controls the refresh interval; Startup controls autostart; About & updates contains the version and manual update check. Closing Settings only hides that window—the floating card remains running. Closing the floating card exits the application.
+The Display page controls the theme, always-on-top, and position / size lock. The Data & refresh page controls the refresh interval; Startup controls autostart; About & updates contains the current version, automatic-check preference, and update actions. Closing Settings only hides that window—the floating card remains running. Closing the floating card exits the application.
 
-Choose **Check for updates** in Settings when you want to inspect a new version:
+The app checks once shortly after launch and then at most every six hours by default; you can turn this off in Settings. Choose **Check for updates** when you want to check immediately:
 
-- When an update is available, the app opens this repository's Release download page. You choose whether to download and install it.
-- When the current build is latest, the dialog shows both version values.
-- A network failure or a missing public release never affects the quota data already on screen.
+- When an update is available, the card notifies you and Settings shows the version. Only clicking **Download and install** downloads the payload, verifies its signature, and hands it to the native installer.
+- Windows closes CodexUsageBar when installation starts; macOS restarts after replacing the app. The app never silently downloads, replaces, or restarts without confirmation.
+- A current build, network error, or signature-verification failure never affects the quota data already on screen. A signature failure cancels installation.
 
 ## Privacy and read-only boundary
 
@@ -87,13 +90,13 @@ Only the Rust backend reads local credentials during a request. React receives a
 2. `%CODEX_HOME%\auth.json`.
 3. Windows: `%USERPROFILE%\.codex\auth.json`; macOS: `~/.codex/auth.json`.
 
-The app only reads `GET https://chatgpt.com/backend-api/wham/usage`, and it:
+The usage feature only reads `GET https://chatgpt.com/backend-api/wham/usage`; the update feature separately reads the public HTTPS `latest.json` manifest, and the app:
 
 - Does not refresh OAuth tokens or write to `auth.json`.
 - Does not query or consume reset cards and never begins an OAuth flow.
 - Does not install frontend filesystem or HTTP permissions; sensitive I/O stays in Rust.
 - Derives the optional masked account summary only from a successful usage response. It does not read an email from `auth.json`, persist an unmasked email, or write either form of the email to runtime logs.
-- Checks updates only against the public GitHub Release metadata for `creamtea47/codex-usage-bar`, without sending Codex credentials.
+- Checks updates only against the public HTTPS `latest.json` manifest containing signatures for each platform update payload for `creamtea47/codex-usage-bar`, without sending `auth.json`, tokens, email, or usage data. A payload must match the embedded public key before it can be installed.
 
 If credentials are missing, expired, or rejected, the last successful snapshot remains visible as stale. Sign in to Codex again, then choose top-right **Refresh**.
 
@@ -105,13 +108,13 @@ If credentials are missing, expired, or rejected, the last successful snapshot r
 | Native boundary | Tauri 2 commands and capabilities | Narrow IPC and scoped window / release-link permissions |
 | Data and persistence | Rust + Tokio + Reqwest + Serde | Read-only credentials, request de-duplication, cached snapshots, settings, autostart, redacted logs |
 
-The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_settings`, `save_settings`, `get_autostart`, `set_autostart`, `open_settings_window`, `mark_main_size_manual`, and `check_update`. Credentials and unmasked account details never cross the Rust boundary.
+The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_settings`, `save_settings`, `get_autostart`, `set_autostart`, `open_settings_window`, `mark_main_size_manual`, `get_app_update_info`, `check_app_update`, and `install_app_update`. Update IPC returns only version summaries and progress; URLs, signatures, raw manifests, credentials, and unmasked account details never cross the Rust boundary.
 
 ## Logs and troubleshooting
 
 - Settings and independent main/settings-window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
 - Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
-- Logs contain timestamps, operation results, HTTP status or transport categories, and redacted errors only—never tokens, Authorization headers, or authentication-file contents.
+- Logs contain timestamps, operation results, HTTP status or transport categories, and redacted errors only. Updater logs retain only version numbers and redacted categories such as available version, network, signature, or install—never tokens, Authorization headers, authentication-file contents, update URLs, or signature data.
 - On proxy-restricted networks, native requests follow the Windows/macOS system proxy and `HTTP_PROXY` / `HTTPS_PROXY`; proxy addresses and credentials are never written to logs.
 - If usage cannot be loaded, first confirm that Codex is signed in, then choose top-right **Refresh**. Never paste credentials into an issue, screenshot, or log.
 - Autostart from the legacy Win32 app is neither migrated nor removed. Disable its old `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry after confirming the new app works, otherwise two widgets may start together.
@@ -131,32 +134,37 @@ pnpm tauri dev
 Build the native package for the current platform with:
 
 ```powershell
-# Windows: NSIS installer
-pnpm tauri build --bundles nsis
+# Windows: ordinary local bundle (no release key required)
+pnpm tauri build --bundles nsis --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
-# macOS: DMG
-pnpm tauri build --bundles dmg
+# macOS: ordinary local bundle (no release key required)
+pnpm tauri build --bundles dmg --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 Output is written below `src-tauri\target\release\bundle\nsis\` or `src-tauri/target/release/bundle/dmg/`.
 
 ## CI and releases
 
-Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust tests, and native packaging on Windows x64, Windows ARM64, Intel Mac, and Apple silicon Mac runners. A `v*` tag publishes these assets and their SHA-256 checksums:
+Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust tests, and unsigned native bundles on Windows x64, Windows ARM64, Intel Mac, and Apple silicon Mac runners. A `v*` tag reads `TAURI_SIGNING_PRIVATE_KEY` only in tag-build steps from GitHub Actions Secrets, generates Tauri signatures for the four in-app updater payloads, creates a draft Release, and only then publishes the complete update set. macOS DMGs remain manual-install artifacts and are not Apple-notarized:
+
+The current signing key has no password. If a future encrypted key is used, configure `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in GitHub Actions as well. Stable updater releases must use `vX.Y.Z` tags so prereleases cannot enter the stable update channel.
 
 - `CodexUsageBar-x64-setup.exe`
 - `CodexUsageBar-arm64-setup.exe`
 - `CodexUsageBar-macos-x64.dmg`
 - `CodexUsageBar-macos-arm64.dmg`
+- `.sig` files for both Windows installers
+- macOS `.app.tar.gz` updater payloads and their `.sig` files
+- `latest.json`, the public manifest containing signatures for all four platform update payloads
 
 Example maintainer release:
 
 ```powershell
-git tag -a v0.2.5 -m "v0.2.5 紧凑主卡与独立设置窗口"
+git tag -a v0.2.6 -m "v0.2.6 signed update detection and confirmation"
 git push origin master
-git push origin v0.2.5
+git push origin v0.2.6
 ```
 
 ## Intentionally excluded
 
-There are no silent automatic updates, automatic installer downloads, taskbar-docked mode, general legacy-layout migration, UI language switching, OAuth token refresh, or reset-card operations. Existing installations receive only the one-time compact-height adjustment described above.
+There are no unconfirmed silent downloads or updates, taskbar-docked mode, general legacy-layout migration, UI language switching, OAuth token refresh, or reset-card operations. Existing installations receive only the one-time compact-height adjustment described above.

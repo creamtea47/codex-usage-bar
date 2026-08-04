@@ -28,14 +28,21 @@ export interface DashboardSnapshot {
   quotaWindows: QuotaWindow[];
 }
 
-/** 仅来自公开 GitHub Release 的安全更新摘要，不带请求或设备信息。 */
-export interface UpdateInfo {
+/** 仅来自 HTTPS 更新清单的安全摘要；下载后才验证更新包签名，且不含 URL、签名、原始清单或设备信息。 */
+export interface AppUpdateInfo {
   currentVersion: string;
   latestVersion: string;
   updateAvailable: boolean;
-  releaseUrl: string;
-  downloadUrl: string | null;
-  publishedAt: string | null;
+  checkedAt: string | null;
+}
+
+export type AppUpdateStage = 'downloading' | 'verifying' | 'installing';
+
+/** 下载进度只用于呈现，不携带下载地址、签名或任何认证资料。 */
+export interface AppUpdateProgress {
+  stage: AppUpdateStage;
+  downloadedBytes: number;
+  totalBytes: number | null;
 }
 
 export interface Settings {
@@ -43,6 +50,8 @@ export interface Settings {
   lockPosition: boolean;
   refreshIntervalSeconds: number;
   theme: Theme;
+  /** 自动检查只读取公开 HTTPS 更新清单；不会自动下载、安装或重启。 */
+  autoCheckUpdates: boolean;
 }
 
 export const defaultSettings: Settings = {
@@ -50,6 +59,7 @@ export const defaultSettings: Settings = {
   lockPosition: false,
   refreshIntervalSeconds: 60,
   theme: 'system',
+  autoCheckUpdates: true,
 };
 
 export const loadingSnapshot: DashboardSnapshot = {

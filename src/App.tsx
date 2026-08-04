@@ -5,6 +5,7 @@ import {
   Alert,
   AppBar,
   Box,
+  Button,
   CircularProgress,
   CssBaseline,
   GlobalStyles,
@@ -29,6 +30,7 @@ import { createUsageTheme } from './theme';
 import {
   defaultSettings,
   loadingSnapshot,
+  type AppUpdateInfo,
   type DashboardSnapshot,
   type Settings,
   type Theme,
@@ -76,6 +78,7 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [updateNotice, setUpdateNotice] = useState<AppUpdateInfo | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const prefersDark = useMediaQuery('(prefers-color-scheme: dark)', { noSsr: true });
 
@@ -88,28 +91,36 @@ export default function App() {
     let disposed = false;
     let removeDashboardListener: (() => void) | undefined;
     let removeSettingsListener: (() => void) | undefined;
+    let removeUpdateListener: (() => void) | undefined;
 
     void (async () => {
       try {
-        const [dashboard, persistedSettings, removeDashboard, removeSettings] = await Promise.all([
+        const [dashboard, persistedSettings, pendingUpdate, removeDashboard, removeSettings, removeUpdate] = await Promise.all([
           usageBridge.getDashboard(),
           usageBridge.getSettings(),
+          usageBridge.getAppUpdateInfo(),
           usageBridge.listenForDashboard((next) => {
             if (!disposed) setSnapshot(next);
           }),
           usageBridge.listenForSettings((next) => {
             if (!disposed) setSettings(next);
           }),
+          usageBridge.listenForAppUpdate((next) => {
+            if (!disposed && next.updateAvailable) setUpdateNotice(next);
+          }),
         ]);
         if (disposed) {
           removeDashboard();
           removeSettings();
+          removeUpdate();
           return;
         }
         setSnapshot(dashboard);
         setSettings(persistedSettings);
+        if (pendingUpdate.updateAvailable) setUpdateNotice(pendingUpdate);
         removeDashboardListener = removeDashboard;
         removeSettingsListener = removeSettings;
+        removeUpdateListener = removeUpdate;
       } catch {
         if (!disposed) {
           setSnapshot((current) => ({
@@ -125,6 +136,7 @@ export default function App() {
       disposed = true;
       removeDashboardListener?.();
       removeSettingsListener?.();
+      removeUpdateListener?.();
     };
   }, []);
 
@@ -144,9 +156,9 @@ export default function App() {
     }
   };
 
-  const openSettings = async () => {
+  const openSettings = async (section?: 'about') => {
     try {
-      await usageBridge.openSettingsWindow();
+      await usageBridge.openSettingsWindow(section);
     } catch {
       setFeedback({ message: '无法打开设置窗口，请稍后重试。', severity: 'error' });
     }
@@ -320,6 +332,33 @@ export default function App() {
       >
         <Alert severity={feedback?.severity ?? 'info'} variant="filled" onClose={() => setFeedback(null)}>
           {feedback?.message}
+        </Alert>
+      </Snackbar>
+
+      <Snackbar
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        autoHideDuration={8_000}
+        open={Boolean(updateNotice)}
+        onClose={() => setUpdateNotice(null)}
+      >
+        <Alert
+          severity="info"
+          variant="filled"
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              onClick={() => {
+                setUpdateNotice(null);
+                void openSettings('about');
+              }}
+            >
+              查看更新
+            </Button>
+          }
+          onClose={() => setUpdateNotice(null)}
+        >
+          {updateNotice ? `发现新版本 v${updateNotice.latestVersion}，可在设置中下载并验证签名。` : ''}
         </Alert>
       </Snackbar>
     </ThemeProvider>
