@@ -11,11 +11,11 @@ npm-debug.log*
 src-tauri/target/
 src-tauri/gen/
 
-# Windows bundle only needs the SVG source and generated ICO. The Tauri icon helper
-# may also create mobile/macOS assets locally; keep those out of this Windows project.
+# Keep the source SVG plus the two desktop bundle icons. Other generated mobile icons stay local.
 src-tauri/icons/*
 !src-tauri/icons/icon.svg
 !src-tauri/icons/icon.ico
+!src-tauri/icons/icon.icns
 
 # Local packages, screenshots, and legacy native build outputs
 artifacts/

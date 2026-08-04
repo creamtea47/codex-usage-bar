@@ -78,7 +78,12 @@ impl UpdateClient {
             .json::<GithubRelease>()
             .await
             .map_err(|_| UpdateError::InvalidRelease)?;
-        parse_latest_release(release, env!("CARGO_PKG_VERSION"), std::env::consts::ARCH)
+        parse_latest_release(
+            release,
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
     }
 }
 
@@ -93,6 +98,7 @@ fn status_to_error(status: StatusCode) -> UpdateError {
 fn parse_latest_release(
     release: GithubRelease,
     current_version: &str,
+    operating_system: &str,
     architecture: &str,
 ) -> Result<UpdateInfo, UpdateError> {
     let current_version = parse_version(current_version)?;
@@ -101,7 +107,7 @@ fn parse_latest_release(
         return Err(UpdateError::InvalidRelease);
     }
 
-    let expected_asset = installer_asset_name(architecture);
+    let expected_asset = installer_asset_name(operating_system, architecture);
     let download_url = expected_asset.and_then(|expected_asset| {
         release
             .assets
@@ -129,10 +135,13 @@ fn parse_version(value: &str) -> Result<Version, UpdateError> {
     Version::parse(value.trim().trim_start_matches('v')).map_err(|_| UpdateError::InvalidRelease)
 }
 
-fn installer_asset_name(architecture: &str) -> Option<&'static str> {
-    match architecture {
-        "x86_64" => Some("CodexUsageBar-x64-setup.exe"),
-        "aarch64" => Some("CodexUsageBar-arm64-setup.exe"),
+/// 只向当前系统显示可直接安装的资产，避免把 Windows EXE 推荐给 macOS 用户。
+fn installer_asset_name(operating_system: &str, architecture: &str) -> Option<&'static str> {
+    match (operating_system, architecture) {
+        ("windows", "x86_64") => Some("CodexUsageBar-x64-setup.exe"),
+        ("windows", "aarch64") => Some("CodexUsageBar-arm64-setup.exe"),
+        ("macos", "x86_64") => Some("CodexUsageBar-macos-x64.dmg"),
+        ("macos", "aarch64") => Some("CodexUsageBar-macos-arm64.dmg"),
         _ => None,
     }
 }
@@ -162,6 +171,7 @@ mod tests {
                 "https://github.com/creamtea47/codex-usage-bar/releases/download/v0.2.1/CodexUsageBar-x64-setup.exe",
             ),
             "0.2.0",
+            "windows",
             "x86_64",
         )
         .unwrap();
@@ -177,6 +187,7 @@ mod tests {
         let info = parse_latest_release(
             release("v0.1.19", "CodexUsageBar-x64-setup.exe", "https://github.com/creamtea47/codex-usage-bar/releases/download/v0.1.19/CodexUsageBar-x64-setup.exe"),
             "0.2.1",
+            "windows",
             "x86_64",
         )
         .unwrap();
@@ -193,6 +204,7 @@ mod tests {
                 "https://example.invalid/setup.exe",
             ),
             "0.2.0",
+            "windows",
             "x86_64",
         )
         .unwrap();
@@ -210,9 +222,28 @@ mod tests {
                     "https://example.invalid/setup.exe",
                 ),
                 "0.2.0",
+                "windows",
                 "x86_64",
             ),
             Err(UpdateError::InvalidRelease)
         ));
+    }
+
+    #[test]
+    fn selects_a_dmg_for_apple_silicon_macos() {
+        let info = parse_latest_release(
+            release(
+                "v0.2.2",
+                "CodexUsageBar-macos-arm64.dmg",
+                "https://github.com/creamtea47/codex-usage-bar/releases/download/v0.2.2/CodexUsageBar-macos-arm64.dmg",
+            ),
+            "0.2.1",
+            "macos",
+            "aarch64",
+        )
+        .unwrap();
+
+        assert!(info.update_available);
+        assert!(info.download_url.unwrap().ends_with("macos-arm64.dmg"));
     }
 }

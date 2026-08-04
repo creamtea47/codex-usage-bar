@@ -2,7 +2,7 @@
 
 # CodexUsageBar
 
-**A privacy-first Windows floating usage card for Codex.**
+**A privacy-first floating Codex usage card for Windows and macOS.**
 
 Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
@@ -21,7 +21,7 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
 ## Screenshots
 
-### Floating usage card
+### Floating usage card (Windows example)
 
 ![CodexUsageBar dashboard showing dynamic quota windows, reset time, and a manual refresh button](docs/images/dashboard-light.png)
 
@@ -33,18 +33,32 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
 - Displays every quota window returned by the usage API, its remaining percentage, reset time, and local countdown.
 - Refreshes at launch and on a configurable 1 / 3 / 5 / 10 / 30 minute interval; only the local countdown changes between requests.
-- Borderless, draggable, resizable Windows card with system, light, and dark themes; supports always-on-top and position lock.
-- Closes completely with its window—no tray-resident process. Current-user autostart is optional.
+- Borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position lock.
+- Closes completely with its window—no tray-resident process. Autostart for the current account is optional.
 - Provides a **manual update check** in Settings. It only checks the public releases of this repository; there is no background polling, auto-download, self-replacement, or restart.
 
 ## Install
 
-1. Open [Releases](https://github.com/creamtea47/codex-usage-bar/releases/latest).
-2. Download `CodexUsageBar-x64-setup.exe` for most Windows PCs, or `CodexUsageBar-arm64-setup.exe` for Windows on ARM.
-3. Run the installer. It installs for the current user and normally does not require administrator privileges.
-4. Start **CodexUsageBar** from the Start menu after signing in to Codex on this PC.
+1. Open [Releases](https://github.com/creamtea47/codex-usage-bar/releases/latest) and choose the matching asset:
+
+   | Device | Asset | Install |
+   | --- | --- | --- |
+   | Windows x64 (most PCs) | `CodexUsageBar-x64-setup.exe` | Run the NSIS installer. It installs for the current user and normally needs no administrator privileges. |
+   | Windows on ARM | `CodexUsageBar-arm64-setup.exe` | Run the NSIS installer. It installs for the current user and normally needs no administrator privileges. |
+   | Intel Mac (macOS 11+) | `CodexUsageBar-macos-x64.dmg` | Open the DMG and drag the app to Applications. |
+   | Apple silicon Mac (macOS 11+) | `CodexUsageBar-macos-arm64.dmg` | Open the DMG and drag the app to Applications. |
+
+2. Sign in to Codex on this computer, then start **CodexUsageBar**.
+
+The current macOS DMGs are ad-hoc signed and not Apple-notarized. If Gatekeeper blocks the first launch, allow the app in **System Settings → Privacy & Security**, or Control-click it and choose **Open**. Apple Developer ID signing and notarization require separately supplied Apple credentials.
 
 The application uses a new application identifier and configuration directory. It is independent of the former `luodaoyi/codex-useage-win` repository and deliberately does not migrate or remove old settings or autostart entries.
+
+### Windows legacy-upgrade note
+
+The v0.2.1 “Unable to uninstall!” dialog is not a damaged download. The older Win32 package stored its install path under the `luodaoyi` publisher key, while v0.2.1 changed it to `creamtea47`; during an upgrade NSIS therefore passed an empty directory to the existing uninstaller. The v0.2.2 Windows package keeps the legacy key for this bridge and writes the new key after installation. This affects only Windows installer compatibility—not the Git repository, update endpoint, application identifier, or data directory.
+
+If v0.2.1 is currently showing that error, exit the installer and download v0.2.2. Do not manually delete the registry entry or `auth.json`.
 
 ## Usage
 
@@ -62,9 +76,9 @@ Only the Rust backend reads local credentials during a request. React receives a
 
 `auth.json` is searched in this order:
 
-1. Next to the running executable.
+1. Next to the running application executable.
 2. `%CODEX_HOME%\auth.json`.
-3. `%USERPROFILE%\.codex\auth.json`.
+3. Windows: `%USERPROFILE%\.codex\auth.json`; macOS: `~/.codex/auth.json`.
 
 The app only reads `GET https://chatgpt.com/backend-api/wham/usage`, and it:
 
@@ -87,15 +101,15 @@ The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_
 
 ## Logs and troubleshooting
 
-- Settings and window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json`.
-- Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log`, retained for 14 days.
+- Settings and window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
+- Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
 - Logs contain timestamps, operation results, HTTP status classes, and redacted errors only—never tokens, Authorization headers, or authentication-file contents.
 - If usage cannot be loaded, first confirm that Codex is signed in, then choose **Refresh now**. Never paste credentials into an issue, screenshot, or log.
 - Autostart from the legacy Win32 app is neither migrated nor removed. Disable its old `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry after confirming the new app works, otherwise two widgets may start together.
 
 ## Development
 
-Development requires Windows, Node.js 22+, pnpm 10, the stable Rust MSVC toolchain, and the Windows WebView2 Runtime. A global Tauri CLI is not required.
+Development requires Node.js 22+, pnpm 10, and stable Rust. Windows additionally needs the MSVC toolchain and WebView2 Runtime; macOS needs Xcode Command Line Tools. A global Tauri CLI is not required.
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -105,27 +119,33 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 pnpm tauri dev
 ```
 
-Build a native NSIS installer for the current architecture with:
+Build the native package for the current platform with:
 
 ```powershell
+# Windows: NSIS installer
 pnpm tauri build --bundles nsis
+
+# macOS: DMG
+pnpm tauri build --bundles dmg
 ```
 
-The output is written below `src-tauri\target\release\bundle\nsis\`.
+Output is written below `src-tauri\target\release\bundle\nsis\` or `src-tauri/target/release/bundle/dmg/`.
 
 ## CI and releases
 
-Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust tests, and native NSIS packaging on Windows x64 and ARM64 runners. A `v*` tag publishes these assets and their SHA-256 checksums:
+Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust tests, and native packaging on Windows x64, Windows ARM64, Intel Mac, and Apple silicon Mac runners. A `v*` tag publishes these assets and their SHA-256 checksums:
 
 - `CodexUsageBar-x64-setup.exe`
 - `CodexUsageBar-arm64-setup.exe`
+- `CodexUsageBar-macos-x64.dmg`
+- `CodexUsageBar-macos-arm64.dmg`
 
 Example maintainer release:
 
 ```powershell
-git tag -a v0.2.1 -m "v0.2.1 正式发布"
+git tag -a v0.2.2 -m "v0.2.2 发布 macOS 安装包"
 git push origin master
-git push origin v0.2.1
+git push origin v0.2.2
 ```
 
 ## Intentionally excluded

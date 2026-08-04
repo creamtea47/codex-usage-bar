@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  validate-and-bundle:
-    name: ${{ matrix.arch }} / validate and bundle
+  windows-validate-and-bundle:
+    name: Windows ${{ matrix.arch }} / validate and bundle
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -73,7 +73,7 @@ jobs:
             throw "NSIS installer was not found under src-tauri\\target."
           }
 
-          $outDir = "artifacts\${{ matrix.arch }}"
+          $outDir = "artifacts\windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
           $destination = Join-Path $outDir "CodexUsageBar-${{ matrix.arch }}-setup.exe"
           Copy-Item -LiteralPath $installer.FullName -Destination $destination
@@ -86,23 +86,93 @@ jobs:
       - name: Upload NSIS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexUsageBar-${{ matrix.arch }}-nsis
-          path: artifacts/${{ matrix.arch }}
+          name: CodexUsageBar-windows-${{ matrix.arch }}-nsis
+          path: artifacts/windows-${{ matrix.arch }}
+          if-no-files-found: error
+
+  macos-validate-and-bundle:
+    name: macOS ${{ matrix.arch }} / validate and bundle
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x64
+          - runner: macos-14
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint frontend
+        run: pnpm lint
+
+      - name: Test frontend
+        run: pnpm test
+
+      - name: Test Rust backend
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build DMG
+        run: pnpm exec tauri build --bundles dmg
+
+      - name: Stage DMG and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 不依赖 Tauri 生成文件名，避免版本号变化时发布任务找不到产物。
+          dmg="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          out_dir="artifacts/macos-${{ matrix.arch }}"
+          mkdir -p "$out_dir"
+          destination="$out_dir/CodexUsageBar-macos-${{ matrix.arch }}.dmg"
+          cp "$dmg" "$destination"
+          shasum -a 256 "$destination" | awk '{print $1}' > "$destination.sha256"
+          printf 'Staged DMG: %s\\n' "$destination"
+          shasum -a 256 "$destination"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexUsageBar-macos-${{ matrix.arch }}-dmg
+          path: artifacts/macos-${{ matrix.arch }}
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: validate-and-bundle
+    needs: [windows-validate-and-bundle, macos-validate-and-bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download NSIS artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
-          pattern: CodexUsageBar-*-nsis
+          pattern: CodexUsageBar-*
           merge-multiple: true
 
       - name: List release assets
@@ -112,6 +182,8 @@ jobs:
           find release-assets -maxdepth 1 -type f -printf '%f\\n'
           test -f release-assets/CodexUsageBar-x64-setup.exe
           test -f release-assets/CodexUsageBar-arm64-setup.exe
+          test -f release-assets/CodexUsageBar-macos-x64.dmg
+          test -f release-assets/CodexUsageBar-macos-arm64.dmg
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

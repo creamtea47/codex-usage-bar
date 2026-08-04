@@ -28,18 +28,25 @@ pub fn resolve_auth_json_path() -> Result<PathBuf, AuthError> {
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
     let codex_home = env::var_os("CODEX_HOME").map(PathBuf::from);
-    let user_profile = env::var_os("USERPROFILE").map(PathBuf::from);
+    // Windows 使用 USERPROFILE，macOS 使用 HOME；优先级其余部分与旧版保持一致。
+    let user_home = resolve_user_home();
     resolve_auth_json_path_from(
         executable_dir.as_deref(),
         codex_home.as_deref(),
-        user_profile.as_deref(),
+        user_home.as_deref(),
     )
+}
+
+fn resolve_user_home() -> Option<PathBuf> {
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
 }
 
 pub fn resolve_auth_json_path_from(
     executable_dir: Option<&Path>,
     codex_home: Option<&Path>,
-    user_profile: Option<&Path>,
+    user_home: Option<&Path>,
 ) -> Result<PathBuf, AuthError> {
     let mut candidates = Vec::new();
     if let Some(directory) = executable_dir {
@@ -48,7 +55,7 @@ pub fn resolve_auth_json_path_from(
     if let Some(directory) = codex_home {
         candidates.push(directory.join("auth.json"));
     }
-    if let Some(directory) = user_profile {
+    if let Some(directory) = user_home {
         candidates.push(directory.join(".codex").join("auth.json"));
     }
 
@@ -159,5 +166,19 @@ mod tests {
         let access = parsed["tokens"]["access_token"].as_str().unwrap();
         assert_eq!(access, "secret");
         assert!(parsed.get("refresh_token").is_none());
+    }
+
+    #[test]
+    fn resolves_home_for_macos_style_auth_location() {
+        let root = temporary_directory("auth-macos-home");
+        let macos_home = root.join("macos-home");
+        fs::create_dir_all(macos_home.join(".codex")).unwrap();
+        fs::write(macos_home.join(".codex/auth.json"), "{}").unwrap();
+
+        assert_eq!(
+            resolve_auth_json_path_from(None, None, Some(&macos_home)).unwrap(),
+            macos_home.join(".codex/auth.json")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
