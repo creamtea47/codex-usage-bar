@@ -103,7 +103,8 @@ The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_
 
 - Settings and window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
 - Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
-- Logs contain timestamps, operation results, HTTP status classes, and redacted errors only—never tokens, Authorization headers, or authentication-file contents.
+- Logs contain timestamps, operation results, HTTP status or transport categories, and redacted errors only—never tokens, Authorization headers, or authentication-file contents.
+- On proxy-restricted networks, native requests follow the Windows/macOS system proxy and `HTTP_PROXY` / `HTTPS_PROXY`; proxy addresses and credentials are never written to logs.
 - If usage cannot be loaded, first confirm that Codex is signed in, then choose **Refresh now**. Never paste credentials into an issue, screenshot, or log.
 - Autostart from the legacy Win32 app is neither migrated nor removed. Disable its old `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry after confirming the new app works, otherwise two widgets may start together.
 
@@ -143,9 +144,9 @@ Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust test
 Example maintainer release:
 
 ```powershell
-git tag -a v0.2.3 -m "v0.2.3 发布 macOS 安装包"
+git tag -a v0.2.4 -m "v0.2.4 修复系统代理访问"
 git push origin master
-git push origin v0.2.3
+git push origin v0.2.4
 ```
 
 ## Intentionally excluded

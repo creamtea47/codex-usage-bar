@@ -103,7 +103,8 @@
 
 - 设置和窗口位置：Windows 为 `%APPDATA%\com.creamtea47.codexusagebar\settings.json`；macOS 为 `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json`。
 - 运行日志：Windows 为 `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log`；macOS 为 `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log`；均保留 14 天。
-- 日志只记录时间、操作结果、HTTP 状态类别和脱敏错误；绝不记录 Token、Authorization 请求头或认证文件内容。
+- 日志只记录时间、操作结果、HTTP 状态或传输类别和脱敏错误；绝不记录 Token、Authorization 请求头或认证文件内容。
+- 受代理网络限制时，原生请求会遵循 Windows/macOS 系统代理与 `HTTP_PROXY` / `HTTPS_PROXY`；代理地址和凭据不会写入日志。
 - 无法读取用量时，先确认 Codex 已登录，再点击“立即刷新”。请勿将认证信息粘贴到 Issue、截图或日志中。
 - 若旧 Win32 版开通过自启，旧的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 项不会被新版迁移或删除；确认新版可用后请自行关闭旧项，避免两个悬浮窗同时启动。
 
@@ -143,9 +144,9 @@ pnpm tauri build --bundles dmg
 维护者发布示例：
 
 ```powershell
-git tag -a v0.2.3 -m "v0.2.3 发布 macOS 安装包"
+git tag -a v0.2.4 -m "v0.2.4 修复系统代理访问"
 git push origin master
-git push origin v0.2.3
+git push origin v0.2.4
 ```
 
 ## 不包含的能力

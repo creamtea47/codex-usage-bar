@@ -34,6 +34,8 @@ pub struct UsageClient {
 
 impl UsageClient {
     pub fn new() -> Result<Self, UsageError> {
+        // reqwest 的 system-proxy feature 会安全读取系统代理和 HTTP(S)_PROXY，
+        // 仅用于发起本次只读请求；代理配置绝不记录到日志或传给 React。
         let client = Client::builder()
             .user_agent("CodexUsageBar/0.2 (read-only)")
             .connect_timeout(StdDuration::from_secs(10))
@@ -57,7 +59,20 @@ impl UsageClient {
             request = request.header("ChatGPT-Account-Id", account_id);
         }
 
-        let response = request.send().await.map_err(|_| UsageError::Network)?;
+        let response = request.send().await.map_err(|error| {
+            // 只保留可排查的传输类别，不写入 URL、请求头、代理地址或任何认证数据。
+            let category = if error.is_timeout() {
+                "timeout"
+            } else if error.is_connect() {
+                "connect"
+            } else if error.is_request() {
+                "request"
+            } else {
+                "other"
+            };
+            log::warn!("用量请求传输失败：类别={category}");
+            UsageError::Network
+        })?;
         let status = response.status();
         if !status.is_success() {
             return Err(status_to_error(status));
