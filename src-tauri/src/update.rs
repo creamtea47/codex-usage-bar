@@ -233,9 +233,9 @@ mod tests {
     fn selects_a_dmg_for_apple_silicon_macos() {
         let info = parse_latest_release(
             release(
-                "v0.2.2",
+                "v0.2.3",
                 "CodexUsageBar-macos-arm64.dmg",
-                "https://github.com/creamtea47/codex-usage-bar/releases/download/v0.2.2/CodexUsageBar-macos-arm64.dmg",
+                "https://github.com/creamtea47/codex-usage-bar/releases/download/v0.2.3/CodexUsageBar-macos-arm64.dmg",
             ),
             "0.2.1",
             "macos",

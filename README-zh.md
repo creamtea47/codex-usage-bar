@@ -56,9 +56,9 @@
 
 ### Windows 旧版升级提示
 
-截图中 v0.2.1 的“Unable to uninstall!”不是安装包损坏：旧版将安装目录登记在 `luodaoyi` 的发布者键下，而 v0.2.1 改为 `creamtea47`，导致 NSIS 升级时传给现有卸载器的目录为空。v0.2.2 的 Windows 包保留旧登记键完成这次升级，并在安装后同步新键；它只影响 Windows 安装兼容性，不影响 Git 仓库、更新地址、应用标识或数据目录。
+截图中 v0.2.1 的“Unable to uninstall!”不是安装包损坏：旧版将安装目录登记在 `luodaoyi` 的发布者键下，而 v0.2.1 改为 `creamtea47`，导致 NSIS 升级时传给现有卸载器的目录为空。v0.2.3 的 Windows 包保留旧登记键完成这次升级，并在安装后同步新键；它只影响 Windows 安装兼容性，不影响 Git 仓库、更新地址、应用标识或数据目录。
 
-若当前正停在 v0.2.1 的该报错窗口，直接退出安装器并下载 v0.2.2；无需手动删除注册表或 `auth.json`。
+若当前正停在 v0.2.1 的该报错窗口，直接退出安装器并下载 v0.2.3；无需手动删除注册表或 `auth.json`。
 
 ## 使用方式
 
@@ -143,9 +143,9 @@ pnpm tauri build --bundles dmg
 维护者发布示例：
 
 ```powershell
-git tag -a v0.2.2 -m "v0.2.2 发布 macOS 安装包"
+git tag -a v0.2.3 -m "v0.2.3 发布 macOS 安装包"
 git push origin master
-git push origin v0.2.2
+git push origin v0.2.3
 ```
 
 ## 不包含的能力

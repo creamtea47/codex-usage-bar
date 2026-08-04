@@ -56,9 +56,9 @@ The application uses a new application identifier and configuration directory. I
 
 ### Windows legacy-upgrade note
 
-The v0.2.1 “Unable to uninstall!” dialog is not a damaged download. The older Win32 package stored its install path under the `luodaoyi` publisher key, while v0.2.1 changed it to `creamtea47`; during an upgrade NSIS therefore passed an empty directory to the existing uninstaller. The v0.2.2 Windows package keeps the legacy key for this bridge and writes the new key after installation. This affects only Windows installer compatibility—not the Git repository, update endpoint, application identifier, or data directory.
+The v0.2.1 “Unable to uninstall!” dialog is not a damaged download. The older Win32 package stored its install path under the `luodaoyi` publisher key, while v0.2.1 changed it to `creamtea47`; during an upgrade NSIS therefore passed an empty directory to the existing uninstaller. The v0.2.3 Windows package keeps the legacy key for this bridge and writes the new key after installation. This affects only Windows installer compatibility—not the Git repository, update endpoint, application identifier, or data directory.
 
-If v0.2.1 is currently showing that error, exit the installer and download v0.2.2. Do not manually delete the registry entry or `auth.json`.
+If v0.2.1 is currently showing that error, exit the installer and download v0.2.3. Do not manually delete the registry entry or `auth.json`.
 
 ## Usage
 
@@ -143,9 +143,9 @@ Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust test
 Example maintainer release:
 
 ```powershell
-git tag -a v0.2.2 -m "v0.2.2 发布 macOS 安装包"
+git tag -a v0.2.3 -m "v0.2.3 发布 macOS 安装包"
 git push origin master
-git push origin v0.2.2
+git push origin v0.2.3
 ```
 
 ## Intentionally excluded

@@ -16,6 +16,7 @@ src-tauri/icons/*
 !src-tauri/icons/icon.svg
 !src-tauri/icons/icon.ico
 !src-tauri/icons/icon.icns
+!src-tauri/icons/icon.png
 
 # Local packages, screenshots, and legacy native build outputs
 artifacts/
