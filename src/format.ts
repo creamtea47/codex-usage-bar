@@ -38,7 +38,7 @@ export function formatClock(value: string | null): string {
 export function statusLabel(status: 'loading' | 'ready' | 'stale' | 'error'): string {
   switch (status) {
     case 'ready':
-      return '数据已更新';
+      return '额度已同步';
     case 'stale':
       return '展示上次数据';
     case 'error':

@@ -1,6 +1,6 @@
 [package]
 name = "codex_usage_bar"
-version = "0.2.4"
+version = "0.2.5"
 description = "A read-only desktop usage widget for Codex"
 authors = ["creamtea47"]
 homepage = "https://github.com/creamtea47/codex-usage-bar"

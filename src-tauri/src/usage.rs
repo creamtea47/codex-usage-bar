@@ -138,6 +138,8 @@ pub fn parse_usage_payload(payload: &Value) -> Result<DashboardSnapshot, UsageEr
     windows.sort_by_key(|window| window.window_seconds);
     Ok(DashboardSnapshot {
         status: DashboardStatus::Ready,
+        // 原始邮箱只存在于本次 JSON 解析栈内。前端、快照和日志都只能看到掩码结果。
+        account_email_masked: parse_account_email_masked(payload),
         plan_label: payload
             .get("plan_type")
             .and_then(Value::as_str)
@@ -147,6 +149,27 @@ pub fn parse_usage_payload(payload: &Value) -> Result<DashboardSnapshot, UsageEr
         message: None,
         quota_windows: windows,
     })
+}
+
+/// 用量接口不同账户形态可能把账号信息放在不同对象中。只尝试已知公开展示字段，
+/// 并在离开此函数前掩码，避免意外把原始邮箱扩大到应用状态或 IPC。
+fn parse_account_email_masked(payload: &Value) -> Option<String> {
+    ["/email", "/account/email", "/user/email", "/profile/email"]
+        .into_iter()
+        .filter_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))
+        .find_map(mask_email)
+}
+
+/// 仅保留本地部分首字符和完整域名，例如 `jane@example.com` 显示为
+/// `j***@example.com`。缺少合法分隔符时不展示，宁可缺省也不回传原文。
+fn mask_email(value: &str) -> Option<String> {
+    let (local, domain) = value.trim().rsplit_once('@')?;
+    let first = local.trim().chars().next()?;
+    let domain = domain.trim();
+    if domain.is_empty() || domain.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(format!("{first}***@{domain}"))
 }
 
 fn parse_window(default_id: &str, value: &Value) -> Option<QuotaWindow> {
@@ -234,12 +257,46 @@ mod tests {
         });
         let snapshot = parse_usage_payload(&payload).unwrap();
         assert_eq!(snapshot.status, DashboardStatus::Ready);
+        assert_eq!(
+            snapshot.account_email_masked.as_deref(),
+            Some("p***@example.com")
+        );
         assert_eq!(snapshot.quota_windows.len(), 2);
         assert_eq!(snapshot.quota_windows[0].remaining_percent, 70);
         assert!(snapshot.quota_windows[1].show_pace_marker);
         let rendered = serde_json::to_string(&snapshot).unwrap();
         assert!(!rendered.contains("private@example.com"));
+        assert!(!rendered.contains("private@"));
+        assert!(rendered.contains("p***@example.com"));
         assert!(!rendered.contains("access_token"));
+    }
+
+    #[test]
+    fn safely_masks_nested_account_email_and_omits_invalid_email() {
+        let nested = serde_json::json!({
+            "account": { "email": "  jane.doe@example.com " },
+            "rate_limit": {
+                "primary_window": {"used_percent": 30, "limit_window_seconds": 18000, "reset_after_seconds": 3600, "reset_at": 1_800_000_000}
+            }
+        });
+        assert_eq!(
+            parse_usage_payload(&nested)
+                .unwrap()
+                .account_email_masked
+                .as_deref(),
+            Some("j***@example.com")
+        );
+
+        let invalid = serde_json::json!({
+            "email": "not-an-email",
+            "rate_limit": {
+                "primary_window": {"used_percent": 30, "limit_window_seconds": 18000, "reset_after_seconds": 3600, "reset_at": 1_800_000_000}
+            }
+        });
+        assert_eq!(
+            parse_usage_payload(&invalid).unwrap().account_email_masked,
+            None
+        );
     }
 
     #[test]

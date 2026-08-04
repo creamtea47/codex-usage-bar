@@ -1,7 +1,8 @@
 {
   "name": "codex-usage-bar",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.2.5",
+  "author": "creamtea47",
   "description": "A privacy-first desktop floating usage card for Codex.",
   "homepage": "https://github.com/creamtea47/codex-usage-bar",
   "repository": {

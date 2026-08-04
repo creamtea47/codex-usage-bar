@@ -16,6 +16,11 @@ export interface QuotaWindow {
 
 export interface DashboardSnapshot {
   status: DashboardStatus;
+  /**
+   * 仅由 Rust 从成功响应中提取并脱敏后的展示邮箱，例如 j***@example.com。
+   * 前端绝不会接触认证文件、Token、请求头或原始账号资料。
+   */
+  accountEmailMasked: string | null;
   planLabel: string | null;
   refreshedAt: string | null;
   nextRefreshAt: string | null;
@@ -49,6 +54,7 @@ export const defaultSettings: Settings = {
 
 export const loadingSnapshot: DashboardSnapshot = {
   status: 'loading',
+  accountEmailMasked: null,
   planLabel: null,
   refreshedAt: null,
   nextRefreshAt: null,

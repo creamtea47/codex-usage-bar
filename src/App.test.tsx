@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from './App';
-import { defaultSettings, loadingSnapshot, type DashboardSnapshot, type Settings, type UpdateInfo } from './types';
+import { defaultSettings, loadingSnapshot, type DashboardSnapshot, type Settings } from './types';
 
 const bridgeMocks = vi.hoisted(() => ({
   getDashboard: vi.fn(),
@@ -12,10 +12,11 @@ const bridgeMocks = vi.hoisted(() => ({
   getAutostart: vi.fn(),
   setAutostart: vi.fn(),
   checkUpdate: vi.fn(),
+  openSettingsWindow: vi.fn(),
+  markMainSizeManual: vi.fn(),
   listenForDashboard: vi.fn(),
+  listenForSettings: vi.fn(),
 }));
-
-const openerMocks = vi.hoisted(() => ({ openUrl: vi.fn() }));
 
 const windowMocks = vi.hoisted(() => ({
   close: vi.fn(),
@@ -25,10 +26,10 @@ const windowMocks = vi.hoisted(() => ({
 
 vi.mock('./bridge', () => ({ usageBridge: bridgeMocks }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => windowMocks }));
-vi.mock('@tauri-apps/plugin-opener', () => openerMocks);
 
 const readySnapshot: DashboardSnapshot = {
   status: 'ready',
+  accountEmailMasked: 'j***@example.com',
   planLabel: 'Plus',
   refreshedAt: '2030-01-04T12:00:00Z',
   nextRefreshAt: '2030-01-04T12:05:00Z',
@@ -46,15 +47,6 @@ const readySnapshot: DashboardSnapshot = {
       showPaceMarker: true,
     },
   ],
-};
-
-const availableUpdate: UpdateInfo = {
-  currentVersion: '0.2.0',
-  latestVersion: '0.2.1',
-  updateAvailable: true,
-  releaseUrl: 'https://github.com/creamtea47/codex-usage-bar/releases/tag/v0.2.1',
-  downloadUrl: 'https://github.com/creamtea47/codex-usage-bar/releases/download/v0.2.1/CodexUsageBar-x64-setup.exe',
-  publishedAt: '2030-01-04T12:00:00Z',
 };
 
 function installMatchMedia() {
@@ -75,14 +67,18 @@ function prepareBridge(snapshot: DashboardSnapshot = readySnapshot, settings: Se
   bridgeMocks.saveSettings.mockImplementation(async (next: Settings) => next);
   bridgeMocks.getAutostart.mockResolvedValue(false);
   bridgeMocks.setAutostart.mockImplementation(async (enabled: boolean) => enabled);
-  bridgeMocks.checkUpdate.mockResolvedValue(availableUpdate);
+  bridgeMocks.checkUpdate.mockResolvedValue(null);
+  bridgeMocks.openSettingsWindow.mockResolvedValue(undefined);
+  bridgeMocks.markMainSizeManual.mockResolvedValue(undefined);
   bridgeMocks.listenForDashboard.mockResolvedValue(() => undefined);
+  bridgeMocks.listenForSettings.mockResolvedValue(() => undefined);
 }
 
 async function renderLoaded(settings: Settings = defaultSettings) {
   prepareBridge(readySnapshot, settings);
-  render(<App />);
-  await screen.findByText('数据已更新');
+  const result = render(<App />);
+  await screen.findByText('j***@example.com · Plus');
+  return result;
 }
 
 beforeEach(() => {
@@ -105,14 +101,31 @@ describe('App', () => {
     unmount();
 
     prepareBridge({ ...readySnapshot, status: 'stale', message: '认证已过期，请重新登录 Codex。' });
-    render(<App />);
+    const staleView = render(<App />);
     expect(await screen.findByText('展示上次数据')).toBeTruthy();
     expect(screen.getByText('认证已过期，请重新登录 Codex。')).toBeTruthy();
+    staleView.unmount();
 
     prepareBridge({ ...loadingSnapshot, status: 'error', message: '无法读取本地凭据。' });
     render(<App />);
     expect(await screen.findByText('无法读取用量')).toBeTruthy();
     expect(screen.getByText('无法读取本地凭据。')).toBeTruthy();
+  });
+
+  it('shows the masked account, plan, refresh countdown, and no legacy success title', async () => {
+    await renderLoaded();
+
+    expect(screen.getByText('j***@example.com · Plus')).toBeTruthy();
+    expect(screen.getByText(/下次自动刷新 \d+:\d{2} · 更新于/)).toBeTruthy();
+    expect(screen.queryByText('数据已更新')).toBeNull();
+  });
+
+  it('falls back to the plan summary when Rust has no masked email', async () => {
+    prepareBridge({ ...readySnapshot, accountEmailMasked: null });
+    render(<App />);
+
+    expect(await screen.findByText('Plus')).toBeTruthy();
+    expect(screen.queryByText('null · Plus')).toBeNull();
   });
 
   it.each([
@@ -124,7 +137,7 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByRole('main').getAttribute('data-theme-mode')).toBe(expectedMode));
   });
 
-  it('disables the refresh button until a manual refresh completes', async () => {
+  it('disables the top refresh icon until a manual refresh completes', async () => {
     await renderLoaded();
     let finishRefresh: ((snapshot: DashboardSnapshot) => void) | undefined;
     bridgeMocks.refreshDashboard.mockImplementation(
@@ -134,59 +147,37 @@ describe('App', () => {
         }),
     );
 
-    const refreshButton = screen.getByRole('button', { name: '立即刷新' }) as HTMLButtonElement;
+    const refreshButton = screen.getByRole('button', { name: '刷新用量' }) as HTMLButtonElement;
     fireEvent.click(refreshButton);
     await waitFor(() => expect(refreshButton.disabled).toBe(true));
-    expect(refreshButton.textContent).toBe('刷新中…');
 
     await act(async () => finishRefresh?.(readySnapshot));
     await waitFor(() => expect(refreshButton.disabled).toBe(false));
   });
 
-  it('calls the settings IPC and shows an error message when persistence fails', async () => {
+  it('opens the independent settings window through the constrained IPC', async () => {
     await renderLoaded();
-    bridgeMocks.saveSettings.mockRejectedValueOnce(new Error('unavailable'));
 
     fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
-    fireEvent.click(screen.getByLabelText('始终置顶'));
-
-    await waitFor(() =>
-      expect(bridgeMocks.saveSettings).toHaveBeenCalledWith({ ...defaultSettings, alwaysOnTop: true }),
-    );
-    expect(await screen.findByText('无法保存设置。')).toBeTruthy();
+    await waitFor(() => expect(bridgeMocks.openSettingsWindow).toHaveBeenCalledTimes(1));
   });
 
-  it('shows confirmation after settings are persisted', async () => {
-    await renderLoaded();
+  it('marks the size as manual only when the user starts a resize drag', async () => {
+    const { container } = await renderLoaded();
 
-    fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
-    fireEvent.click(screen.getByLabelText('始终置顶'));
+    const eastEdge = container.querySelector('[data-resize-direction="East"]');
+    expect(eastEdge).toBeTruthy();
+    fireEvent.mouseDown(eastEdge!);
 
-    expect(await screen.findByText('设置已保存。')).toBeTruthy();
+    expect(bridgeMocks.markMainSizeManual).toHaveBeenCalledTimes(1);
+    expect(windowMocks.startResizeDragging).toHaveBeenCalledWith('East');
   });
 
-  it('exposes MUI settings controls with accessible names', async () => {
+  it('shows a feedback message when opening the settings window fails', async () => {
     await renderLoaded();
+    bridgeMocks.openSettingsWindow.mockRejectedValueOnce(new Error('unavailable'));
 
     fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
-
-    expect(screen.getByRole('switch', { name: '始终置顶' })).toBeTruthy();
-    expect(screen.getByRole('switch', { name: '锁定位置与大小' })).toBeTruthy();
-    expect(screen.getByRole('switch', { name: '开机启动' })).toBeTruthy();
-    expect(screen.getByRole('combobox', { name: '自动刷新' })).toBeTruthy();
-    expect(screen.getByRole('combobox', { name: '主题' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '检查更新' })).toBeTruthy();
-  });
-
-  it('checks the public release and opens the scoped release page only after a user action', async () => {
-    await renderLoaded();
-
-    fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
-    fireEvent.click(screen.getByRole('button', { name: '检查更新' }));
-
-    await waitFor(() => expect(bridgeMocks.checkUpdate).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText('发现新版本 v0.2.1')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '打开发布页' }));
-    await waitFor(() => expect(openerMocks.openUrl).toHaveBeenCalledWith(availableUpdate.downloadUrl));
+    expect(await screen.findByText('无法打开设置窗口，请稍后重试。')).toBeTruthy();
   });
 });

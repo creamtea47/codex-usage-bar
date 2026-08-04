@@ -27,6 +27,7 @@ function quotaColor(remainingPercent: number): 'success' | 'warning' | 'error' {
 export function QuotaWindowCard({ quotaWindow, now }: QuotaWindowCardProps) {
   const marker = paceMarkerPercent(quotaWindow, now);
   const color = quotaColor(quotaWindow.remainingPercent);
+  const suggestedRemaining = marker === null ? null : Math.round(marker);
 
   return (
     <Card variant="outlined" component="article" aria-label={quotaWindow.label}>
@@ -58,9 +59,10 @@ export function QuotaWindowCard({ quotaWindow, now }: QuotaWindowCardProps) {
             sx={{ height: 8, borderRadius: 999 }}
           />
           {marker !== null && (
-            <Tooltip title="按当前周期均匀使用时的理论剩余额度" placement="top">
+            <Tooltip title="按当前窗口时间进度实时估算的平均消耗节奏，不代表官方阈值" placement="top">
               <Box
                 component="span"
+                aria-label={`建议控量不低于 ${suggestedRemaining}%`}
                 sx={{
                   position: 'absolute',
                   left: `${marker}%`,
@@ -82,7 +84,7 @@ export function QuotaWindowCard({ quotaWindow, now }: QuotaWindowCardProps) {
           </Typography>
           {marker !== null && (
             <Typography variant="caption" color="text.secondary">
-              黑线为平均进度
+              建议控量 ≥ {suggestedRemaining}%
             </Typography>
           )}
         </Stack>

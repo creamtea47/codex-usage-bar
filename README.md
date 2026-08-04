@@ -2,7 +2,7 @@
 
 # CodexUsageBar
 
-**A privacy-first floating Codex usage card for Windows and macOS.**
+**A privacy-first, compact floating Codex usage card for Windows and macOS.**
 
 Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
@@ -21,20 +21,25 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
 ## Screenshots
 
-### Floating usage card (Windows example)
+### Compact floating usage card (Windows example)
 
-![CodexUsageBar dashboard showing dynamic quota windows, reset time, and a manual refresh button](docs/images/dashboard-light.png)
+![CodexUsageBar compact dashboard showing dynamic quota windows, remaining usage, reset time, and top-right refresh controls](docs/images/dashboard-light.png)
 
-### Settings and manual update check
+### Separate settings window and manual update check
 
-![CodexUsageBar settings panel with always-on-top, position lock, autostart, update check, refresh interval, and theme](docs/images/settings-update.png)
+![CodexUsageBar separate settings window with sidebar categories for display, refresh, startup, and updates](docs/images/settings-update.png)
 
 ## Features
 
+- Opens as a compact `460 × 260` floating card for one quota window, removing unused bottom space. It expands only when additional windows need room (up to `560px`), and scrolls only the quota area beyond that limit. A manually resized card keeps its chosen size.
 - Displays every quota window returned by the usage API, its remaining percentage, reset time, and local countdown.
+- Shows a masked account summary such as `j***@example.com · Pro` after a successful refresh, together with the next automatic-refresh countdown and most recent refresh time.
 - Refreshes at launch and on a configurable 1 / 3 / 5 / 10 / 30 minute interval; only the local countdown changes between requests.
-- Borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position lock.
+- Keeps **Refresh**, **Settings**, and **Close** in the upper-right corner. Refresh is disabled while a request is running to prevent duplicate requests.
+- Draws a pace marker for long quota windows. Its tooltip explains that the marker is the suggested minimum remaining quota calculated from elapsed window time; it is a local pacing estimate, not an official limit.
+- Uses a borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position / size lock.
 - Closes completely with its window—no tray-resident process. Autostart for the current account is optional.
+- Opens Settings in a separate opaque native window with sidebar categories: **Display**, **Data & refresh**, **Startup**, and **About & updates**.
 - Provides a **manual update check** in Settings. It only checks the public releases of this repository; there is no background polling, auto-download, self-replacement, or restart.
 
 ## Install
@@ -56,13 +61,15 @@ The application uses a new application identifier and configuration directory. I
 
 ### Windows legacy-upgrade note
 
-The v0.2.1 “Unable to uninstall!” dialog is not a damaged download. The older Win32 package stored its install path under the `luodaoyi` publisher key, while v0.2.1 changed it to `creamtea47`; during an upgrade NSIS therefore passed an empty directory to the existing uninstaller. The v0.2.3 Windows package keeps the legacy key for this bridge and writes the new key after installation. This affects only Windows installer compatibility—not the Git repository, update endpoint, application identifier, or data directory.
+Windows builds identify `creamtea47` as the publisher. For legacy-upgrade compatibility, earlier releases already wrote the same install path under both the legacy `luodaoyi` key and the new `creamtea47` key, so current installers can find an existing uninstaller correctly. This affects only Windows installer compatibility—not the Git repository, update endpoint, application identifier, or data directory.
 
-If v0.2.1 is currently showing that error, exit the installer and download v0.2.3. Do not manually delete the registry entry or `auth.json`.
+If an old v0.2.1 installer is currently showing that error, exit it and download a current release. Do not manually delete the registry entry or `auth.json`.
 
 ## Usage
 
-The card tries to load usage data immediately after launch. Use **Refresh now** to retry; use the Settings button to adjust the theme, refresh interval, always-on-top, position lock, and autostart.
+The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry. The adjacent **Settings** button opens a separate window where settings are organized into **Display**, **Data & refresh**, **Startup**, and **About & updates**.
+
+The Display page controls the theme, always-on-top, and position / size lock. The Data & refresh page controls the refresh interval; Startup controls autostart; About & updates contains the version and manual update check. Closing Settings only hides that window—the floating card remains running. Closing the floating card exits the application.
 
 Choose **Check for updates** in Settings when you want to inspect a new version:
 
@@ -72,7 +79,7 @@ Choose **Check for updates** in Settings when you want to inspect a new version:
 
 ## Privacy and read-only boundary
 
-Only the Rust backend reads local credentials during a request. React receives a filtered snapshot containing status, plan label, refresh time, a safe error message, and quota windows. It never receives `auth.json`, access tokens, email addresses, request headers, or raw API responses.
+Only the Rust backend reads local credentials during a request. React receives a filtered snapshot containing status, plan label, refresh time, a safe error message, quota windows, and—when the successful usage response provides it—a masked account email. The raw email is transformed in Rust (for example, `j***@example.com`) before it reaches the UI. React never receives `auth.json`, access tokens, request headers, raw API responses, or an unmasked email address.
 
 `auth.json` is searched in this order:
 
@@ -85,27 +92,28 @@ The app only reads `GET https://chatgpt.com/backend-api/wham/usage`, and it:
 - Does not refresh OAuth tokens or write to `auth.json`.
 - Does not query or consume reset cards and never begins an OAuth flow.
 - Does not install frontend filesystem or HTTP permissions; sensitive I/O stays in Rust.
+- Derives the optional masked account summary only from a successful usage response. It does not read an email from `auth.json`, persist an unmasked email, or write either form of the email to runtime logs.
 - Checks updates only against the public GitHub Release metadata for `creamtea47/codex-usage-bar`, without sending Codex credentials.
 
-If credentials are missing, expired, or rejected, the last successful snapshot remains visible as stale. Sign in to Codex again, then choose **Refresh now**.
+If credentials are missing, expired, or rejected, the last successful snapshot remains visible as stale. Sign in to Codex again, then choose top-right **Refresh**.
 
 ## Architecture
 
 | Layer | Technology | Responsibility |
 | --- | --- | --- |
-| Desktop UI | React + TypeScript + Material UI + Vite | Chinese usage card, themes, settings popover, drag and resize interactions |
+| Desktop UI | React + TypeScript + Material UI + Vite | Compact Chinese usage card, themes, standalone sidebar settings window, drag and resize interactions |
 | Native boundary | Tauri 2 commands and capabilities | Narrow IPC and scoped window / release-link permissions |
 | Data and persistence | Rust + Tokio + Reqwest + Serde | Read-only credentials, request de-duplication, cached snapshots, settings, autostart, redacted logs |
 
-The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_settings`, `save_settings`, `get_autostart`, `set_autostart`, and `check_update`. Credentials never cross the Rust boundary.
+The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_settings`, `save_settings`, `get_autostart`, `set_autostart`, `open_settings_window`, `mark_main_size_manual`, and `check_update`. Credentials and unmasked account details never cross the Rust boundary.
 
 ## Logs and troubleshooting
 
-- Settings and window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
+- Settings and independent main/settings-window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
 - Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
 - Logs contain timestamps, operation results, HTTP status or transport categories, and redacted errors only—never tokens, Authorization headers, or authentication-file contents.
 - On proxy-restricted networks, native requests follow the Windows/macOS system proxy and `HTTP_PROXY` / `HTTPS_PROXY`; proxy addresses and credentials are never written to logs.
-- If usage cannot be loaded, first confirm that Codex is signed in, then choose **Refresh now**. Never paste credentials into an issue, screenshot, or log.
+- If usage cannot be loaded, first confirm that Codex is signed in, then choose top-right **Refresh**. Never paste credentials into an issue, screenshot, or log.
 - Autostart from the legacy Win32 app is neither migrated nor removed. Disable its old `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry after confirming the new app works, otherwise two widgets may start together.
 
 ## Development
@@ -144,11 +152,11 @@ Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust test
 Example maintainer release:
 
 ```powershell
-git tag -a v0.2.4 -m "v0.2.4 修复系统代理访问"
+git tag -a v0.2.5 -m "v0.2.5 紧凑主卡与独立设置窗口"
 git push origin master
-git push origin v0.2.4
+git push origin v0.2.5
 ```
 
 ## Intentionally excluded
 
-There are no silent automatic updates, automatic installer downloads, taskbar-docked mode, legacy layout migration, UI language switching, OAuth token refresh, or reset-card operations.
+There are no silent automatic updates, automatic installer downloads, taskbar-docked mode, general legacy-layout migration, UI language switching, OAuth token refresh, or reset-card operations. Existing installations receive only the one-time compact-height adjustment described above.

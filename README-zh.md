@@ -2,7 +2,7 @@
 
 # CodexUsageBar
 
-**一个隐私优先的 Windows 与 macOS Codex 用量悬浮卡片。**
+**一个隐私优先、紧凑的 Windows 与 macOS Codex 用量悬浮卡片。**
 
 使用 Tauri 2、Rust、React、TypeScript、Material UI 与 Vite 构建。
 
@@ -21,21 +21,26 @@
 
 ## 截图
 
-### 用量悬浮卡（Windows 示例）
+### 紧凑用量悬浮卡（Windows 示例）
 
-![CodexUsageBar 主界面：显示两个动态额度窗口、重置时间和手动刷新按钮](docs/images/dashboard-light.png)
+![CodexUsageBar 紧凑主界面：显示动态额度窗口、剩余额度、重置时间和右上角刷新控件](docs/images/dashboard-light.png)
 
-### 设置与手动检查更新
+### 独立设置窗口与手动检查更新
 
-![CodexUsageBar 设置面板：置顶、锁定、开机启动、检查更新、刷新间隔和主题](docs/images/settings-update.png)
+![CodexUsageBar 独立设置窗口：左侧分类导航，包含显示、刷新、启动和更新设置](docs/images/settings-update.png)
 
 ## 功能
 
+- 一个额度窗口时，默认以 `460 × 260` 的紧凑卡片打开，消除底部无效留白；新增额度窗口时仅按内容增高，最高 `560px`，超出后只滚动额度区域。手动调整大小后会保持用户选择的尺寸。
 - 动态显示接口返回的全部额度窗口、剩余百分比、重置时间和本地倒计时。
+- 成功刷新后展示如 `j***@example.com · Pro` 的掩码账号摘要，以及下次自动刷新倒计时和最近刷新时间。
 - 启动立即刷新，并可按 1 / 3 / 5 / 10 / 30 分钟自动刷新；两次请求之间只更新本地倒计时。
-- 无边框、可拖动、可缩放的桌面悬浮卡，支持跟随系统、浅色、深色主题、置顶和位置锁定。
+- 右上角提供“刷新、设置、关闭”按钮；请求进行中会禁用刷新，避免重复请求。
+- 长周期额度显示控量线；悬停提示会说明它是按额度窗口已过去的时间计算出的“建议最低剩余额度”，仅用于本地节奏参考，不是官方阈值。
+- 无边框、可拖动、可缩放的桌面悬浮卡，支持跟随系统、浅色、深色主题、置顶和位置 / 大小锁定。
 - 关闭窗口即退出，不创建托盘常驻进程；可选当前用户登录时自启。
-- 设置面板提供**手动检查更新**：只检查本仓库公开 GitHub Release，不会在后台轮询、自动下载、替换或重启应用。
+- 设置以独立、不透明的原生窗口打开，左侧分为“显示”“数据与刷新”“启动”“关于与更新”四类。
+- 设置窗口提供**手动检查更新**：只检查本仓库公开 GitHub Release，不会在后台轮询、自动下载、替换或重启应用。
 
 ## 安装
 
@@ -56,13 +61,15 @@
 
 ### Windows 旧版升级提示
 
-截图中 v0.2.1 的“Unable to uninstall!”不是安装包损坏：旧版将安装目录登记在 `luodaoyi` 的发布者键下，而 v0.2.1 改为 `creamtea47`，导致 NSIS 升级时传给现有卸载器的目录为空。v0.2.3 的 Windows 包保留旧登记键完成这次升级，并在安装后同步新键；它只影响 Windows 安装兼容性，不影响 Git 仓库、更新地址、应用标识或数据目录。
+Windows 安装包的发布者为 `creamtea47`。为兼容旧版本升级，早期版本已将同一安装目录同时写入旧的 `luodaoyi` 键和新的 `creamtea47` 键，因此当前安装器可正确定位已有卸载器。它只影响 Windows 安装兼容性，不影响 Git 仓库、更新地址、应用标识或数据目录。
 
-若当前正停在 v0.2.1 的该报错窗口，直接退出安装器并下载 v0.2.3；无需手动删除注册表或 `auth.json`。
+若当前正停在 v0.2.1 的该报错窗口，直接退出安装器并下载当前正式版本；无需手动删除注册表或 `auth.json`。
 
 ## 使用方式
 
-打开后，卡片会立即尝试读取用量。右下角“立即刷新”可手动重试；右上角设置可切换主题、刷新间隔、置顶、位置锁定和开机启动。
+打开后，卡片会立即尝试读取用量。右上角“刷新”可手动重试；旁边的“设置”会打开独立窗口，其中按“显示”“数据与刷新”“启动”“关于与更新”分类。
+
+“显示”页可切换主题、置顶、位置 / 大小锁定；“数据与刷新”页设置刷新间隔；“启动”页控制开机自启；“关于与更新”页显示版本和手动检查更新。关闭设置窗口只会隐藏设置页，悬浮卡会继续运行；关闭悬浮卡才会退出应用。
 
 需要查看新版本时，打开设置并点击“检查更新”：
 
@@ -72,7 +79,7 @@
 
 ## 隐私与只读边界
 
-认证文件只由 Rust 后端在本地请求期间读取，React 界面从不接收 `auth.json`、access token、邮箱、请求头或接口原始响应。前端仅收到经过过滤的状态、套餐标签、刷新时间、错误提示和额度窗口数据。
+认证文件只由 Rust 后端在本地请求期间读取。React 前端仅收到经过过滤的状态、套餐标签、刷新时间、错误提示、额度窗口数据，以及成功用量响应中存在时的掩码邮箱。原始邮箱会先在 Rust 中转换为如 `j***@example.com` 的形式再发送到界面；前端从不接收 `auth.json`、access token、请求头、接口原始响应或未掩码邮箱。
 
 `auth.json` 的查找优先级如下：
 
@@ -85,27 +92,28 @@
 - 不刷新 OAuth Token，不写回或修改 `auth.json`。
 - 不查询或消耗重置卡，不发起 OAuth 登录流程。
 - 不安装前端文件系统或 HTTP 权限插件；敏感 I/O 保持在 Rust 后端。
+- 掩码账号摘要仅在用量请求成功且接口提供账号邮箱时生成；不会从 `auth.json` 读取邮箱，不持久化未掩码邮箱，也不会将任一种邮箱写入运行日志。
 - 更新检查只访问 `creamtea47/codex-usage-bar` 的公开 GitHub Release 信息，不携带 Codex 认证数据。
 
-认证文件缺失、Token 失效或接口返回未授权时，最后一次成功数据会保留并标记为“已过期”。请在 Codex 中重新登录后，再点击“立即刷新”。
+认证文件缺失、Token 失效或接口返回未授权时，最后一次成功数据会保留并标记为“已过期”。请在 Codex 中重新登录后，再点击右上角“刷新”。
 
 ## 技术架构
 
 | 层 | 技术 | 作用 |
 | --- | --- | --- |
-| 桌面界面 | React + TypeScript + Material UI + Vite | 中文用量卡、主题、设置弹层、拖动与缩放交互 |
+| 桌面界面 | React + TypeScript + Material UI + Vite | 紧凑中文用量卡、主题、独立侧栏设置窗口、拖动与缩放交互 |
 | 原生边界 | Tauri 2 command / capability | 最小化 IPC，限定窗口与打开 Release 链接的能力 |
 | 数据与持久化 | Rust + Tokio + Reqwest + Serde | 只读认证、用量请求去重、内存快照、设置、自启、脱敏日志 |
 
-对前端开放的 IPC 仅为 `get_dashboard`、`refresh_dashboard`、`get_settings`、`save_settings`、`get_autostart`、`set_autostart` 与 `check_update`。凭据永不跨越 Rust 边界。
+对前端开放的 IPC 为 `get_dashboard`、`refresh_dashboard`、`get_settings`、`save_settings`、`get_autostart`、`set_autostart`、`open_settings_window`、`mark_main_size_manual` 与 `check_update`。凭据和未掩码账号信息永不跨越 Rust 边界。
 
 ## 日志与排查
 
-- 设置和窗口位置：Windows 为 `%APPDATA%\com.creamtea47.codexusagebar\settings.json`；macOS 为 `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json`。
+- 设置及主卡 / 设置窗口的位置：Windows 为 `%APPDATA%\com.creamtea47.codexusagebar\settings.json`；macOS 为 `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json`。
 - 运行日志：Windows 为 `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log`；macOS 为 `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log`；均保留 14 天。
 - 日志只记录时间、操作结果、HTTP 状态或传输类别和脱敏错误；绝不记录 Token、Authorization 请求头或认证文件内容。
 - 受代理网络限制时，原生请求会遵循 Windows/macOS 系统代理与 `HTTP_PROXY` / `HTTPS_PROXY`；代理地址和凭据不会写入日志。
-- 无法读取用量时，先确认 Codex 已登录，再点击“立即刷新”。请勿将认证信息粘贴到 Issue、截图或日志中。
+- 无法读取用量时，先确认 Codex 已登录，再点击右上角“刷新”。请勿将认证信息粘贴到 Issue、截图或日志中。
 - 若旧 Win32 版开通过自启，旧的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 项不会被新版迁移或删除；确认新版可用后请自行关闭旧项，避免两个悬浮窗同时启动。
 
 ## 开发
@@ -144,11 +152,11 @@ pnpm tauri build --bundles dmg
 维护者发布示例：
 
 ```powershell
-git tag -a v0.2.4 -m "v0.2.4 修复系统代理访问"
+git tag -a v0.2.5 -m "v0.2.5 紧凑主卡与独立设置窗口"
 git push origin master
-git push origin v0.2.4
+git push origin v0.2.5
 ```
 
 ## 不包含的能力
 
-不提供静默自动更新、自动下载安装、任务栏停靠模式、旧布局迁移、界面中英文切换、OAuth Token 续期或重置卡操作。
+不提供静默自动更新、自动下载安装、任务栏停靠模式、通用旧布局迁移、界面中英文切换、OAuth Token 续期或重置卡操作。已有安装仅会按上述规则进行一次紧凑高度调整。

@@ -30,6 +30,8 @@ pub enum DashboardStatus {
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSnapshot {
     pub status: DashboardStatus,
+    /// 仅来自成功的用量响应，并已在 Rust 内完成掩码；绝不保存或传递原始邮箱。
+    pub account_email_masked: Option<String>,
     pub plan_label: Option<String>,
     pub refreshed_at: Option<DateTime<Utc>>,
     pub next_refresh_at: Option<DateTime<Utc>>,
@@ -41,6 +43,7 @@ impl Default for DashboardSnapshot {
     fn default() -> Self {
         Self {
             status: DashboardStatus::Loading,
+            account_email_masked: None,
             plan_label: None,
             refreshed_at: None,
             next_refresh_at: None,
@@ -110,6 +113,16 @@ pub struct WindowPlacement {
     pub height: u32,
 }
 
+/// 主悬浮卡的尺寸控制权。自动模式只会根据额度窗口数量调整高度；用户一旦手动调整，
+/// 就切换到手动模式，避免后续刷新打断用户的布局选择。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MainWindowSizeMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredSettings {
@@ -117,4 +130,12 @@ pub struct StoredSettings {
     pub preferences: Settings,
     #[serde(default)]
     pub window_placement: Option<WindowPlacement>,
+    /// 设置窗口与主悬浮卡独立保存，避免两个窗口互相覆盖位置和尺寸。
+    #[serde(default)]
+    pub settings_window_placement: Option<WindowPlacement>,
+    /// 旧版本升级后仅执行一次紧凑布局迁移。
+    #[serde(default)]
+    pub compact_layout_migration_completed: bool,
+    #[serde(default)]
+    pub main_window_size_mode: MainWindowSizeMode,
 }

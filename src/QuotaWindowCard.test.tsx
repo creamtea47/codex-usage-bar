@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { QuotaWindowCard } from './QuotaWindowCard';
@@ -17,11 +17,14 @@ const weeklyWindow: QuotaWindow = {
 };
 
 describe('QuotaWindowCard', () => {
-  it('shows a dynamic quota window and its pace marker', () => {
+  it('shows a dynamic quota window and its suggested-remaining pace marker', async () => {
     render(<QuotaWindowCard quotaWindow={weeklyWindow} now={Date.parse('2030-01-04T00:00:00Z')} />);
     expect(screen.getByText('周限额')).toBeTruthy();
     expect(screen.getByText('72%')).toBeTruthy();
-    expect(screen.getByText('黑线为平均进度')).toBeTruthy();
+    expect(screen.getByText('建议控量 ≥ 57%')).toBeTruthy();
+    const marker = screen.getByLabelText('建议控量不低于 57%');
+    fireEvent.mouseOver(marker);
+    expect(await screen.findByText('按当前窗口时间进度实时估算的平均消耗节奏，不代表官方阈值')).toBeTruthy();
     expect(screen.getByRole('progressbar', { name: '剩余 72%' }).getAttribute('aria-valuenow')).toBe('72');
   });
 
@@ -32,6 +35,6 @@ describe('QuotaWindowCard', () => {
         now={Date.now()}
       />,
     );
-    expect(screen.queryByText('黑线为平均进度')).toBeNull();
+    expect(screen.queryByText(/建议控量/)).toBeNull();
   });
 });
