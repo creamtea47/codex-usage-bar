@@ -1,6 +1,27 @@
+# Tauri / React frontend build outputs
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*
+
+# Rust and Tauri generated files. Cargo.lock is intentionally tracked for repeatable builds.
+src-tauri/target/
+src-tauri/gen/
+
+# Windows bundle only needs the SVG source and generated ICO. The Tauri icon helper
+# may also create mobile/macOS assets locally; keep those out of this Windows project.
+src-tauri/icons/*
+!src-tauri/icons/icon.svg
+!src-tauri/icons/icon.ico
+
+# Local packages, screenshots, and legacy native build outputs
+artifacts/
 build/
 build-vs/
-artifacts/
+docs/images/_*.png
 *.obj
 *.exe
 *.pdb

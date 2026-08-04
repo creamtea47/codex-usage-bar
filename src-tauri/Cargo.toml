@@ -1,0 +1,29 @@
+[package]
+name = "codex_usage_bar"
+version = "0.2.1"
+description = "A read-only Codex usage widget for Windows"
+authors = ["creamtea47"]
+homepage = "https://github.com/creamtea47/codex-usage-bar"
+repository = "https://github.com/creamtea47/codex-usage-bar"
+edition = "2021"
+
+[lib]
+name = "codex_usage_bar_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+log = "0.4"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+semver = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-autostart = "2.5.1"
+tauri-plugin-log = "2.9.0"
+tauri-plugin-opener = "2"
+thiserror = "2.0.19"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

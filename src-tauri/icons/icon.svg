@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="CodexUsageBar">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#18231e"/>
+      <stop offset="1" stop-color="#2b5844"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#background)"/>
+  <path d="M52 166h152" stroke="#dcefe5" stroke-width="16" stroke-linecap="round" opacity=".28"/>
+  <path d="M52 166h102" stroke="#44d38a" stroke-width="16" stroke-linecap="round"/>
+  <path d="M171 75v68" stroke="#f4fcf7" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="171" cy="75" r="13" fill="#f4fcf7"/>
+  <text x="52" y="127" fill="#f4fcf7" font-size="56" font-family="Segoe UI, Arial, sans-serif" font-weight="700">C</text>
+</svg>
