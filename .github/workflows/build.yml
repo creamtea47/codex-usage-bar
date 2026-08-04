@@ -185,7 +185,8 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${TAURI_SIGNING_PRIVATE_KEY:-}"
-          pnpm exec tauri build --bundles dmg --ci
+          # 更新器在 macOS 以 .app.tar.gz 为载荷，必须同时构建 app；DMG 继续供用户手动安装。
+          pnpm exec tauri build --bundles app,dmg --ci
 
       - name: Stage DMG, checksum, and tag updater payload
         shell: bash
