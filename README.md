@@ -21,13 +21,15 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
 ## Screenshots
 
-### Compact floating usage card (Windows example)
+### Compact floating usage card in macOS dark mode
 
-![CodexUsageBar compact dashboard showing dynamic quota windows, remaining usage, reset time, and top-right refresh controls](docs/images/dashboard-light.png)
+![CodexUsageBar compact dashboard on macOS showing native transparent corners, dynamic quota windows, remaining usage, and top-right controls](docs/images/dashboard-light.png)
 
-### Separate settings window and automatic-update controls
+> The normal state uses no extra space. When an update is available, a small green update icon appears to the left of Refresh. It opens About & updates and the confirmation dialog; it does not immediately download or install anything.
 
-![CodexUsageBar separate settings window with automatic-check controls, six-hour cadence, and a manual update entry point; payload signatures are verified after download](docs/images/settings-update.png)
+### Theme-aware macOS Settings and updates page
+
+![CodexUsageBar macOS Settings window with a dark native title bar and the v0.2.7 About and updates page showing automatic checks and the manual update entry point](docs/images/settings-update.png)
 
 ## Features
 
@@ -41,7 +43,7 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 - Closes completely with its window—no tray-resident process. Autostart for the current account is optional.
 - Opens Settings in a separate opaque native window with sidebar categories: **Display**, **Data & refresh**, **Startup**, and **About & updates**.
 - Checks once shortly after launch and then at most every six hours by default; it can be disabled in **About & updates**. Automatic checks read only the public HTTPS `latest.json` manifest containing signatures for each platform update payload; they never download, install, or restart the app.
-- When a new version is found, the card notifies you. Only after confirming **Download and install** in Settings does Rust download and verify the Tauri signature. Windows hands off to the current-user NSIS installer; macOS may request authorization, replaces the app, and restarts.
+- When a new version is found, a small green update icon appears in the card's upper-right corner. It opens **About & updates** and the confirmation dialog. Only after confirming **Download and install** does Rust download and verify the Tauri signature. Windows hands off to the current-user NSIS installer; macOS may request authorization, replaces the app, and restarts.
 
 ## Install
 
@@ -76,7 +78,7 @@ The Display page controls the theme, always-on-top, and position / size lock. Th
 
 The app checks once shortly after launch and then at most every six hours by default; you can turn this off in Settings. Choose **Check for updates** when you want to check immediately:
 
-- When an update is available, the card notifies you and Settings shows the version. Only clicking **Download and install** downloads the payload, verifies its signature, and hands it to the native installer.
+- When an update is available, a small green update icon appears in the card's upper-right corner. Clicking it opens the update page and confirmation dialog. Only clicking **Download and install** downloads the payload, verifies its signature, and hands it to the native installer.
 - Windows closes CodexUsageBar when installation starts; macOS restarts after replacing the app. The app never silently downloads, replaces, or restarts without confirmation.
 - A current build, network error, or signature-verification failure never affects the quota data already on screen. A signature failure cancels installation.
 
