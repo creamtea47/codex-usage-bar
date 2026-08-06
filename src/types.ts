@@ -1,10 +1,31 @@
 export type DashboardStatus = 'loading' | 'ready' | 'stale' | 'error';
 export type Theme = 'system' | 'light' | 'dark';
+export type Language = 'system' | 'zh-CN' | 'en';
+export type DashboardErrorCode =
+  | 'authMissing'
+  | 'authInvalid'
+  | 'network'
+  | 'rateLimited'
+  | 'serviceUnavailable'
+  | 'invalidResponse'
+  | 'localBridge';
+export type QuotaFallbackLabel = 'fiveHour' | 'weekly' | 'window';
+export type ForecastStatus = 'collecting' | 'stable' | 'exhaustsBeforeReset' | 'lastsUntilReset';
+
+export interface QuotaForecast {
+  status: ForecastStatus;
+  exhaustsAt: string | null;
+  sampleCount: number;
+  observedSpanSeconds: number;
+  consumedPercent: number;
+}
 
 /** Rust 仅返回已脱敏的展示数据，认证信息永远不会出现在此类型中。 */
 export interface QuotaWindow {
   id: string;
-  label: string;
+  /** 服务端明确提供的名称原样显示；fallbackLabel 由前端本地化。 */
+  label: string | null;
+  fallbackLabel: QuotaFallbackLabel;
   remainingPercent: number;
   usedPercent: number;
   windowSeconds: number;
@@ -12,6 +33,7 @@ export interface QuotaWindow {
   resetAfterSeconds: number;
   startAt: string | null;
   showPaceMarker: boolean;
+  forecast: QuotaForecast | null;
 }
 
 export interface DashboardSnapshot {
@@ -24,7 +46,8 @@ export interface DashboardSnapshot {
   planLabel: string | null;
   refreshedAt: string | null;
   nextRefreshAt: string | null;
-  message: string | null;
+  /** Rust 只返回稳定错误代码；所有面向用户的文案都在前端翻译。 */
+  message: DashboardErrorCode | null;
   quotaWindows: QuotaWindow[];
 }
 
@@ -50,8 +73,60 @@ export interface Settings {
   lockPosition: boolean;
   refreshIntervalSeconds: number;
   theme: Theme;
+  language: Language;
+  notifications: NotificationSettings;
+  historyEnabled: boolean;
   /** 自动检查只读取公开 HTTPS 更新清单；不会自动下载、安装或重启。 */
   autoCheckUpdates: boolean;
+}
+
+export interface NotificationSettings {
+  enabled: boolean;
+  lowQuotaEnabled: boolean;
+  lowQuotaThresholdPercent: number;
+  paceEnabled: boolean;
+  paceDeficitThresholdPercent: number;
+  resetEnabled: boolean;
+  quietHoursEnabled: boolean;
+  quietHoursStart: string;
+  quietHoursEnd: string;
+}
+
+export type NotificationPermission = 'granted' | 'denied' | 'prompt' | 'unavailable';
+
+export interface NotificationEnableResult {
+  enabled: boolean;
+  permission: NotificationPermission;
+  settings: Settings;
+}
+
+export type UsageHistoryRange = '24h' | '7d';
+
+export interface UsageHistoryPoint {
+  sampledAt: string;
+  remainingPercent: number;
+  breakBefore: boolean;
+}
+
+export interface UsageHistorySeries {
+  /** Anonymous locally salted stream key; used only as a React correlation key and never rendered. */
+  windowId: string;
+  windowSeconds: number;
+  fallbackLabel: QuotaFallbackLabel;
+  currentRemainingPercent: number | null;
+  consumedPercent: number;
+  points: UsageHistoryPoint[];
+  forecast: QuotaForecast;
+}
+
+export interface UsageHistoryResponse {
+  range: UsageHistoryRange;
+  historyEnabled: boolean;
+  storageStatus: 'ready' | 'empty' | 'recovered' | 'unavailable';
+  sampleCount: number;
+  earliestSampleAt: string | null;
+  latestSampleAt: string | null;
+  series: UsageHistorySeries[];
 }
 
 export const defaultSettings: Settings = {
@@ -59,6 +134,19 @@ export const defaultSettings: Settings = {
   lockPosition: false,
   refreshIntervalSeconds: 60,
   theme: 'system',
+  language: 'system',
+  notifications: {
+    enabled: false,
+    lowQuotaEnabled: true,
+    lowQuotaThresholdPercent: 20,
+    paceEnabled: true,
+    paceDeficitThresholdPercent: 10,
+    resetEnabled: true,
+    quietHoursEnabled: false,
+    quietHoursStart: '22:00',
+    quietHoursEnd: '08:00',
+  },
+  historyEnabled: true,
   autoCheckUpdates: true,
 };
 

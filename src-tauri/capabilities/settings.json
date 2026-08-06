@@ -9,11 +9,21 @@
     "core:window:allow-close",
     "core:window:allow-set-background-color",
     "core:window:allow-set-theme",
+    "clipboard-manager:allow-write-text",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
         {
+          "url": "https://github.com/creamtea47/codex-usage-bar/releases"
+        },
+        {
           "url": "https://github.com/creamtea47/codex-usage-bar/releases/**"
+        },
+        {
+          "url": "https://github.com/creamtea47/codex-usage-bar/issues/new"
+        },
+        {
+          "url": "https://github.com/creamtea47/codex-usage-bar/issues/new/**"
         }
       ]
     }

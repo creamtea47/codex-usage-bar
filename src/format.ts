@@ -1,20 +1,48 @@
-export function formatDuration(totalSeconds: number): string {
+import i18n, { currentLanguage, resolveSupportedLanguage, type SupportedLanguage } from './i18n';
+
+function formatLanguage(locale?: string): SupportedLanguage {
+  return locale === undefined ? currentLanguage() : resolveSupportedLanguage(locale);
+}
+
+export function formatDuration(totalSeconds: number, locale?: string): string {
+  const language = formatLanguage(locale);
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const days = Math.floor(seconds / 86_400);
   const hours = Math.floor((seconds % 86_400) / 3_600);
   const minutes = Math.floor((seconds % 3_600) / 60);
 
-  if (days > 0) return `${days}天 ${hours}小时`;
-  if (hours > 0) return `${hours}小时 ${minutes}分`;
-  if (minutes > 0) return `${minutes}分`;
-  return '不足 1 分钟';
+  if (days > 0) return i18n.t('duration.daysHours', { lng: language, days, hours });
+  if (hours > 0) return i18n.t('duration.hoursMinutes', { lng: language, hours, minutes });
+  if (minutes > 0) return i18n.t('duration.minutes', { lng: language, minutes });
+  return i18n.t('duration.lessThanMinute', { lng: language });
 }
 
-export function formatDateTime(value: string | null): string {
+/** Formats a live countdown with seconds so every scheduler tick is visible. */
+export function formatCountdownDuration(totalSeconds: number, locale?: string): string {
+  const language = formatLanguage(locale);
+  const value = Math.max(0, Math.floor(totalSeconds));
+  const days = Math.floor(value / 86_400);
+  const hours = Math.floor((value % 86_400) / 3_600);
+  const minutes = Math.floor((value % 3_600) / 60);
+  const seconds = value % 60;
+
+  if (days > 0) {
+    return i18n.t('duration.countdownDays', { lng: language, days, hours, minutes, seconds });
+  }
+  if (hours > 0) {
+    return i18n.t('duration.countdownHours', { lng: language, hours, minutes, seconds });
+  }
+  if (minutes > 0) {
+    return i18n.t('duration.countdownMinutes', { lng: language, minutes, seconds });
+  }
+  return i18n.t('duration.countdownSeconds', { lng: language, seconds });
+}
+
+export function formatDateTime(value: string | null, locale?: string): string {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat(formatLanguage(locale), {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -23,11 +51,11 @@ export function formatDateTime(value: string | null): string {
   }).format(date);
 }
 
-export function formatClock(value: string | null): string {
+export function formatClock(value: string | null, locale?: string): string {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat(formatLanguage(locale), {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -38,12 +66,40 @@ export function formatClock(value: string | null): string {
 export function statusLabel(status: 'loading' | 'ready' | 'stale' | 'error'): string {
   switch (status) {
     case 'ready':
-      return '额度已同步';
+      return i18n.t('status.ready');
     case 'stale':
-      return '展示上次数据';
+      return i18n.t('status.stale');
     case 'error':
-      return '无法读取用量';
+      return i18n.t('status.error');
     default:
-      return '正在读取用量';
+      return i18n.t('status.loading');
   }
+}
+
+/**
+ * Computes the local reset countdown without trusting a stale relative value.
+ * An absolute reset timestamp wins; relative reset seconds are anchored to the
+ * successful snapshot time only when the upstream response has no reset time.
+ */
+export function resetCountdownSeconds(
+  resetAt: string | null,
+  resetAfterSeconds: number,
+  refreshedAt: string | null,
+  now: number,
+): number | null {
+  if (!Number.isFinite(now)) return null;
+
+  if (resetAt) {
+    const resetTime = new Date(resetAt).getTime();
+    if (Number.isFinite(resetTime)) return Math.max(0, Math.ceil((resetTime - now) / 1_000));
+  }
+
+  if (!Number.isFinite(resetAfterSeconds)) return null;
+  const initialSeconds = Math.max(0, Math.floor(resetAfterSeconds));
+  if (!refreshedAt) return initialSeconds;
+
+  const refreshedTime = new Date(refreshedAt).getTime();
+  if (!Number.isFinite(refreshedTime)) return initialSeconds;
+  const elapsedSeconds = Math.max(0, (now - refreshedTime) / 1_000);
+  return Math.max(0, Math.ceil(initialSeconds - elapsedSeconds));
 }

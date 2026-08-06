@@ -22,15 +22,18 @@ import {
 } from '@mui/material';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useMemo, useState, type MouseEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { usageBridge } from './bridge';
 import { formatClock, statusLabel } from './format';
+import { applyLanguagePreference, resolveSupportedLanguage } from './i18n';
 import { QuotaWindowCard } from './QuotaWindowCard';
 import { createUsageTheme } from './theme';
 import {
   defaultSettings,
   loadingSnapshot,
   type AppUpdateInfo,
+  type DashboardErrorCode,
   type DashboardSnapshot,
   type Settings,
   type Theme,
@@ -39,8 +42,22 @@ import {
 type ResizeDirection = 'East' | 'South' | 'SouthEast';
 
 interface Feedback {
-  message: string;
+  code: 'refreshFailed' | 'openSettingsFailed';
   severity: AlertColor;
+}
+
+const dashboardErrorTranslationKeys = {
+  authMissing: 'dashboardError.authMissing',
+  authInvalid: 'dashboardError.authInvalid',
+  network: 'dashboardError.network',
+  rateLimited: 'dashboardError.rateLimited',
+  serviceUnavailable: 'dashboardError.serviceUnavailable',
+  invalidResponse: 'dashboardError.invalidResponse',
+  localBridge: 'dashboardError.localBridge',
+} as const satisfies Record<DashboardErrorCode, `dashboardError.${DashboardErrorCode}`>;
+
+function isDashboardErrorCode(value: string): value is DashboardErrorCode {
+  return Object.hasOwn(dashboardErrorTranslationKeys, value);
 }
 
 function resolveTheme(theme: Theme, prefersDark: boolean): Exclude<Theme, 'system'> {
@@ -65,15 +82,12 @@ function formatCountdown(nextRefreshAt: string | null, now: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-function accountSummary(snapshot: DashboardSnapshot): string {
-  return [snapshot.accountEmailMasked, snapshot.planLabel].filter((part): part is string => Boolean(part)).join(' · ') || 'Codex 额度';
-}
-
 /**
  * MUI 仅负责桌面悬浮卡呈现。认证文件、网络请求、窗口尺寸策略和本地设置仍全部留在 Rust 后端。
  * 前端只消费 Rust 传回的已脱敏数据，避免认证边界被跨窗口 UI 打破。
  */
 export default function App() {
+  const { t, i18n } = useTranslation();
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(loadingSnapshot);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -81,6 +95,11 @@ export default function App() {
   const [updateNotice, setUpdateNotice] = useState<AppUpdateInfo | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const prefersDark = useMediaQuery('(prefers-color-scheme: dark)', { noSsr: true });
+  const language = resolveSupportedLanguage(i18n.resolvedLanguage ?? i18n.language);
+
+  useEffect(() => {
+    void applyLanguagePreference(settings.language);
+  }, [settings.language]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -95,13 +114,20 @@ export default function App() {
     let dashboardEventReceived = false;
     let settingsEventReceived = false;
     let updateEventReceived = false;
+    const removeRegisteredListeners = () => {
+      removeDashboardListener?.();
+      removeSettingsListener?.();
+      removeUpdateListener?.();
+      removeDashboardListener = undefined;
+      removeSettingsListener = undefined;
+      removeUpdateListener = undefined;
+    };
 
     void (async () => {
       try {
-        const [dashboard, persistedSettings, pendingUpdate, removeDashboard, removeSettings, removeUpdate] = await Promise.all([
-          usageBridge.getDashboard(),
-          usageBridge.getSettings(),
-          usageBridge.getAppUpdateInfo(),
+        // Register every listener before reading initial state so an event cannot
+        // fall into the gap between an older command response and subscription.
+        const listenerResults = await Promise.allSettled([
           usageBridge.listenForDashboard((next) => {
             dashboardEventReceived = true;
             if (!disposed) setSnapshot(next);
@@ -115,26 +141,42 @@ export default function App() {
             if (!disposed) setUpdateNotice(next.updateAvailable ? next : null);
           }),
         ]);
+        const [dashboardListenerResult, settingsListenerResult, updateListenerResult] = listenerResults;
+        if (dashboardListenerResult.status === 'fulfilled') {
+          removeDashboardListener = dashboardListenerResult.value;
+        }
+        if (settingsListenerResult.status === 'fulfilled') {
+          removeSettingsListener = settingsListenerResult.value;
+        }
+        if (updateListenerResult.status === 'fulfilled') {
+          removeUpdateListener = updateListenerResult.value;
+        }
         if (disposed) {
-          removeDashboard();
-          removeSettings();
-          removeUpdate();
+          removeRegisteredListeners();
           return;
         }
+        if (listenerResults.some((result) => result.status === 'rejected')) {
+          removeRegisteredListeners();
+          throw new Error('event subscription failed');
+        }
+
+        const [dashboard, persistedSettings, pendingUpdate] = await Promise.all([
+          usageBridge.getDashboard(),
+          usageBridge.getSettings(),
+          usageBridge.getAppUpdateInfo(),
+        ]);
+        if (disposed) return;
         // An event can arrive while the initial command snapshot is still in flight.
         // Keep the event because it represents the newer state.
         if (!dashboardEventReceived) setSnapshot(dashboard);
         if (!settingsEventReceived) setSettings(persistedSettings);
         if (!updateEventReceived) setUpdateNotice(pendingUpdate.updateAvailable ? pendingUpdate : null);
-        removeDashboardListener = removeDashboard;
-        removeSettingsListener = removeSettings;
-        removeUpdateListener = removeUpdate;
       } catch {
         if (!disposed) {
           setSnapshot((current) => ({
             ...current,
             status: current.quotaWindows.length ? 'stale' : 'error',
-            message: '无法连接到本地用量服务。请从 CodexUsageBar 桌面程序中启动。',
+            message: 'localBridge',
           }));
         }
       }
@@ -142,15 +184,20 @@ export default function App() {
 
     return () => {
       disposed = true;
-      removeDashboardListener?.();
-      removeSettingsListener?.();
-      removeUpdateListener?.();
+      removeRegisteredListeners();
     };
   }, []);
 
   const activeTheme = useMemo(() => resolveTheme(settings.theme, prefersDark), [settings.theme, prefersDark]);
   const muiTheme = useMemo(() => createUsageTheme(activeTheme), [activeTheme]);
   const isReady = snapshot.status === 'ready';
+  const accountSummary =
+    [snapshot.accountEmailMasked, snapshot.planLabel].filter((part): part is string => Boolean(part)).join(' · ') ||
+    t('app.quotaTitle');
+  const messageCode: string | null = snapshot.message;
+  const dashboardMessage = messageCode
+    ? t(isDashboardErrorCode(messageCode) ? dashboardErrorTranslationKeys[messageCode] : 'dashboardError.generic')
+    : null;
 
   const refresh = async () => {
     if (isRefreshing) return;
@@ -158,7 +205,7 @@ export default function App() {
     try {
       setSnapshot(await usageBridge.refreshDashboard());
     } catch {
-      setFeedback({ message: '刷新请求未完成，请稍后重试。', severity: 'error' });
+      setFeedback({ code: 'refreshFailed', severity: 'error' });
     } finally {
       setIsRefreshing(false);
     }
@@ -168,7 +215,7 @@ export default function App() {
     try {
       await usageBridge.openSettingsWindow(section);
     } catch {
-      setFeedback({ message: '无法打开设置窗口，请稍后重试。', severity: 'error' });
+      setFeedback({ code: 'openSettingsFailed', severity: 'error' });
     }
   };
 
@@ -221,7 +268,7 @@ export default function App() {
             <Toolbar variant="dense" sx={{ minHeight: 48, px: 1.5, gap: 0.25 }}>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flex: 1, minWidth: 0 }}>
                 <Box
-                  aria-label={isReady ? '用量服务在线' : '用量服务状态异常'}
+                  aria-label={isReady ? t('app.serviceOnline') : t('app.serviceUnavailable')}
                   sx={{
                     width: 10,
                     height: 10,
@@ -238,7 +285,7 @@ export default function App() {
                   }}
                 />
                 <Typography variant="subtitle2" noWrap sx={{ fontWeight: 800 }}>
-                  Codex 用量
+                  {t('app.title')}
                 </Typography>
               </Stack>
               <Box
@@ -258,12 +305,12 @@ export default function App() {
                   border: 0,
                 }}
               >
-                {updateNotice ? `发现新版本 v${updateNotice.latestVersion}，可打开更新设置` : ''}
+                {updateNotice ? t('app.updateAvailableStatus', { version: updateNotice.latestVersion }) : ''}
               </Box>
               {updateNotice && (
-                <Tooltip title={`发现新版本 v${updateNotice.latestVersion}，点击打开更新设置`}>
+                <Tooltip title={t('app.updateAvailableTooltip', { version: updateNotice.latestVersion })}>
                   <IconButton
-                    aria-label={`发现新版本 v${updateNotice.latestVersion}，打开更新设置`}
+                    aria-label={t('app.updateAvailableAria', { version: updateNotice.latestVersion })}
                     color="success"
                     size="small"
                     onClick={() => void openSettings('about')}
@@ -272,10 +319,10 @@ export default function App() {
                   </IconButton>
                 </Tooltip>
               )}
-              <Tooltip title={isRefreshing ? '正在刷新用量' : '刷新用量'}>
+              <Tooltip title={isRefreshing ? t('app.refreshing') : t('app.refresh')}>
                 <span>
                   <IconButton
-                    aria-label="刷新用量"
+                    aria-label={t('app.refresh')}
                     color="inherit"
                     disabled={isRefreshing}
                     size="small"
@@ -285,13 +332,13 @@ export default function App() {
                   </IconButton>
                 </span>
               </Tooltip>
-              <Tooltip title="设置">
-                <IconButton aria-label="打开设置" color="inherit" size="small" onClick={() => void openSettings()}>
+              <Tooltip title={t('app.settings')}>
+                <IconButton aria-label={t('app.openSettings')} color="inherit" size="small" onClick={() => void openSettings()}>
                   <SettingsOutlinedIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="退出应用">
-                <IconButton aria-label="退出应用" color="inherit" size="small" onClick={() => void getCurrentWindow().close()}>
+              <Tooltip title={t('app.quit')}>
+                <IconButton aria-label={t('app.quit')} color="inherit" size="small" onClick={() => void getCurrentWindow().close()}>
                   <CloseRoundedIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
@@ -302,42 +349,57 @@ export default function App() {
             {isReady ? (
               <Stack spacing={0.25}>
                 <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.15 }}>
-                  Codex 额度
+                  {t('app.quotaTitle')}
                 </Typography>
                 <Typography component="h1" variant="h6" noWrap sx={{ fontWeight: 800, lineHeight: 1.25 }}>
-                  {accountSummary(snapshot)}
+                  {accountSummary}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" noWrap>
-                  下次自动刷新 {formatCountdown(snapshot.nextRefreshAt, now)} · 更新于 {formatClock(snapshot.refreshedAt)}
+                  {t('app.nextRefresh', {
+                    countdown: formatCountdown(snapshot.nextRefreshAt, now),
+                    time: formatClock(snapshot.refreshedAt, language),
+                  })}
                 </Typography>
               </Stack>
             ) : (
               <Stack spacing={0.25}>
                 <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.15 }}>
-                  {snapshot.planLabel ?? 'Codex 额度'}
+                  {snapshot.planLabel ?? t('app.quotaTitle')}
                 </Typography>
                 <Typography component="h1" variant="h6" sx={{ fontWeight: 800, lineHeight: 1.25 }}>
                   {statusLabel(snapshot.status)}
                 </Typography>
-                {snapshot.refreshedAt && (
+                {snapshot.nextRefreshAt ? (
                   <Typography variant="caption" color="text.secondary">
-                    上次更新 {formatClock(snapshot.refreshedAt)}
+                    {t('app.retryNext', {
+                      countdown: formatCountdown(snapshot.nextRefreshAt, now),
+                      time: formatClock(snapshot.refreshedAt, language),
+                    })}
                   </Typography>
-                )}
+                ) : snapshot.refreshedAt ? (
+                  <Typography variant="caption" color="text.secondary">
+                    {t('app.lastUpdated', { time: formatClock(snapshot.refreshedAt, language) })}
+                  </Typography>
+                ) : null}
               </Stack>
             )}
-            {snapshot.message && (
+            {dashboardMessage && (
               <Alert severity={serviceAlertSeverity} variant="outlined" sx={{ mt: 1, py: 0.1 }}>
-                {snapshot.message}
+                {dashboardMessage}
               </Alert>
             )}
           </Box>
 
-          <Box component="section" aria-label="额度窗口" sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 1.75, pb: 1.5 }}>
+          <Box component="section" aria-label={t('app.quotaWindowsAria')} sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 1.75, pb: 1.5 }}>
             {snapshot.quotaWindows.length > 0 ? (
               <Stack spacing={1}>
                 {snapshot.quotaWindows.map((quotaWindow) => (
-                  <QuotaWindowCard key={quotaWindow.id} now={now} quotaWindow={quotaWindow} />
+                  <QuotaWindowCard
+                    key={quotaWindow.id}
+                    now={now}
+                    quotaWindow={quotaWindow}
+                    refreshedAt={snapshot.refreshedAt}
+                  />
                 ))}
               </Stack>
             ) : (
@@ -345,9 +407,9 @@ export default function App() {
                 spacing={1}
                 sx={{ minHeight: 116, color: 'text.secondary', textAlign: 'center', alignItems: 'center', justifyContent: 'center' }}
               >
-                {snapshot.status === 'loading' && <CircularProgress size={22} />}
+                {snapshot.status === 'loading' && <CircularProgress aria-label={t('app.loadingQuota')} size={22} />}
                 <Typography variant="body2">
-                  {snapshot.status === 'loading' ? '正在从 Codex 读取额度…' : '暂无可显示的额度窗口'}
+                  {snapshot.status === 'loading' ? t('app.loadingQuota') : t('app.noQuotaWindows')}
                 </Typography>
               </Stack>
             )}
@@ -369,8 +431,17 @@ export default function App() {
         open={Boolean(feedback)}
         onClose={() => setFeedback(null)}
       >
-        <Alert severity={feedback?.severity ?? 'info'} variant="filled" onClose={() => setFeedback(null)}>
-          {feedback?.message}
+        <Alert
+          closeText={t('common.close')}
+          severity={feedback?.severity ?? 'info'}
+          variant="filled"
+          onClose={() => setFeedback(null)}
+        >
+          {feedback?.code === 'refreshFailed'
+            ? t('app.feedback.refreshFailed')
+            : feedback?.code === 'openSettingsFailed'
+              ? t('app.feedback.openSettingsFailed')
+              : null}
         </Alert>
       </Snackbar>
 

@@ -1,6 +1,10 @@
+import BugReportOutlinedIcon from '@mui/icons-material/BugReportOutlined';
+import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import LaunchRoundedIcon from '@mui/icons-material/LaunchRounded';
+import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined';
 import PaletteOutlinedIcon from '@mui/icons-material/PaletteOutlined';
+import QueryStatsRoundedIcon from '@mui/icons-material/QueryStatsRounded';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import RocketLaunchOutlinedIcon from '@mui/icons-material/RocketLaunchOutlined';
 import SettingsSuggestOutlinedIcon from '@mui/icons-material/SettingsSuggestOutlined';
@@ -31,6 +35,7 @@ import {
   Snackbar,
   Stack,
   Switch,
+  TextField,
   ThemeProvider,
   Toolbar,
   Typography,
@@ -38,192 +43,352 @@ import {
   type AlertColor,
 } from '@mui/material';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { usageBridge } from './bridge';
 import { formatDateTime } from './format';
+import { applyLanguagePreference, resolveSupportedLanguage } from './i18n';
 import { createUsageTheme } from './theme';
 import {
   defaultSettings,
   type AppUpdateInfo,
   type AppUpdateProgress,
+  type Language,
+  type NotificationSettings,
   type Settings,
   type Theme,
 } from './types';
 
-type SettingsSection = 'display' | 'data' | 'startup' | 'about';
+const TrendsPage = lazy(() => import('./TrendsPage'));
+
+type SettingsSection = 'display' | 'data' | 'trends' | 'startup' | 'about';
+type SettingsLoadState = 'loading' | 'ready' | 'error';
+type SettingsUpdater = Partial<Settings> | ((current: Settings) => Settings);
+type FeedbackKey =
+  | 'settings.data.notifications.permissionDenied'
+  | 'settings.data.notifications.permissionUnavailable'
+  | 'settings.feedback.loadFailed'
+  | 'settings.feedback.nativeThemeFailed'
+  | 'settings.feedback.saved'
+  | 'settings.feedback.saveFailed'
+  | 'settings.feedback.autostartSaved'
+  | 'settings.feedback.autostartFailed'
+  | 'settings.feedback.updateCheckFailed'
+  | 'settings.feedback.updateInstallStarted'
+  | 'settings.feedback.updateInstallFailed'
+  | 'settings.feedback.releaseOpenFailed'
+  | 'settings.feedback.signatureFailed'
+  | 'settings.feedback.noCompatibleUpdate'
+  | 'settings.feedback.updateNetworkFailed'
+  | 'settings.feedback.updateConfigFailed'
+  | 'settings.feedback.updateIncomplete'
+  | 'settings.feedback.updateBusy'
+  | 'settings.feedback.noPendingUpdate'
+  | 'settings.feedback.notificationsEnabled'
+  | 'settings.feedback.notificationsDisabled'
+  | 'settings.feedback.notificationTestSent'
+  | 'settings.feedback.notificationTestFailed'
+  | 'settings.feedback.diagnosticsCopied'
+  | 'settings.feedback.diagnosticsCopyFailed'
+  | 'settings.feedback.issueOpenFailed'
+  | 'settings.feedback.releaseNotesOpenFailed';
 
 interface Feedback {
-  message: string;
+  key: FeedbackKey;
   severity: AlertColor;
 }
 
 const drawerWidth = 208;
 const releasePageUrl = 'https://github.com/creamtea47/codex-usage-bar/releases';
+const issuePageUrl = 'https://github.com/creamtea47/codex-usage-bar/issues/new/choose';
+const releaseVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 
-const refreshOptions = [
-  { seconds: 60, label: '1 分钟' },
-  { seconds: 180, label: '3 分钟' },
-  { seconds: 300, label: '5 分钟' },
-  { seconds: 600, label: '10 分钟' },
-  { seconds: 1800, label: '30 分钟' },
+const refreshOptions = [60, 180, 300, 600, 1800] as const;
+
+const navigation: Array<{
+  id: SettingsSection;
+  labelKey:
+    | 'settings.nav.display'
+    | 'settings.nav.data'
+    | 'settings.nav.trends'
+    | 'settings.nav.startup'
+    | 'settings.nav.about';
+  icon: React.ReactElement;
+}> = [
+  { id: 'display', labelKey: 'settings.nav.display', icon: <PaletteOutlinedIcon fontSize="small" /> },
+  { id: 'data', labelKey: 'settings.nav.data', icon: <RefreshRoundedIcon fontSize="small" /> },
+  { id: 'trends', labelKey: 'settings.nav.trends', icon: <QueryStatsRoundedIcon fontSize="small" /> },
+  { id: 'startup', labelKey: 'settings.nav.startup', icon: <RocketLaunchOutlinedIcon fontSize="small" /> },
+  { id: 'about', labelKey: 'settings.nav.about', icon: <InfoOutlinedIcon fontSize="small" /> },
 ];
 
-const navigation: Array<{ id: SettingsSection; label: string; icon: React.ReactElement }> = [
-  { id: 'display', label: '显示', icon: <PaletteOutlinedIcon fontSize="small" /> },
-  { id: 'data', label: '数据与刷新', icon: <RefreshRoundedIcon fontSize="small" /> },
-  { id: 'startup', label: '启动', icon: <RocketLaunchOutlinedIcon fontSize="small" /> },
-  { id: 'about', label: '关于与更新', icon: <InfoOutlinedIcon fontSize="small" /> },
-];
+const knownUpdateErrors = [
+  ['更新包的签名验证失败，已取消安装。', 'settings.feedback.signatureFailed'],
+  ['暂时没有适用于当前设备的有效更新。', 'settings.feedback.noCompatibleUpdate'],
+  ['无法连接更新服务，请检查网络或代理后重试。', 'settings.feedback.updateNetworkFailed'],
+  ['更新服务配置不可用，请稍后重试。', 'settings.feedback.updateConfigFailed'],
+  ['更新安装未完成，请稍后重试。', 'settings.feedback.updateIncomplete'],
+  ['更新操作正在进行，请稍后再试。', 'settings.feedback.updateBusy'],
+  ['没有待安装的更新，请先重新检查更新。', 'settings.feedback.noPendingUpdate'],
+] as const satisfies ReadonlyArray<readonly [string, FeedbackKey]>;
 
 function resolveTheme(theme: Theme, prefersDark: boolean): Exclude<Theme, 'system'> {
   return theme === 'system' ? (prefersDark ? 'dark' : 'light') : theme;
 }
 
-function formatUpdateProgress(progress: AppUpdateProgress | null): string {
-  if (!progress) return '正在准备更新…';
-  if (progress.stage === 'verifying') return '正在验证更新包签名…';
-  if (progress.stage === 'installing') return '正在交接系统安装程序…';
-  if (progress.totalBytes && progress.totalBytes > 0) {
-    return `正在下载更新：${Math.min(100, Math.round((progress.downloadedBytes / progress.totalBytes) * 100))}%`;
-  }
-  return '正在下载更新…';
-}
-
-/** Rust 只会返回这些固定更新错误；前端白名单展示，避免意外回显第三方网络异常细节。 */
-function safeUpdateErrorMessage(error: unknown, fallback: string): string {
+function safeUpdateErrorKey(error: unknown, fallback: FeedbackKey): FeedbackKey {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
-  const safeMessages = [
-    '更新包的签名验证失败，已取消安装。',
-    '暂时没有适用于当前设备的有效更新。',
-    '无法连接更新服务，请检查网络或代理后重试。',
-    '更新服务配置不可用，请稍后重试。',
-    '更新安装未完成，请稍后重试。',
-    '更新操作正在进行，请稍后再试。',
-    '没有待安装的更新，请先重新检查更新。',
-  ];
-  return safeMessages.find((candidate) => message.includes(candidate)) ?? fallback;
+  return knownUpdateErrors.find(([safeMessage]) => message.includes(safeMessage))?.[1] ?? fallback;
 }
 
-/**
- * 设置页运行在独立、非透明的 Tauri 窗口中。左侧导航现在已是实际设置分类，后续新增项可以继续归类，
- * 而不再挤入悬浮卡的 Popover。所有持久化仍由 Rust command 完成。
- */
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function releaseNotesUrl(version: string | null | undefined): string {
+  return version && releaseVersionPattern.test(version) ? `${releasePageUrl}/tag/v${version}` : releasePageUrl;
+}
+
+/** Independent settings window; all sensitive operations remain in label-gated Rust commands. */
 export default function SettingsWindow() {
+  const { t, i18n } = useTranslation();
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const settingsRef = useRef<Settings>(defaultSettings);
+  const settingsLoadedRef = useRef(false);
+  const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
+  const pendingSettingsMutations = useRef(0);
   const [autostart, setAutostart] = useState(false);
+  const [autostartLoaded, setAutostartLoaded] = useState(false);
   const [activeSection, setActiveSection] = useState<SettingsSection>('display');
+  const [settingsLoadState, setSettingsLoadState] = useState<SettingsLoadState>('loading');
   const [isSaving, setIsSaving] = useState(false);
+  const [isChangingAutostart, setIsChangingAutostart] = useState(false);
+  const [isSendingTestNotification, setIsSendingTestNotification] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [isCopyingDiagnostics, setIsCopyingDiagnostics] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const prefersDark = useMediaQuery('(prefers-color-scheme: dark)', { noSsr: true });
+  const language = resolveSupportedLanguage(i18n.resolvedLanguage ?? i18n.language);
+
+  const applySettingsSnapshot = useCallback((next: Settings) => {
+    settingsRef.current = next;
+    setSettings(next);
+  }, []);
+
+  const enqueueSettingsMutation = useCallback(
+    <T,>(mutation: (current: Settings) => Promise<{ settings: Settings; value: T }>): Promise<T> => {
+      pendingSettingsMutations.current += 1;
+      setIsSaving(true);
+
+      const result = settingsMutationTail.current.then(async () => {
+        if (!settingsLoadedRef.current) throw new Error('settings-not-loaded');
+        const completed = await mutation(settingsRef.current);
+        applySettingsSnapshot(completed.settings);
+        return completed.value;
+      });
+
+      settingsMutationTail.current = result.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      return result.finally(() => {
+        pendingSettingsMutations.current = Math.max(0, pendingSettingsMutations.current - 1);
+        setIsSaving(pendingSettingsMutations.current > 0);
+      });
+    },
+    [applySettingsSnapshot],
+  );
+
+  useEffect(() => {
+    void applyLanguagePreference(settings.language);
+  }, [settings.language]);
 
   useEffect(() => {
     let disposed = false;
-    let removeSettingsListener: (() => void) | undefined;
-    let removeUpdateListener: (() => void) | undefined;
-    let removeUpdateProgressListener: (() => void) | undefined;
-    let removeNavigationListener: (() => void) | undefined;
+    const removeListeners: Array<() => void> = [];
     let settingsEventReceived = false;
     let updateEventReceived = false;
 
     void (async () => {
-      try {
-        const [persistedSettings, autostartEnabled, existingUpdate, removeListener, removeUpdate, removeUpdateProgress, removeNavigation] = await Promise.all([
-          usageBridge.getSettings(),
-          usageBridge.getAutostart(),
-          usageBridge.getAppUpdateInfo(),
+      const registerListener = async (listener: Promise<() => void>) => {
+        try {
+          const remove = await listener;
+          if (disposed) remove();
+          else removeListeners.push(remove);
+        } catch {
+          // A failed optional event stream must not prevent the authoritative reads below.
+        }
+      };
+
+      await Promise.all([
+        registerListener(
           usageBridge.listenForSettings((next) => {
             settingsEventReceived = true;
-            if (!disposed) setSettings(next);
+            if (!disposed) applySettingsSnapshot(next);
           }),
+        ),
+        registerListener(
           usageBridge.listenForAppUpdate((next) => {
             updateEventReceived = true;
             if (!disposed) setUpdateInfo(next);
           }),
+        ),
+        registerListener(
           usageBridge.listenForAppUpdateProgress((next) => {
             if (!disposed) setUpdateProgress(next);
           }),
+        ),
+        registerListener(
           usageBridge.listenForSettingsNavigation((section) => {
             if (!disposed) {
               setActiveSection(section);
               setIsUpdateDialogOpen(section === 'about');
             }
           }),
-        ]);
-        if (disposed) {
-          removeListener();
-          removeUpdate();
-          removeUpdateProgress();
-          removeNavigation();
-          return;
-        }
-        // Prefer events received during startup over command snapshots captured earlier.
-        if (!settingsEventReceived) setSettings(persistedSettings);
-        setAutostart(autostartEnabled);
-        if (!updateEventReceived) setUpdateInfo(existingUpdate);
-        removeSettingsListener = removeListener;
-        removeUpdateListener = removeUpdate;
-        removeUpdateProgressListener = removeUpdateProgress;
-        removeNavigationListener = removeNavigation;
-      } catch {
-        if (!disposed) setFeedback({ message: '无法读取当前设置，请稍后重试。', severity: 'error' });
+        ),
+      ]);
+
+      if (disposed) return;
+
+      const [settingsResult, autostartResult, updateResult] = await Promise.allSettled([
+        usageBridge.getSettings(),
+        usageBridge.getAutostart(),
+        usageBridge.getAppUpdateInfo(),
+      ]);
+      if (disposed) return;
+
+      if (settingsResult.status === 'fulfilled') {
+        if (!settingsEventReceived) applySettingsSnapshot(settingsResult.value);
+        settingsLoadedRef.current = true;
+        setSettingsLoadState('ready');
+      } else {
+        settingsLoadedRef.current = false;
+        setSettingsLoadState('error');
+        setFeedback({ key: 'settings.feedback.loadFailed', severity: 'error' });
+      }
+      if (autostartResult.status === 'fulfilled') {
+        setAutostart(autostartResult.value);
+        setAutostartLoaded(true);
+      }
+      if (updateResult.status === 'fulfilled' && !updateEventReceived) {
+        setUpdateInfo(updateResult.value);
       }
     })();
 
     return () => {
       disposed = true;
-      removeSettingsListener?.();
-      removeUpdateListener?.();
-      removeUpdateProgressListener?.();
-      removeNavigationListener?.();
+      removeListeners.splice(0).forEach((remove) => remove());
     };
-  }, []);
+  }, [applySettingsSnapshot]);
 
   const activeTheme = useMemo(() => resolveTheme(settings.theme, prefersDark), [settings.theme, prefersDark]);
   const muiTheme = useMemo(() => createUsageTheme(activeTheme), [activeTheme]);
   const nativeTheme = settings.theme === 'system' ? null : settings.theme;
+  const settingsControlsDisabled = settingsLoadState !== 'ready';
 
   useEffect(() => {
-    // MUI only themes the webview. Keep the native macOS/Windows title bar in sync too.
-    // `null` lets the native window keep tracking system appearance changes.
     const currentWindow = getCurrentWindow();
     void Promise.all([
       currentWindow.setTheme(nativeTheme),
       currentWindow.setBackgroundColor(muiTheme.palette.background.paper),
-    ])
-      .catch(() => setFeedback({ message: '原生窗口主题同步失败。', severity: 'error' }));
+    ]).catch(() => setFeedback({ key: 'settings.feedback.nativeThemeFailed', severity: 'error' }));
   }, [muiTheme.palette.background.paper, nativeTheme]);
 
-  const updateSettings = async (partial: Partial<Settings>) => {
-    if (isSaving) return;
-    const next = { ...settings, ...partial };
-    setIsSaving(true);
+  const updateSettings = async (updater: SettingsUpdater): Promise<boolean> => {
     try {
-      setSettings(await usageBridge.saveSettings(next));
-      setFeedback({ message: '设置已保存。', severity: 'success' });
+      await enqueueSettingsMutation(async (current) => {
+        const next = typeof updater === 'function' ? updater(current) : { ...current, ...updater };
+        return { settings: await usageBridge.saveSettings(next), value: undefined };
+      });
+      setFeedback({ key: 'settings.feedback.saved', severity: 'success' });
+      return true;
     } catch {
-      setFeedback({ message: '无法保存设置。', severity: 'error' });
+      setFeedback({ key: 'settings.feedback.saveFailed', severity: 'error' });
+      return false;
+    }
+  };
+
+  const updateLanguage = async (nextLanguage: Language) => {
+    const previousLanguage = settingsRef.current.language;
+    await applyLanguagePreference(nextLanguage);
+    if (!(await updateSettings((current) => ({ ...current, language: nextLanguage })))) {
+      await applyLanguagePreference(previousLanguage);
+    }
+  };
+
+  const updateNotificationSettings = (partial: Partial<NotificationSettings>) =>
+    updateSettings((current) => ({
+      ...current,
+      notifications: { ...current.notifications, ...partial },
+    }));
+
+  const updateNotificationsEnabled = async (enabled: boolean) => {
+    try {
+      const result = await enqueueSettingsMutation(async () => {
+        const next = await usageBridge.setNotificationsEnabled(enabled);
+        return { settings: next.settings, value: next };
+      });
+      if (enabled && !result.enabled) {
+        setFeedback({
+          key:
+            result.permission === 'denied'
+              ? 'settings.data.notifications.permissionDenied'
+              : 'settings.data.notifications.permissionUnavailable',
+          severity: 'warning',
+        });
+      } else {
+        setFeedback({
+          key: enabled ? 'settings.feedback.notificationsEnabled' : 'settings.feedback.notificationsDisabled',
+          severity: 'success',
+        });
+      }
+    } catch {
+      setFeedback({ key: 'settings.data.notifications.permissionUnavailable', severity: 'error' });
+    }
+  };
+
+  const updateHistoryEnabled = useCallback(
+    async (enabled: boolean) => {
+      await enqueueSettingsMutation(async () => ({
+        settings: await usageBridge.setHistoryEnabled(enabled),
+        value: undefined,
+      }));
+    },
+    [enqueueSettingsMutation],
+  );
+
+  const sendTestNotification = async () => {
+    if (isSendingTestNotification) return;
+    setIsSendingTestNotification(true);
+    try {
+      await usageBridge.sendTestNotification();
+      setFeedback({ key: 'settings.feedback.notificationTestSent', severity: 'success' });
+    } catch {
+      setFeedback({ key: 'settings.feedback.notificationTestFailed', severity: 'error' });
     } finally {
-      setIsSaving(false);
+      setIsSendingTestNotification(false);
     }
   };
 
   const updateAutostart = async (enabled: boolean) => {
-    if (isSaving) return;
-    setIsSaving(true);
+    if (isChangingAutostart) return;
+    setIsChangingAutostart(true);
     try {
       setAutostart(await usageBridge.setAutostart(enabled));
-      setFeedback({ message: '开机启动设置已保存。', severity: 'success' });
+      setFeedback({ key: 'settings.feedback.autostartSaved', severity: 'success' });
     } catch {
-      setFeedback({ message: '无法更新开机启动设置。', severity: 'error' });
+      setFeedback({ key: 'settings.feedback.autostartFailed', severity: 'error' });
     } finally {
-      setIsSaving(false);
+      setIsChangingAutostart(false);
     }
   };
 
@@ -235,7 +400,7 @@ export default function SettingsWindow() {
       setUpdateInfo(await usageBridge.checkAppUpdate());
       setIsUpdateDialogOpen(true);
     } catch (error) {
-      setFeedback({ message: safeUpdateErrorMessage(error, '暂时无法检查更新，请稍后重试。'), severity: 'error' });
+      setFeedback({ key: safeUpdateErrorKey(error, 'settings.feedback.updateCheckFailed'), severity: 'error' });
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -247,21 +412,47 @@ export default function SettingsWindow() {
     setUpdateProgress({ stage: 'downloading', downloadedBytes: 0, totalBytes: null });
     try {
       await usageBridge.installAppUpdate();
-      setFeedback({ message: '更新已交接给系统安装程序。', severity: 'success' });
+      setFeedback({ key: 'settings.feedback.updateInstallStarted', severity: 'success' });
     } catch (error) {
-      setFeedback({ message: safeUpdateErrorMessage(error, '更新未完成，请检查网络后重试。'), severity: 'error' });
+      setFeedback({ key: safeUpdateErrorKey(error, 'settings.feedback.updateInstallFailed'), severity: 'error' });
     } finally {
       setIsInstallingUpdate(false);
     }
   };
 
-  const openReleasePage = async () => {
+  const openExternal = async (url: string, failureKey: FeedbackKey) => {
     try {
-      await openUrl(releasePageUrl);
+      await openUrl(url);
     } catch {
-      setFeedback({ message: '无法打开发布页面，请稍后重试。', severity: 'error' });
+      setFeedback({ key: failureKey, severity: 'error' });
     }
   };
+
+  const copyDiagnostics = async () => {
+    if (isCopyingDiagnostics) return;
+    setIsCopyingDiagnostics(true);
+    try {
+      const diagnostics = await usageBridge.getDiagnostics();
+      await writeText(diagnostics);
+      setFeedback({ key: 'settings.feedback.diagnosticsCopied', severity: 'success' });
+    } catch {
+      setFeedback({ key: 'settings.feedback.diagnosticsCopyFailed', severity: 'error' });
+    } finally {
+      setIsCopyingDiagnostics(false);
+    }
+  };
+
+  const progressLabel = !updateProgress
+    ? t('settings.updateDialog.preparing')
+    : updateProgress.stage === 'verifying'
+      ? t('settings.updateDialog.verifying')
+      : updateProgress.stage === 'installing'
+        ? t('settings.updateDialog.handingOff')
+        : updateProgress.totalBytes && updateProgress.totalBytes > 0
+          ? t('settings.updateDialog.downloadingPercent', {
+              percent: Math.min(100, Math.round((updateProgress.downloadedBytes / updateProgress.totalBytes) * 100)),
+            })
+          : t('settings.updateDialog.downloading');
 
   return (
     <ThemeProvider theme={muiTheme}>
@@ -293,69 +484,121 @@ export default function SettingsWindow() {
                   CodexUsageBar
                 </Typography>
                 <Typography variant="caption" color="text.secondary" noWrap>
-                  设置
+                  {t('settings.title')}
                 </Typography>
               </Box>
             </Stack>
           </Toolbar>
           <Divider />
-          <List disablePadding sx={{ px: 1, py: 1 }}>
-            {navigation.map((item) => (
-              <ListItemButton key={item.id} selected={activeSection === item.id} onClick={() => setActiveSection(item.id)} sx={{ borderRadius: 1.5, mb: 0.5 }}>
-                <ListItemIcon sx={{ minWidth: 34 }}>{item.icon}</ListItemIcon>
-                <ListItemText
-                  primary={item.label}
-                  slotProps={{ primary: { sx: { fontSize: 14, fontWeight: activeSection === item.id ? 700 : 500 } } }}
-                />
-              </ListItemButton>
-            ))}
+          <List aria-label={t('settings.navigationAria')} disablePadding sx={{ px: 1, py: 1 }}>
+            {navigation.map((item) => {
+              const label = t(item.labelKey);
+              return (
+                <ListItemButton
+                  key={item.id}
+                  selected={activeSection === item.id}
+                  onClick={() => setActiveSection(item.id)}
+                  sx={{ borderRadius: 1.5, mb: 0.5 }}
+                >
+                  <ListItemIcon sx={{ minWidth: 34 }}>{item.icon}</ListItemIcon>
+                  <ListItemText
+                    primary={label}
+                    slotProps={{ primary: { sx: { fontSize: 14, fontWeight: activeSection === item.id ? 700 : 500 } } }}
+                  />
+                </ListItemButton>
+              );
+            })}
           </List>
         </Drawer>
 
-        <Box component="section" sx={{ flex: 1, minWidth: 0, overflow: 'auto', bgcolor: 'background.default' }}>
-          <Box sx={{ width: '100%', maxWidth: 680, mx: 'auto', px: { xs: 2, sm: 4 }, py: 4 }}>
+        <Box
+          component="section"
+          aria-label={t('settings.contentAria')}
+          sx={{ flex: 1, minWidth: 0, overflow: 'auto', bgcolor: 'background.default' }}
+        >
+          <Box
+            sx={{
+              width: '100%',
+              maxWidth: activeSection === 'trends' ? 980 : 680,
+              mx: 'auto',
+              px: { xs: 2, sm: 4 },
+              py: 4,
+            }}
+          >
+            {settingsLoadState === 'loading' && <LinearProgress sx={{ mb: 2 }} />}
+            {settingsLoadState === 'error' && (
+              <Alert severity="error" sx={{ mb: 2 }}>
+                {t('settings.feedback.loadFailed')}
+              </Alert>
+            )}
+
             {activeSection === 'display' && (
               <Stack spacing={2.5}>
                 <Box>
                   <Typography component="h1" variant="h5" sx={{ fontWeight: 800 }}>
-                    显示
+                    {t('settings.display.title')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    调整悬浮卡的外观与窗口交互方式。
+                    {t('settings.display.subtitle')}
                   </Typography>
                 </Box>
                 <Paper variant="outlined" sx={{ p: 2 }}>
                   <Stack spacing={0.5}>
                     <FormControlLabel
-                      control={<Switch checked={settings.alwaysOnTop} disabled={isSaving} onChange={(event) => void updateSettings({ alwaysOnTop: event.target.checked })} />}
-                      label="始终置顶"
+                      control={
+                        <Switch
+                          checked={settings.alwaysOnTop}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) => void updateSettings({ alwaysOnTop: event.target.checked })}
+                        />
+                      }
+                      label={t('settings.display.alwaysOnTop')}
                     />
                     <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      让主卡保持在其他窗口前方。
+                      {t('settings.display.alwaysOnTopDescription')}
                     </Typography>
                     <Divider sx={{ my: 1 }} />
                     <FormControlLabel
-                      control={<Switch checked={settings.lockPosition} disabled={isSaving} onChange={(event) => void updateSettings({ lockPosition: event.target.checked })} />}
-                      label="锁定位置与大小"
+                      control={
+                        <Switch
+                          checked={settings.lockPosition}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) => void updateSettings({ lockPosition: event.target.checked })}
+                        />
+                      }
+                      label={t('settings.display.lockPosition')}
                     />
                     <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      锁定后无法拖动或从边缘调整主卡大小。
+                      {t('settings.display.lockPositionDescription')}
                     </Typography>
                   </Stack>
                 </Paper>
                 <Paper variant="outlined" sx={{ p: 2 }}>
-                  <Stack>
-                    <FormControl fullWidth size="small" disabled={isSaving}>
-                      <InputLabel id="theme-label">主题</InputLabel>
+                  <Stack spacing={2}>
+                    <FormControl fullWidth size="small" disabled={settingsControlsDisabled}>
+                      <InputLabel id="theme-label">{t('settings.display.theme')}</InputLabel>
                       <Select
-                        label="主题"
+                        label={t('settings.display.theme')}
                         labelId="theme-label"
                         value={settings.theme}
                         onChange={(event) => void updateSettings({ theme: event.target.value as Theme })}
                       >
-                        <MenuItem value="system">跟随系统</MenuItem>
-                        <MenuItem value="light">浅色</MenuItem>
-                        <MenuItem value="dark">深色</MenuItem>
+                        <MenuItem value="system">{t('settings.display.themeSystem')}</MenuItem>
+                        <MenuItem value="light">{t('settings.display.themeLight')}</MenuItem>
+                        <MenuItem value="dark">{t('settings.display.themeDark')}</MenuItem>
+                      </Select>
+                    </FormControl>
+                    <FormControl fullWidth size="small" disabled={settingsControlsDisabled}>
+                      <InputLabel id="language-label">{t('settings.display.language')}</InputLabel>
+                      <Select
+                        label={t('settings.display.language')}
+                        labelId="language-label"
+                        value={settings.language}
+                        onChange={(event) => void updateLanguage(event.target.value as Language)}
+                      >
+                        <MenuItem value="system">{t('settings.display.languageSystem')}</MenuItem>
+                        <MenuItem value="zh-CN">{t('settings.display.languageChinese')}</MenuItem>
+                        <MenuItem value="en">{t('settings.display.languageEnglish')}</MenuItem>
                       </Select>
                     </FormControl>
                   </Stack>
@@ -367,54 +610,245 @@ export default function SettingsWindow() {
               <Stack spacing={2.5}>
                 <Box>
                   <Typography component="h1" variant="h5" sx={{ fontWeight: 800 }}>
-                    数据与刷新
+                    {t('settings.data.title')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    控制主卡的自动刷新频率；手动刷新始终可用。
+                    {t('settings.data.subtitle')}
                   </Typography>
                 </Box>
                 <Paper variant="outlined" sx={{ p: 2 }}>
                   <Stack spacing={1.25}>
-                    <FormControl fullWidth size="small" disabled={isSaving}>
-                      <InputLabel id="refresh-interval-label">自动刷新</InputLabel>
+                    <FormControl fullWidth size="small" disabled={settingsControlsDisabled}>
+                      <InputLabel id="refresh-interval-label">{t('settings.data.refresh')}</InputLabel>
                       <Select
-                        label="自动刷新"
+                        label={t('settings.data.refresh')}
                         labelId="refresh-interval-label"
                         value={settings.refreshIntervalSeconds}
                         onChange={(event) => void updateSettings({ refreshIntervalSeconds: Number(event.target.value) })}
                       >
-                        {refreshOptions.map((option) => (
-                          <MenuItem key={option.seconds} value={option.seconds}>
-                            {option.label}
+                        {refreshOptions.map((seconds) => (
+                          <MenuItem key={seconds} value={seconds}>
+                            {t('settings.data.refreshMinutes', { minutes: seconds / 60 })}
                           </MenuItem>
                         ))}
                       </Select>
                     </FormControl>
                     <Alert severity="info" variant="outlined">
-                      用量数据仅由 Rust 后端只读获取。前端不会读取认证文件，也不会续期 Token 或操作重置额度。
+                      {t('settings.data.privacyNotice')}
                     </Alert>
                   </Stack>
                 </Paper>
+
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <Stack spacing={1.5}>
+                    <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                      <NotificationsOutlinedIcon color="primary" />
+                      <Box>
+                        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+                          {t('settings.data.notifications.title')}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          {t('settings.data.notifications.description')}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settings.notifications.enabled}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) => void updateNotificationsEnabled(event.target.checked)}
+                        />
+                      }
+                      label={t('settings.data.notifications.enabled')}
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+                      {t('settings.data.notifications.enabledDescription')}
+                    </Typography>
+                    <Divider />
+
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settings.notifications.lowQuotaEnabled}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) =>
+                            void updateNotificationSettings({ lowQuotaEnabled: event.target.checked })
+                          }
+                        />
+                      }
+                      label={t('settings.data.notifications.lowQuota')}
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+                      {t('settings.data.notifications.lowQuotaDescription')}
+                    </Typography>
+                    <TextField
+                      key={`low-quota-${settings.notifications.lowQuotaThresholdPercent}`}
+                      label={t('settings.data.notifications.lowQuotaThreshold')}
+                      size="small"
+                      type="number"
+                      defaultValue={settings.notifications.lowQuotaThresholdPercent}
+                      disabled={settingsControlsDisabled}
+                      onBlur={(event) => {
+                        const value = clampPercent(Number(event.target.value));
+                        event.target.value = String(value);
+                        void updateNotificationSettings({ lowQuotaThresholdPercent: value });
+                      }}
+                      slotProps={{ htmlInput: { min: 0, max: 100, step: 1 } }}
+                    />
+
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settings.notifications.paceEnabled}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) => void updateNotificationSettings({ paceEnabled: event.target.checked })}
+                        />
+                      }
+                      label={t('settings.data.notifications.pace')}
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+                      {t('settings.data.notifications.paceDescription')}
+                    </Typography>
+                    <TextField
+                      key={`pace-${settings.notifications.paceDeficitThresholdPercent}`}
+                      label={t('settings.data.notifications.paceThreshold')}
+                      size="small"
+                      type="number"
+                      defaultValue={settings.notifications.paceDeficitThresholdPercent}
+                      disabled={settingsControlsDisabled}
+                      onBlur={(event) => {
+                        const value = clampPercent(Number(event.target.value));
+                        event.target.value = String(value);
+                        void updateNotificationSettings({ paceDeficitThresholdPercent: value });
+                      }}
+                      slotProps={{ htmlInput: { min: 0, max: 100, step: 1 } }}
+                    />
+
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settings.notifications.resetEnabled}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) => void updateNotificationSettings({ resetEnabled: event.target.checked })}
+                        />
+                      }
+                      label={t('settings.data.notifications.reset')}
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+                      {t('settings.data.notifications.resetDescription')}
+                    </Typography>
+
+                    <Divider />
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settings.notifications.quietHoursEnabled}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) =>
+                            void updateNotificationSettings({ quietHoursEnabled: event.target.checked })
+                          }
+                        />
+                      }
+                      label={t('settings.data.notifications.quietHours')}
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+                      {t('settings.data.notifications.quietHoursDescription')}
+                    </Typography>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+                      <TextField
+                        key={`quiet-start-${settings.notifications.quietHoursStart}`}
+                        fullWidth
+                        label={t('settings.data.notifications.quietStart')}
+                        size="small"
+                        type="time"
+                        defaultValue={settings.notifications.quietHoursStart}
+                        disabled={settingsControlsDisabled || !settings.notifications.quietHoursEnabled}
+                        onBlur={(event) => {
+                          const value = event.target.value;
+                          if (/^\d{2}:\d{2}$/.test(value)) {
+                            void updateNotificationSettings({ quietHoursStart: value });
+                          } else event.target.value = settings.notifications.quietHoursStart;
+                        }}
+                        slotProps={{ inputLabel: { shrink: true } }}
+                      />
+                      <TextField
+                        key={`quiet-end-${settings.notifications.quietHoursEnd}`}
+                        fullWidth
+                        label={t('settings.data.notifications.quietEnd')}
+                        size="small"
+                        type="time"
+                        defaultValue={settings.notifications.quietHoursEnd}
+                        disabled={settingsControlsDisabled || !settings.notifications.quietHoursEnabled}
+                        onBlur={(event) => {
+                          const value = event.target.value;
+                          if (/^\d{2}:\d{2}$/.test(value)) {
+                            void updateNotificationSettings({ quietHoursEnd: value });
+                          } else event.target.value = settings.notifications.quietHoursEnd;
+                        }}
+                        slotProps={{ inputLabel: { shrink: true } }}
+                      />
+                    </Stack>
+                    <Button
+                      disabled={
+                        settingsLoadState !== 'ready' ||
+                        !settings.notifications.enabled ||
+                        isSendingTestNotification ||
+                        isSaving
+                      }
+                      startIcon={
+                        isSendingTestNotification ? (
+                          <CircularProgress color="inherit" size={16} />
+                        ) : (
+                          <NotificationsOutlinedIcon />
+                        )
+                      }
+                      sx={{ alignSelf: 'flex-start' }}
+                      variant="outlined"
+                      onClick={() => void sendTestNotification()}
+                    >
+                      {t('settings.data.notifications.test')}
+                    </Button>
+                  </Stack>
+                </Paper>
               </Stack>
+            )}
+
+            {activeSection === 'trends' && settingsLoadState === 'ready' && (
+              <Suspense fallback={<LinearProgress aria-label={t('trends.loading')} />}>
+                <TrendsPage
+                  historyEnabled={settings.historyEnabled}
+                  getUsageHistory={usageBridge.getUsageHistory}
+                  onSetHistoryEnabled={updateHistoryEnabled}
+                  onClearUsageHistory={usageBridge.clearUsageHistory}
+                  listenForUsageHistory={usageBridge.listenForUsageHistory}
+                />
+              </Suspense>
             )}
 
             {activeSection === 'startup' && (
               <Stack spacing={2.5}>
                 <Box>
                   <Typography component="h1" variant="h5" sx={{ fontWeight: 800 }}>
-                    启动
+                    {t('settings.startup.title')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    配置 Windows 或 macOS 登录后是否自动启动 CodexUsageBar。
+                    {t('settings.startup.subtitle')}
                   </Typography>
                 </Box>
                 <Paper variant="outlined" sx={{ p: 2 }}>
                   <FormControlLabel
-                    control={<Switch checked={autostart} disabled={isSaving} onChange={(event) => void updateAutostart(event.target.checked)} />}
-                    label="开机启动"
+                    control={
+                      <Switch
+                        checked={autostart}
+                        disabled={!autostartLoaded || isChangingAutostart}
+                        onChange={(event) => void updateAutostart(event.target.checked)}
+                      />
+                    }
+                    label={t('settings.startup.autostart')}
                   />
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block', pl: 4 }}>
-                    此设置仅控制新版 CodexUsageBar；旧版自启项不会被自动删除。
+                    {t('settings.startup.description')}
                   </Typography>
                 </Paper>
               </Stack>
@@ -424,30 +858,36 @@ export default function SettingsWindow() {
               <Stack spacing={2.5}>
                 <Box>
                   <Typography component="h1" variant="h5" sx={{ fontWeight: 800 }}>
-                    关于与更新
+                    {t('settings.about.title')}
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    通过公开 HTTPS 更新清单检查；下载后验证更新包签名，不会读取或发送 Codex 认证信息。
+                    {t('settings.about.subtitle')}
                   </Typography>
                 </Box>
                 <Paper variant="outlined" sx={{ p: 2 }}>
                   <Stack spacing={1.5}>
                     <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                      应用更新
+                      {t('settings.about.updateTitle')}
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
-                      当前版本 v{updateInfo?.currentVersion ?? '—'}
+                      {t('settings.about.currentVersion', { version: updateInfo?.currentVersion ?? t('common.unavailable') })}
                     </Typography>
                     <FormControlLabel
-                      control={<Switch checked={settings.autoCheckUpdates} disabled={isSaving} onChange={(event) => void updateSettings({ autoCheckUpdates: event.target.checked })} />}
-                      label="自动检查更新"
+                      control={
+                        <Switch
+                          checked={settings.autoCheckUpdates}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) => void updateSettings({ autoCheckUpdates: event.target.checked })}
+                        />
+                      }
+                      label={t('settings.about.autoCheck')}
                     />
                     <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      启动后会检查一次，之后最多每 6 小时检查一次；仅检测，不会自动下载、安装或重启。
+                      {t('settings.about.autoCheckDescription')}
                     </Typography>
                     {updateInfo?.checkedAt && (
                       <Typography variant="caption" color="text.secondary">
-                        最近检查：{formatDateTime(updateInfo.checkedAt)}
+                        {t('settings.about.lastChecked', { date: formatDateTime(updateInfo.checkedAt, language) })}
                       </Typography>
                     )}
                     {updateInfo?.updateAvailable && (
@@ -456,22 +896,73 @@ export default function SettingsWindow() {
                         variant="outlined"
                         action={
                           <Button color="inherit" size="small" onClick={() => setIsUpdateDialogOpen(true)}>
-                            查看
+                            {t('settings.about.view')}
                           </Button>
                         }
                       >
-                        发现新版本 v{updateInfo.latestVersion}
+                        {t('settings.about.updateAvailable', { version: updateInfo.latestVersion })}
                       </Alert>
                     )}
                     <Button
                       disabled={isCheckingUpdate}
-                      startIcon={isCheckingUpdate ? <CircularProgress color="inherit" size={16} /> : <SystemUpdateAltRoundedIcon />}
+                      startIcon={
+                        isCheckingUpdate ? (
+                          <CircularProgress color="inherit" size={16} />
+                        ) : (
+                          <SystemUpdateAltRoundedIcon />
+                        )
+                      }
                       sx={{ alignSelf: 'flex-start' }}
                       variant="contained"
                       onClick={() => void checkUpdate()}
                     >
-                      {isCheckingUpdate ? '正在检查…' : '检查更新'}
+                      {isCheckingUpdate ? t('settings.about.checking') : t('settings.about.check')}
                     </Button>
+                  </Stack>
+                </Paper>
+
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <Stack spacing={1.5}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                      {t('settings.about.diagnosticsTitle')}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {t('settings.about.diagnosticsDescription')}
+                    </Typography>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                      <Button
+                        disabled={isCopyingDiagnostics}
+                        startIcon={
+                          isCopyingDiagnostics ? <CircularProgress color="inherit" size={16} /> : <ContentCopyRoundedIcon />
+                        }
+                        variant="contained"
+                        onClick={() => void copyDiagnostics()}
+                      >
+                        {t('settings.about.copyDiagnostics')}
+                      </Button>
+                      <Button
+                        startIcon={<BugReportOutlinedIcon />}
+                        variant="outlined"
+                        onClick={() => void openExternal(issuePageUrl, 'settings.feedback.issueOpenFailed')}
+                      >
+                        {t('settings.about.reportIssue')}
+                      </Button>
+                      <Button
+                        startIcon={<LaunchRoundedIcon />}
+                        variant="outlined"
+                        onClick={() =>
+                          void openExternal(
+                            releaseNotesUrl(updateInfo?.currentVersion),
+                            'settings.feedback.releaseNotesOpenFailed',
+                          )
+                        }
+                      >
+                        {t('settings.about.releaseNotes')}
+                      </Button>
+                    </Stack>
+                    <Alert severity="warning" variant="outlined">
+                      {t('settings.about.issueHint')}
+                    </Alert>
                   </Stack>
                 </Paper>
               </Stack>
@@ -480,29 +971,40 @@ export default function SettingsWindow() {
         </Box>
       </Box>
 
-      <Dialog fullWidth maxWidth="xs" open={isUpdateDialogOpen} onClose={() => !isInstallingUpdate && setIsUpdateDialogOpen(false)}>
-        <DialogTitle>检查更新</DialogTitle>
+      <Dialog
+        fullWidth
+        maxWidth="xs"
+        open={isUpdateDialogOpen}
+        onClose={() => !isInstallingUpdate && setIsUpdateDialogOpen(false)}
+      >
+        <DialogTitle>{t('settings.updateDialog.title')}</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={1.25}>
             <Typography variant="h6" sx={{ fontWeight: 800 }}>
-              {updateInfo?.updateAvailable ? `发现新版本 v${updateInfo.latestVersion}` : '当前已是最新版本'}
+              {updateInfo?.updateAvailable
+                ? t('settings.updateDialog.available', { version: updateInfo.latestVersion })
+                : t('settings.updateDialog.current')}
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              当前版本 v{updateInfo?.currentVersion} · 最新版本 v{updateInfo?.latestVersion}
+              {t('settings.updateDialog.versions', {
+                current: updateInfo?.currentVersion ?? t('common.unavailable'),
+                latest: updateInfo?.latestVersion ?? t('common.unavailable'),
+              })}
             </Typography>
             {updateInfo?.checkedAt && (
               <Typography variant="body2" color="text.secondary">
-                检查时间 {formatDateTime(updateInfo.checkedAt)}
+                {t('settings.updateDialog.checkedAt', { date: formatDateTime(updateInfo.checkedAt, language) })}
               </Typography>
             )}
             {updateInfo?.updateAvailable && (
               <Alert severity="info" variant="outlined">
-                点击“下载并安装”后会下载并验证签名。Windows 将在开始安装时关闭应用；macOS 完成替换后会重新启动。
+                {t('settings.updateDialog.installDescription')}
               </Alert>
             )}
             {isInstallingUpdate && (
               <Stack spacing={0.75}>
                 <LinearProgress
+                  aria-label={progressLabel}
                   variant={updateProgress?.totalBytes ? 'determinate' : 'indeterminate'}
                   value={
                     updateProgress?.totalBytes
@@ -511,7 +1013,7 @@ export default function SettingsWindow() {
                   }
                 />
                 <Typography variant="caption" color="text.secondary">
-                  {formatUpdateProgress(updateProgress)}
+                  {progressLabel}
                 </Typography>
               </Stack>
             )}
@@ -519,19 +1021,29 @@ export default function SettingsWindow() {
         </DialogContent>
         <DialogActions>
           <Button disabled={isInstallingUpdate} onClick={() => setIsUpdateDialogOpen(false)}>
-            关闭
+            {t('settings.updateDialog.close')}
           </Button>
-          <Button disabled={isInstallingUpdate} endIcon={<LaunchRoundedIcon />} onClick={() => void openReleasePage()}>
-            发布页
+          <Button
+            disabled={isInstallingUpdate}
+            endIcon={<LaunchRoundedIcon />}
+            onClick={() => void openExternal(releasePageUrl, 'settings.feedback.releaseOpenFailed')}
+          >
+            {t('settings.updateDialog.releases')}
           </Button>
           {updateInfo?.updateAvailable && (
             <Button
               disabled={isInstallingUpdate}
-              startIcon={isInstallingUpdate ? <CircularProgress color="inherit" size={16} /> : <SystemUpdateAltRoundedIcon />}
+              startIcon={
+                isInstallingUpdate ? (
+                  <CircularProgress color="inherit" size={16} />
+                ) : (
+                  <SystemUpdateAltRoundedIcon />
+                )
+              }
               variant="contained"
               onClick={() => void installUpdate()}
             >
-              {isInstallingUpdate ? '正在更新…' : '下载并安装'}
+              {isInstallingUpdate ? t('settings.updateDialog.installing') : t('settings.updateDialog.install')}
             </Button>
           )}
         </DialogActions>
@@ -543,8 +1055,13 @@ export default function SettingsWindow() {
         open={Boolean(feedback)}
         onClose={() => setFeedback(null)}
       >
-        <Alert severity={feedback?.severity ?? 'info'} variant="filled" onClose={() => setFeedback(null)}>
-          {feedback?.message}
+        <Alert
+          closeText={t('common.close')}
+          severity={feedback?.severity ?? 'info'}
+          variant="filled"
+          onClose={() => setFeedback(null)}
+        >
+          {feedback ? t(feedback.key) : null}
         </Alert>
       </Snackbar>
     </ThemeProvider>

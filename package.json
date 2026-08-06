@@ -1,7 +1,7 @@
 {
   "name": "codex-usage-bar",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.3.0",
   "author": "creamtea47",
   "description": "A privacy-first desktop floating usage card for Codex.",
   "homepage": "https://github.com/creamtea47/codex-usage-bar",
@@ -27,9 +27,14 @@
     "@mui/icons-material": "^9.2.0",
     "@mui/material": "^9.2.0",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-opener": "^2.5.4",
+    "i18next": "^26.3.6",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-i18next": "^17.0.11",
+    "react-is": "^19.2.8",
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

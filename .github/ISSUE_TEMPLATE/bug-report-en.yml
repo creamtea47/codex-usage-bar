@@ -1,0 +1,59 @@
+name: Bug report (English)
+description: Report a reproducible CodexUsageBar problem
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Use “Copy sanitized diagnostics” in the app and inspect every line before sharing it.
+
+        **Never submit `auth.json`, tokens, account/email details, proxy addresses, unchecked logs, or raw API responses.**
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: For example, 0.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the actual and expected results.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open …
+        2. Select …
+        3. Observe …
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reviewed sanitized diagnostics (optional)
+      description: Paste only the in-app sanitized summary after reviewing it yourself. Do not paste logs.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I confirm this report contains no auth.json, token, account/email, proxy, unchecked log, or raw response data.
+          required: true

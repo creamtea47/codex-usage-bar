@@ -1,6 +1,6 @@
 [package]
 name = "codex_usage_bar"
-version = "0.2.7"
+version = "0.3.0"
 description = "A read-only desktop usage widget for Codex"
 authors = ["creamtea47"]
 homepage = "https://github.com/creamtea47/codex-usage-bar"
@@ -16,15 +16,21 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
+hex = "0.4.3"
 log = "0.4"
+rand = "0.10.2"
 # 保留 Rustls 的跨平台 TLS，同时启用 Windows/macOS 系统代理与 HTTP(S)_PROXY；
 # 代理地址或凭据不会写入日志，也不会经 IPC 返回前端。
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "system-proxy"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11.0"
+sys-locale = "0.3.2"
 tauri = { version = "2.11.5", features = ["macos-private-api"] }
 tauri-plugin-autostart = "2.5.1"
+tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-log = "2.9.0"
+tauri-plugin-notification = "2.3.3"
 tauri-plugin-opener = "2"
 thiserror = "2.0.19"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

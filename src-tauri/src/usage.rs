@@ -1,6 +1,8 @@
 use crate::{
     auth::{read_auth_credentials, AuthError},
-    models::{DashboardSnapshot, DashboardStatus, QuotaWindow},
+    models::{
+        DashboardErrorCode, DashboardSnapshot, DashboardStatus, QuotaFallbackLabel, QuotaWindow,
+    },
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use reqwest::{Client, StatusCode};
@@ -27,6 +29,31 @@ pub enum UsageError {
     InvalidPayload,
 }
 
+impl UsageError {
+    pub fn code(&self) -> DashboardErrorCode {
+        match self {
+            Self::Auth(AuthError::MissingFile) => DashboardErrorCode::AuthMissing,
+            Self::Auth(_) | Self::Unauthorized => DashboardErrorCode::AuthInvalid,
+            Self::Client => DashboardErrorCode::LocalBridge,
+            Self::Network => DashboardErrorCode::Network,
+            Self::Rejected => DashboardErrorCode::RateLimited,
+            Self::Server => DashboardErrorCode::ServiceUnavailable,
+            Self::InvalidPayload => DashboardErrorCode::InvalidResponse,
+        }
+    }
+}
+
+/// 账号材料只在 Rust 刷新调用栈内短暂存在，供本地加盐哈希；不会经 IPC 或日志输出。
+pub struct FetchedDashboard {
+    pub snapshot: DashboardSnapshot,
+    pub account_identity: UsageAccountIdentity,
+}
+
+pub enum UsageAccountIdentity {
+    AccountId(String),
+    Token(String),
+}
+
 #[derive(Clone)]
 pub struct UsageClient {
     client: Client,
@@ -37,7 +64,7 @@ impl UsageClient {
         // reqwest 的 system-proxy feature 会安全读取系统代理和 HTTP(S)_PROXY，
         // 仅用于发起本次只读请求；代理配置绝不记录到日志或传给 React。
         let client = Client::builder()
-            .user_agent("CodexUsageBar/0.2 (read-only)")
+            .user_agent("CodexUsageBar/0.3 (read-only)")
             .connect_timeout(StdDuration::from_secs(10))
             .timeout(StdDuration::from_secs(20))
             .build()
@@ -46,8 +73,13 @@ impl UsageClient {
     }
 
     /// 仅使用 access_token 查询额度。这里没有 OAuth、重置卡或任何写入路径。
-    pub async fn fetch_dashboard(&self) -> Result<DashboardSnapshot, UsageError> {
+    pub async fn fetch_dashboard(&self) -> Result<FetchedDashboard, UsageError> {
         let credentials = read_auth_credentials()?;
+        let account_identity = credentials
+            .account_id
+            .clone()
+            .map(UsageAccountIdentity::AccountId)
+            .unwrap_or_else(|| UsageAccountIdentity::Token(credentials.access_token.clone()));
         let mut request = self
             .client
             .get(USAGE_ENDPOINT)
@@ -81,7 +113,10 @@ impl UsageClient {
             .json()
             .await
             .map_err(|_| UsageError::InvalidPayload)?;
-        parse_usage_payload(&payload)
+        Ok(FetchedDashboard {
+            snapshot: parse_usage_payload(&payload)?,
+            account_identity,
+        })
     }
 }
 
@@ -175,9 +210,13 @@ fn mask_email(value: &str) -> Option<String> {
 fn parse_window(default_id: &str, value: &Value) -> Option<QuotaWindow> {
     let object = value.as_object()?;
     let used_percent = number(object, "used_percent")?.clamp(0, 100) as u8;
-    let window_seconds = number(object, "limit_window_seconds")?.max(0);
+    let window_seconds = number(object, "limit_window_seconds")?;
+    if window_seconds <= 0 {
+        return None;
+    }
+    let window_duration = Duration::try_seconds(window_seconds)?;
     let reset_after_seconds = number(object, "reset_after_seconds")?.max(0);
-    let reset_at = parse_timestamp(object.get("reset_at")?)?;
+    let reset_at = object.get("reset_at").and_then(parse_timestamp);
     let id = object
         .get("id")
         .and_then(Value::as_str)
@@ -188,19 +227,20 @@ fn parse_window(default_id: &str, value: &Value) -> Option<QuotaWindow> {
         .or_else(|| object.get("name"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| label_for_window(default_id, window_seconds));
-    let start_at = reset_at.checked_sub_signed(Duration::seconds(window_seconds));
+        .map(ToOwned::to_owned);
+    let start_at = reset_at.and_then(|value| value.checked_sub_signed(window_duration));
     Some(QuotaWindow {
         id,
         label,
+        fallback_label: fallback_label_for_window(window_seconds),
         remaining_percent: 100 - used_percent,
         used_percent,
         window_seconds,
-        reset_at: Some(reset_at),
+        reset_at,
         reset_after_seconds,
         start_at,
         show_pace_marker: window_seconds >= 24 * 60 * 60,
+        forecast: None,
     })
 }
 
@@ -224,21 +264,14 @@ fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-fn label_for_window(id: &str, seconds: i64) -> String {
+fn fallback_label_for_window(seconds: i64) -> QuotaFallbackLabel {
     if seconds <= 12 * 60 * 60 {
-        return "短周期限额".to_owned();
+        return QuotaFallbackLabel::FiveHour;
     }
     if (6 * 24 * 60 * 60..=8 * 24 * 60 * 60).contains(&seconds) {
-        return "周限额".to_owned();
+        return QuotaFallbackLabel::Weekly;
     }
-    if seconds >= 24 * 60 * 60 {
-        return format!("{} 天限额", (seconds as f64 / 86_400.0).round() as i64);
-    }
-    if id.contains("secondary") {
-        "长期限额".to_owned()
-    } else {
-        "额度限额".to_owned()
-    }
+    QuotaFallbackLabel::Window
 }
 
 #[cfg(test)]
@@ -307,7 +340,7 @@ mod tests {
             ]}
         });
         let snapshot = parse_usage_payload(&payload).unwrap();
-        assert_eq!(snapshot.quota_windows[0].label, "月限额");
+        assert_eq!(snapshot.quota_windows[0].label.as_deref(), Some("月限额"));
         assert_eq!(snapshot.quota_windows[0].remaining_percent, 90);
     }
 
@@ -330,6 +363,46 @@ mod tests {
         assert_eq!(snapshot.quota_windows[0].id, "monthly");
         assert_eq!(snapshot.quota_windows[0].remaining_percent, 45);
         assert!(snapshot.quota_windows[0].reset_at.is_some());
+    }
+
+    #[test]
+    fn accepts_window_without_reset_at_when_reset_after_seconds_is_present() {
+        let payload = serde_json::json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 25,
+                    "limit_window_seconds": 18_000,
+                    "reset_after_seconds": 900
+                }
+            }
+        });
+
+        let snapshot = parse_usage_payload(&payload).unwrap();
+        assert_eq!(snapshot.quota_windows.len(), 1);
+        assert_eq!(snapshot.quota_windows[0].remaining_percent, 75);
+        assert_eq!(snapshot.quota_windows[0].reset_after_seconds, 900);
+        assert_eq!(snapshot.quota_windows[0].reset_at, None);
+        assert_eq!(snapshot.quota_windows[0].start_at, None);
+    }
+
+    #[test]
+    fn rejects_non_positive_or_overflowing_window_durations_without_panicking() {
+        for invalid_duration in [0, -1, i64::MAX] {
+            let payload = serde_json::json!({
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 25,
+                        "limit_window_seconds": invalid_duration,
+                        "reset_after_seconds": 900,
+                        "reset_at": 1_800_000_000
+                    }
+                }
+            });
+            assert!(matches!(
+                parse_usage_payload(&payload),
+                Err(UsageError::InvalidPayload)
+            ));
+        }
     }
 
     #[test]

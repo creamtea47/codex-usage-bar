@@ -102,7 +102,7 @@ pub fn cleanup_logs(log_directory: &Path, max_age: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{MainWindowSizeMode, Settings, Theme};
+    use crate::models::{Language, MainWindowSizeMode, NotificationSettings, Settings, Theme};
     use std::{env, thread, time::SystemTime};
 
     #[test]
@@ -209,6 +209,33 @@ mod tests {
         assert!(!settings.compact_layout_migration_completed);
         // 旧设置文件没有此字段时保持新版默认，避免升级后意外关闭自动检查。
         assert!(settings.preferences.auto_check_updates);
+        assert_eq!(settings.preferences.language, Language::System);
+        assert_eq!(
+            settings.preferences.notifications,
+            NotificationSettings::default()
+        );
+        assert!(settings.preferences.history_enabled);
+    }
+
+    #[test]
+    fn normalizes_notification_thresholds_and_quiet_hours() {
+        let result = Settings {
+            notifications: NotificationSettings {
+                low_quota_threshold_percent: 101,
+                pace_deficit_threshold_percent: 255,
+                quiet_hours_start: "24:00".to_owned(),
+                quiet_hours_end: "8:00".to_owned(),
+                ..NotificationSettings::default()
+            },
+            ..Settings::default()
+        }
+        .normalized();
+
+        assert_eq!(result.notifications.low_quota_threshold_percent, 100);
+        assert_eq!(result.notifications.pace_deficit_threshold_percent, 100);
+        assert_eq!(result.notifications.quiet_hours_start, "22:00");
+        assert_eq!(result.notifications.quiet_hours_end, "08:00");
+        assert!(!result.notifications.enabled);
     }
 
     #[test]

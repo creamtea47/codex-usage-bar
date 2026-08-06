@@ -1,7 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-import type { AppUpdateInfo, AppUpdateProgress, DashboardSnapshot, Settings } from './types';
+import type {
+  AppUpdateInfo,
+  AppUpdateProgress,
+  DashboardSnapshot,
+  NotificationEnableResult,
+  Settings,
+  UsageHistoryRange,
+  UsageHistoryResponse,
+} from './types';
 
 /** 所有敏感 I/O 都经由这层调用 Rust command；前端不直接读取文件或发起认证请求。 */
 export const usageBridge = {
@@ -9,6 +17,14 @@ export const usageBridge = {
   refreshDashboard: () => invoke<DashboardSnapshot>('refresh_dashboard'),
   getSettings: () => invoke<Settings>('get_settings'),
   saveSettings: (settings: Settings) => invoke<Settings>('save_settings', { settings }),
+  setNotificationsEnabled: (enabled: boolean) =>
+    invoke<NotificationEnableResult>('set_notifications_enabled', { enabled }),
+  sendTestNotification: () => invoke<void>('send_test_notification'),
+  getUsageHistory: (range: UsageHistoryRange) =>
+    invoke<UsageHistoryResponse>('get_usage_history', { range }),
+  setHistoryEnabled: (enabled: boolean) => invoke<Settings>('set_history_enabled', { enabled }),
+  clearUsageHistory: () => invoke<void>('clear_usage_history'),
+  getDiagnostics: () => invoke<string>('get_diagnostics'),
   getAutostart: () => invoke<boolean>('get_autostart'),
   setAutostart: (enabled: boolean) => invoke<boolean>('set_autostart', { enabled }),
   getAppUpdateInfo: () => invoke<AppUpdateInfo>('get_app_update_info'),
@@ -30,4 +46,6 @@ export const usageBridge = {
     listen<AppUpdateProgress>('app-update-progress', (event) => handler(event.payload)),
   listenForSettingsNavigation: (handler: (section: 'about') => void) =>
     listen<'about'>('settings-navigate', (event) => handler(event.payload)),
+  listenForUsageHistory: (handler: () => void) =>
+    listen('usage-history-updated', () => handler()),
 };
