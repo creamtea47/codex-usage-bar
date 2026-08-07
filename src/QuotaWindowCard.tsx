@@ -1,8 +1,9 @@
 import { Box, Card, CardContent, LinearProgress, Stack, Tooltip, Typography } from '@mui/material';
 import { useTranslation } from 'react-i18next';
 
-import { formatCountdownDuration, formatDateTime, formatDuration, resetCountdownSeconds } from './format';
+import { formatCountdownDuration, formatDuration, formatResetDateTime, resetCountdownSeconds } from './format';
 import { resolveSupportedLanguage } from './i18n';
+import { hasValidPaceWindow } from './quotaWindowPresentation';
 import type { QuotaWindow } from './types';
 
 interface QuotaWindowCardProps {
@@ -12,10 +13,9 @@ interface QuotaWindowCardProps {
 }
 
 function paceMarkerPercent(quotaWindow: QuotaWindow, now: number): number | null {
-  if (!quotaWindow.showPaceMarker || !quotaWindow.startAt || !quotaWindow.resetAt) return null;
+  if (!hasValidPaceWindow(quotaWindow)) return null;
   const start = new Date(quotaWindow.startAt).getTime();
   const reset = new Date(quotaWindow.resetAt).getTime();
-  if (Number.isNaN(start) || Number.isNaN(reset) || reset <= start) return null;
   const elapsed = Math.min(Math.max(now - start, 0), reset - start);
   return Math.min(Math.max(100 - (elapsed / (reset - start)) * 100, 0), 100);
 }
@@ -48,20 +48,6 @@ export function QuotaWindowCard({ quotaWindow, now, refreshedAt = null }: QuotaW
         : t('quota.fallbackLabel.window', {
             duration: formatDuration(quotaWindow.windowSeconds, language),
           }));
-  const forecast = quotaWindow.forecast;
-  const forecastExhaustsAt =
-    forecast?.status === 'exhaustsBeforeReset' && forecast.exhaustsAt
-      ? formatDateTime(forecast.exhaustsAt, language)
-      : null;
-  const forecastMessage =
-    marker === null
-      ? null
-      : forecastExhaustsAt && forecastExhaustsAt !== t('common.unavailable')
-        ? t('quota.forecast.exhaustsAt', { date: forecastExhaustsAt })
-        : forecast?.status === 'lastsUntilReset'
-          ? t('quota.forecast.lastsUntilReset')
-          : null;
-
   return (
     <Card
       variant="outlined"
@@ -83,7 +69,7 @@ export function QuotaWindowCard({ quotaWindow, now, refreshedAt = null }: QuotaW
             {t('quota.used', { percent: quotaWindow.usedPercent })}
           </Typography>
           <Typography variant="caption" color="text.secondary" noWrap>
-            {t('quota.resetAt', { date: formatDateTime(quotaWindow.resetAt, language) })}
+            {t('quota.resetAt', { date: formatResetDateTime(quotaWindow.resetAt, language) })}
           </Typography>
         </Stack>
 
@@ -125,16 +111,10 @@ export function QuotaWindowCard({ quotaWindow, now, refreshedAt = null }: QuotaW
                     duration: formatCountdownDuration(remainingSeconds, language),
                   })}
           </Typography>
-          {forecastMessage ? (
-            <Typography variant="caption" color="text.secondary">
-              {forecastMessage}
+          {marker !== null && (
+            <Typography variant="caption" color="text.secondary" noWrap>
+              {t('quota.paceSuggestion', { percent: suggestedRemaining })}
             </Typography>
-          ) : (
-            marker !== null && (
-              <Typography variant="caption" color="text.secondary">
-                {t('quota.paceSuggestion', { percent: suggestedRemaining })}
-              </Typography>
-            )
           )}
         </Stack>
       </CardContent>

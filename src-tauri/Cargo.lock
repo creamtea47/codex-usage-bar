@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "codex_usage_bar"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "hex",

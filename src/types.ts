@@ -11,6 +11,8 @@ export type DashboardErrorCode =
   | 'localBridge';
 export type QuotaFallbackLabel = 'fiveHour' | 'weekly' | 'window';
 export type ForecastStatus = 'collecting' | 'stable' | 'exhaustsBeforeReset' | 'lastsUntilReset';
+/** 设置窗口仅允许上报固定脱敏故障码，禁止携带异常正文或用户数据。 */
+export type SettingsUiFaultCode = 'trends-render-failed';
 
 export interface QuotaForecast {
   status: ForecastStatus;

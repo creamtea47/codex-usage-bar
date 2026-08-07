@@ -21,6 +21,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getUsageHistory: vi.fn(),
   setHistoryEnabled: vi.fn(),
   clearUsageHistory: vi.fn(),
+  reportSettingsUiFault: vi.fn(),
   getDiagnostics: vi.fn(),
   getAutostart: vi.fn(),
   setAutostart: vi.fn(),
@@ -90,6 +91,7 @@ function prepareBridge(settings: Settings = zhSettings) {
   bridgeMocks.getUsageHistory.mockResolvedValue(emptyHistory);
   bridgeMocks.setHistoryEnabled.mockImplementation(async (enabled: boolean) => ({ ...settings, historyEnabled: enabled }));
   bridgeMocks.clearUsageHistory.mockResolvedValue(undefined);
+  bridgeMocks.reportSettingsUiFault.mockResolvedValue(undefined);
   bridgeMocks.getDiagnostics.mockResolvedValue('CodexUsageBar diagnostics schema: 1\nplatform: macos');
   bridgeMocks.getAutostart.mockResolvedValue(false);
   bridgeMocks.setAutostart.mockImplementation(async (enabled: boolean) => enabled);
@@ -109,8 +111,9 @@ function prepareBridge(settings: Settings = zhSettings) {
 
 async function renderLoaded(settings: Settings = zhSettings) {
   prepareBridge(settings);
-  render(<SettingsWindow />);
+  const result = render(<SettingsWindow />);
   await screen.findByRole('heading', { name: settings.language === 'en' ? 'Display' : '显示' });
+  return result;
 }
 
 beforeEach(() => installMatchMedia());
@@ -139,14 +142,23 @@ describe('SettingsWindow', () => {
     await waitFor(() => expect(windowMocks.setTheme).toHaveBeenLastCalledWith(null));
   });
 
-  it('provides five real sidebar categories and keeps refresh intervals fixed', async () => {
+  it('provides six ordered sidebar categories and keeps data settings focused on refresh and privacy', async () => {
     await renderLoaded();
 
     expect(screen.getByRole('button', { name: '显示' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '数据与刷新' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '通知' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '趋势' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '启动' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '关于与更新' })).toBeTruthy();
+    expect(screen.getAllByRole('button').slice(0, 6).map((button) => button.textContent)).toEqual([
+      '显示',
+      '数据与刷新',
+      '通知',
+      '趋势',
+      '启动',
+      '关于与更新',
+    ]);
 
     fireEvent.click(screen.getByRole('button', { name: '数据与刷新' }));
     expect(await screen.findByRole('heading', { name: '数据与刷新' })).toBeTruthy();
@@ -157,6 +169,12 @@ describe('SettingsWindow', () => {
     }
     expect(screen.queryByRole('option', { name: /智能/ })).toBeNull();
     fireEvent.click(screen.getByRole('option', { name: '1 分钟' }));
+    expect(screen.queryByRole('switch', { name: '启用系统通知' })).toBeNull();
+    expect(screen.queryByRole('spinbutton', { name: '低额度阈值 (%)' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: '静默时段' })).toBeNull();
+    expect(
+      screen.getByText('用量数据仅由 Rust 后端只读获取。前端不会读取认证文件，也不会续期 Token 或操作重置额度。'),
+    ).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: '启动' }));
     expect(await screen.findByRole('heading', { name: '启动' })).toBeTruthy();
@@ -294,7 +312,7 @@ describe('SettingsWindow', () => {
     });
     render(<SettingsWindow />);
     await screen.findByRole('heading', { name: '显示' });
-    fireEvent.click(screen.getByRole('button', { name: '数据与刷新' }));
+    fireEvent.click(screen.getByRole('button', { name: '通知' }));
 
     const notificationsEnabled = await screen.findByRole('switch', { name: '启用系统通知' });
     const lowQuotaEnabled = screen.getByRole('switch', { name: '低额度提醒' });
@@ -320,6 +338,7 @@ describe('SettingsWindow', () => {
 
     expect(screen.getByRole('button', { name: 'Display' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Data & refresh' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Notifications' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Trends' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'About & updates' })).toBeTruthy();
     expect(document.documentElement.lang).toBe('en');
@@ -346,7 +365,7 @@ describe('SettingsWindow', () => {
     });
     render(<SettingsWindow />);
     await screen.findByRole('heading', { name: '显示' });
-    fireEvent.click(screen.getByRole('button', { name: '数据与刷新' }));
+    fireEvent.click(screen.getByRole('button', { name: '通知' }));
 
     const notificationsSwitch = await screen.findByRole('switch', { name: '启用系统通知' });
     fireEvent.click(notificationsSwitch);
@@ -362,7 +381,7 @@ describe('SettingsWindow', () => {
 
   it('persists notification rules with bounded thresholds and quiet-hour defaults', async () => {
     await renderLoaded();
-    fireEvent.click(screen.getByRole('button', { name: '数据与刷新' }));
+    fireEvent.click(screen.getByRole('button', { name: '通知' }));
 
     expect((screen.getByRole('spinbutton', { name: '低额度阈值 (%)' }) as HTMLInputElement).value).toBe('20');
     expect((screen.getByRole('spinbutton', { name: '落后建议进度（百分点）' }) as HTMLInputElement).value).toBe('10');
@@ -388,6 +407,87 @@ describe('SettingsWindow', () => {
         },
       }),
     );
+
+    fireEvent.click(screen.getByRole('switch', { name: '消耗过快提醒' }));
+    await waitFor(() =>
+      expect(bridgeMocks.saveSettings).toHaveBeenLastCalledWith({
+        ...zhSettings,
+        notifications: {
+          ...zhSettings.notifications,
+          quietHoursEnabled: true,
+          lowQuotaThresholdPercent: 100,
+          paceEnabled: false,
+        },
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('switch', { name: '额度重置提醒' }));
+    await waitFor(() =>
+      expect(bridgeMocks.saveSettings).toHaveBeenLastCalledWith({
+        ...zhSettings,
+        notifications: {
+          ...zhSettings.notifications,
+          quietHoursEnabled: true,
+          lowQuotaThresholdPercent: 100,
+          paceEnabled: false,
+          resetEnabled: false,
+        },
+      }),
+    );
+
+    const paceThreshold = screen.getByRole('spinbutton', { name: '落后建议进度（百分点）' });
+    fireEvent.change(paceThreshold, { target: { value: '-5' } });
+    fireEvent.blur(paceThreshold);
+    await waitFor(() =>
+      expect(bridgeMocks.saveSettings).toHaveBeenLastCalledWith({
+        ...zhSettings,
+        notifications: {
+          ...zhSettings.notifications,
+          quietHoursEnabled: true,
+          lowQuotaThresholdPercent: 100,
+          paceEnabled: false,
+          resetEnabled: false,
+          paceDeficitThresholdPercent: 0,
+        },
+      }),
+    );
+
+    const quietStart = screen.getByLabelText('开始时间');
+    fireEvent.change(quietStart, { target: { value: '23:30' } });
+    fireEvent.blur(quietStart);
+    await waitFor(() =>
+      expect(bridgeMocks.saveSettings).toHaveBeenLastCalledWith({
+        ...zhSettings,
+        notifications: {
+          ...zhSettings.notifications,
+          quietHoursEnabled: true,
+          lowQuotaThresholdPercent: 100,
+          paceEnabled: false,
+          resetEnabled: false,
+          paceDeficitThresholdPercent: 0,
+          quietHoursStart: '23:30',
+        },
+      }),
+    );
+
+    const quietEnd = screen.getByLabelText('结束时间');
+    fireEvent.change(quietEnd, { target: { value: '07:15' } });
+    fireEvent.blur(quietEnd);
+    await waitFor(() =>
+      expect(bridgeMocks.saveSettings).toHaveBeenLastCalledWith({
+        ...zhSettings,
+        notifications: {
+          ...zhSettings.notifications,
+          quietHoursEnabled: true,
+          lowQuotaThresholdPercent: 100,
+          paceEnabled: false,
+          resetEnabled: false,
+          paceDeficitThresholdPercent: 0,
+          quietHoursStart: '23:30',
+          quietHoursEnd: '07:15',
+        },
+      }),
+    );
   });
 
   it('sends a test notification only after notifications are enabled', async () => {
@@ -396,12 +496,33 @@ describe('SettingsWindow', () => {
       notifications: { ...zhSettings.notifications, enabled: true },
     };
     await renderLoaded(enabledSettings);
-    fireEvent.click(screen.getByRole('button', { name: '数据与刷新' }));
+    fireEvent.click(screen.getByRole('button', { name: '通知' }));
 
     fireEvent.click(await screen.findByRole('button', { name: '发送测试通知' }));
 
     await waitFor(() => expect(bridgeMocks.sendTestNotification).toHaveBeenCalledTimes(1));
     expect(await screen.findByText('测试通知已提交给系统。')).toBeTruthy();
+  });
+
+  it('disables test notifications while the master switch is off and localizes send failures', async () => {
+    const disabledView = await renderLoaded();
+    fireEvent.click(screen.getByRole('button', { name: '通知' }));
+    expect((await screen.findByRole('button', { name: '发送测试通知' }) as HTMLButtonElement).disabled).toBe(true);
+    disabledView.unmount();
+
+    const enabledSettings: Settings = {
+      ...zhSettings,
+      notifications: { ...zhSettings.notifications, enabled: true },
+    };
+    prepareBridge(enabledSettings);
+    bridgeMocks.sendTestNotification.mockRejectedValueOnce(new Error('private platform error'));
+    render(<SettingsWindow />);
+    await screen.findByRole('heading', { name: '显示' });
+    fireEvent.click(screen.getByRole('button', { name: '通知' }));
+    fireEvent.click(await screen.findByRole('button', { name: '发送测试通知' }));
+
+    expect(await screen.findByText('无法发送测试通知，请检查系统通知权限。')).toBeTruthy();
+    expect(screen.queryByText('private platform error')).toBeNull();
   });
 
   it('lazy-loads the dedicated trends page through sanitized history IPC', async () => {
@@ -421,6 +542,30 @@ describe('SettingsWindow', () => {
 
     await waitFor(() => expect(bridgeMocks.saveSettings).toHaveBeenCalledWith({ ...zhSettings, autoCheckUpdates: false }));
     expect(await screen.findByText('设置已保存。')).toBeTruthy();
+  });
+
+  it('opens only the exact GitHub repository root from the update card', async () => {
+    await renderLoaded();
+    fireEvent.click(screen.getByRole('button', { name: '关于与更新' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'GitHub 仓库' }));
+
+    await waitFor(() =>
+      expect(openerMocks.openUrl).toHaveBeenCalledWith('https://github.com/creamtea47/codex-usage-bar'),
+    );
+    expect(openerMocks.openUrl).toHaveBeenCalledTimes(1);
+    expect(openerMocks.openUrl.mock.calls).toEqual([['https://github.com/creamtea47/codex-usage-bar']]);
+  });
+
+  it('shows a localized error when the GitHub repository cannot be opened', async () => {
+    await renderLoaded();
+    openerMocks.openUrl.mockRejectedValueOnce(new Error('private shell failure'));
+    fireEvent.click(screen.getByRole('button', { name: '关于与更新' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'GitHub 仓库' }));
+
+    expect(await screen.findByText('无法打开 GitHub 仓库，请稍后重试。')).toBeTruthy();
+    expect(screen.queryByText('private shell failure')).toBeNull();
   });
 
   it('keeps sanitized diagnostics, issue reporting, and release notes as separate actions', async () => {

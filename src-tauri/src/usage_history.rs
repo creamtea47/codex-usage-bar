@@ -815,8 +815,8 @@ impl StoredUsageStream {
             if cycle.samples.is_empty() {
                 return false;
             }
-            let begins_after_previous = previous_cycle_last
-                .map_or(true, |previous| cycle.samples[0].sampled_at >= previous);
+            let begins_after_previous =
+                previous_cycle_last.is_none_or(|previous| cycle.samples[0].sampled_at >= previous);
             let samples_are_valid = cycle
                 .samples
                 .iter()

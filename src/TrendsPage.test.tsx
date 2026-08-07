@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TrendsPage from './TrendsPage';
@@ -22,7 +22,7 @@ vi.mock('react-i18next', async (importOriginal) => {
     'trends.localOnly.description': 'History is never uploaded.',
     'trends.collection.label': 'Local history collection',
     'trends.collection.enabled': 'Collection is enabled.',
-    'trends.collection.disabled': 'Collection is paused.',
+    'trends.collection.disabled': 'Collection is paused. Existing history remains available.',
     'trends.collection.enableSuccess': 'Collection enabled.',
     'trends.collection.disableSuccess': 'Collection paused.',
     'trends.collection.error': 'Unable to update collection.',
@@ -153,15 +153,24 @@ function renderPage(options: RenderOptions = {}) {
   );
   const onSetHistoryEnabled = vi.fn(options.onSetHistoryEnabled ?? (async () => undefined));
   const onClearUsageHistory = vi.fn(options.onClearUsageHistory ?? (async () => undefined));
-  render(
-    <TrendsPage
-      historyEnabled
-      getUsageHistory={getUsageHistory}
-      onSetHistoryEnabled={onSetHistoryEnabled}
-      onClearUsageHistory={onClearUsageHistory}
-      listenForUsageHistory={options.listenForUsageHistory}
-    />,
-  );
+  function StatefulTrendsPage() {
+    const [historyEnabled, setHistoryEnabled] = useState(true);
+
+    return (
+      <TrendsPage
+        historyEnabled={historyEnabled}
+        getUsageHistory={getUsageHistory}
+        onSetHistoryEnabled={async (enabled) => {
+          await onSetHistoryEnabled(enabled);
+          setHistoryEnabled(enabled);
+        }}
+        onClearUsageHistory={onClearUsageHistory}
+        listenForUsageHistory={options.listenForUsageHistory}
+      />
+    );
+  }
+
+  render(<StatefulTrendsPage />);
   return { getUsageHistory, onSetHistoryEnabled, onClearUsageHistory };
 }
 
@@ -196,12 +205,20 @@ describe('TrendsPage', () => {
     expect(screen.getByRole('button', { name: '7 days' }).getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('updates collection and requires confirmation before clearing history', async () => {
-    const { onSetHistoryEnabled, onClearUsageHistory } = renderPage();
+  it('pauses collection without rereading or hiding existing history, and clears only after confirmation', async () => {
+    const { getUsageHistory, onSetHistoryEnabled, onClearUsageHistory } = renderPage();
     await screen.findByText('Weekly limit');
 
-    fireEvent.click(screen.getByRole('switch', { name: 'Local history collection' }));
+    const collectionSwitch = screen.getByRole('switch', { name: 'Local history collection' });
+    fireEvent.click(collectionSwitch);
     await waitFor(() => expect(onSetHistoryEnabled).toHaveBeenCalledWith(false));
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(false));
+    expect(screen.getByText('Collection is paused. Existing history remains available.')).toBeTruthy();
+    expect(screen.getByText('Weekly limit')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(screen.getByText(/3 samples/)).toBeTruthy();
+    expect(screen.getByText('Expected to last until reset')).toBeTruthy();
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
     expect(await screen.findByRole('button', { name: 'Close' })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear history' }));
@@ -209,6 +226,25 @@ describe('TrendsPage', () => {
     expect(onClearUsageHistory).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(onClearUsageHistory).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('No history yet')).toBeTruthy();
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps collection state and existing charts when persisting the toggle fails', async () => {
+    const onSetHistoryEnabled = vi.fn(async () => {
+      throw new Error('private settings failure');
+    });
+    const { getUsageHistory } = renderPage({ onSetHistoryEnabled });
+    await screen.findByText('Weekly limit');
+
+    const collectionSwitch = screen.getByRole('switch', { name: 'Local history collection' });
+    fireEvent.click(collectionSwitch);
+
+    expect(await screen.findByText('Unable to update collection.')).toBeTruthy();
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText('Weekly limit')).toBeTruthy();
+    expect(screen.queryByText('private settings failure')).toBeNull();
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
   });
 
   it('shows a safe load error and lets the user retry', async () => {
@@ -223,6 +259,50 @@ describe('TrendsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(getUsageHistory).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('No history yet')).toBeTruthy();
+  });
+
+  it('rereads after the clear-history event while avoiding a duplicate manual reload', async () => {
+    let historyHandler: (() => void) | undefined;
+    const listenForUsageHistory = vi.fn(async (handler: () => void) => {
+      historyHandler = handler;
+      return () => undefined;
+    });
+    const getUsageHistory = vi
+      .fn<(range: UsageHistoryRange) => Promise<UsageHistoryResponse>>()
+      .mockResolvedValueOnce(populatedHistory)
+      .mockResolvedValueOnce(emptyHistory('24h'));
+    const onClearUsageHistory = vi.fn(async () => {
+      historyHandler?.();
+    });
+    renderPage({ getUsageHistory, listenForUsageHistory, onClearUsageHistory });
+    await screen.findByText('Weekly limit');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear history' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => expect(getUsageHistory).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('No history yet')).toBeTruthy();
+  });
+
+  it('does not let an in-flight read restore data after history is cleared without an event listener', async () => {
+    let finishInitialRead: ((history: UsageHistoryResponse) => void) | undefined;
+    const getUsageHistory = vi.fn(
+      () =>
+        new Promise<UsageHistoryResponse>((resolve) => {
+          finishInitialRead = resolve;
+        }),
+    );
+    const { onClearUsageHistory } = renderPage({ getUsageHistory });
+    await waitFor(() => expect(getUsageHistory).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear history' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(onClearUsageHistory).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('No history yet')).toBeTruthy();
+
+    await act(async () => finishInitialRead?.(populatedHistory));
+    expect(screen.queryByText('Weekly limit')).toBeNull();
+    expect(screen.getByText('No history yet')).toBeTruthy();
   });
 
   it('subscribes before the initial read and ignores an older read after an update event', async () => {
@@ -255,5 +335,32 @@ describe('TrendsPage', () => {
     await act(async () => finishInitialRead?.(emptyHistory('24h')));
     expect(screen.getByText('Weekly limit')).toBeTruthy();
     expect(screen.queryByText('No history yet')).toBeNull();
+  });
+
+  it('ignores a stale request failure after a newer history event succeeds', async () => {
+    let historyHandler: (() => void) | undefined;
+    let failInitialRead: ((error: Error) => void) | undefined;
+    const listenForUsageHistory = vi.fn(async (handler: () => void) => {
+      historyHandler = handler;
+      return () => undefined;
+    });
+    const getUsageHistory = vi
+      .fn<(range: UsageHistoryRange) => Promise<UsageHistoryResponse>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<UsageHistoryResponse>((_resolve, reject) => {
+            failInitialRead = reject;
+          }),
+      )
+      .mockResolvedValueOnce(populatedHistory);
+
+    renderPage({ getUsageHistory, listenForUsageHistory });
+    await waitFor(() => expect(getUsageHistory).toHaveBeenCalledTimes(1));
+    await act(async () => historyHandler?.());
+    expect(await screen.findByText('Weekly limit')).toBeTruthy();
+
+    await act(async () => failInitialRead?.(new Error('stale private failure')));
+    expect(screen.queryByText('Unable to load usage history.')).toBeNull();
+    expect(screen.getByText('Weekly limit')).toBeTruthy();
   });
 });

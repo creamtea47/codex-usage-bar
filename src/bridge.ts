@@ -7,6 +7,7 @@ import type {
   DashboardSnapshot,
   NotificationEnableResult,
   Settings,
+  SettingsUiFaultCode,
   UsageHistoryRange,
   UsageHistoryResponse,
 } from './types';
@@ -24,6 +25,8 @@ export const usageBridge = {
     invoke<UsageHistoryResponse>('get_usage_history', { range }),
   setHistoryEnabled: (enabled: boolean) => invoke<Settings>('set_history_enabled', { enabled }),
   clearUsageHistory: () => invoke<void>('clear_usage_history'),
+  reportSettingsUiFault: (code: SettingsUiFaultCode) =>
+    invoke<void>('report_settings_ui_fault', { faultCode: code }),
   getDiagnostics: () => invoke<string>('get_diagnostics'),
   getAutostart: () => invoke<boolean>('get_autostart'),
   setAutostart: (enabled: boolean) => invoke<boolean>('set_autostart', { enabled }),

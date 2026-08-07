@@ -46,7 +46,7 @@ describe('QuotaWindowCard', () => {
     expect(screen.getByRole('progressbar', { name: '剩余 72%' }).getAttribute('aria-valuenow')).toBe('72');
   });
 
-  it('does not show a pace marker or reliable forecast for short windows', () => {
+  it('does not show a pace marker or forecast inside short-window cards', () => {
     render(
       <QuotaWindowCard
         quotaWindow={{
@@ -78,10 +78,10 @@ describe('QuotaWindowCard', () => {
       <QuotaWindowCard quotaWindow={quotaWindow} now={Date.now()} refreshedAt="2030-01-08T00:00:00Z" />,
     );
 
-    expect(screen.getByText('剩余 2分 0秒')).toBeTruthy();
+    expect(screen.getByText('剩余 2分0秒')).toBeTruthy();
     vi.advanceTimersByTime(1_000);
     rerender(<QuotaWindowCard quotaWindow={quotaWindow} now={Date.now()} refreshedAt="2030-01-08T00:00:00Z" />);
-    expect(screen.getByText('剩余 1分 59秒')).toBeTruthy();
+    expect(screen.getByText('剩余 1分59秒')).toBeTruthy();
 
     vi.advanceTimersByTime(119_000);
     rerender(<QuotaWindowCard quotaWindow={quotaWindow} now={Date.now()} refreshedAt="2030-01-08T00:00:00Z" />);
@@ -97,13 +97,13 @@ describe('QuotaWindowCard', () => {
       <QuotaWindowCard quotaWindow={quotaWindow} now={Date.now()} refreshedAt="2030-01-08T00:00:00Z" />,
     );
 
-    expect(screen.getByText('剩余 1小时 0分 0秒')).toBeTruthy();
+    expect(screen.getByText('剩余 1小时0分0秒')).toBeTruthy();
     vi.advanceTimersByTime(1_000);
     rerender(<QuotaWindowCard quotaWindow={quotaWindow} now={Date.now()} refreshedAt="2030-01-08T00:00:00Z" />);
-    expect(screen.getByText('剩余 59分 59秒')).toBeTruthy();
+    expect(screen.getByText('剩余 59分59秒')).toBeTruthy();
   });
 
-  it('localizes fallback labels, reset copy, accessibility labels, and reliable forecasts', async () => {
+  it('localizes fallback labels, reset copy, accessibility labels, and keeps the pace suggestion', async () => {
     await applyLanguagePreference('en');
     render(
       <QuotaWindowCard
@@ -125,8 +125,9 @@ describe('QuotaWindowCard', () => {
 
     expect(screen.getByText('Weekly limit')).toBeTruthy();
     expect(screen.getByText('28% used')).toBeTruthy();
-    expect(screen.getByText('Likely lasts until reset')).toBeTruthy();
-    expect(screen.queryByText(/Suggested ≥/)).toBeNull();
+    expect(screen.getByText('Suggested ≥ 57%')).toBeTruthy();
+    expect(screen.queryByText('Likely lasts until reset')).toBeNull();
+    expect(screen.getByText(/^Resets \d{2}\/\d{2} \d{2}:\d{2} \w{3}$/)).toBeTruthy();
     expect(screen.getByRole('progressbar', { name: '72% remaining' })).toBeTruthy();
     expect(screen.getByRole('article', { name: 'Weekly limit, 72% remaining' })).toBeTruthy();
   });

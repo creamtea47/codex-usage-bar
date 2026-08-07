@@ -51,6 +51,27 @@ export function formatDateTime(value: string | null, locale?: string): string {
   }).format(date);
 }
 
+/**
+ * 将额度重置时间固定为“月/日 时:分 星期”顺序。
+ * 这里不复用通用日期布局，避免最小浮窗宽度下因系统语言差异产生换行或顺序漂移。
+ */
+export function formatResetDateTime(value: string | null, locale?: string): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+
+  const language = formatLanguage(locale);
+  const weekdays =
+    language === 'zh-CN'
+      ? ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+      : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hour = String(date.getHours()).padStart(2, '0');
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  return `${month}/${day} ${hour}:${minute} ${weekdays[date.getDay()]}`;
+}
+
 export function formatClock(value: string | null, locale?: string): string {
   if (!value) return '—';
   const date = new Date(value);

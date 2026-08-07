@@ -5,6 +5,7 @@ import {
   formatCountdownDuration,
   formatDateTime,
   formatDuration,
+  formatResetDateTime,
   resetCountdownSeconds,
   statusLabel,
 } from './format';
@@ -35,9 +36,17 @@ describe('language resolution and localized formatting', () => {
 
     await applyLanguagePreference('zh-CN');
     expect(formatDuration(90)).toBe('1分');
-    expect(formatCountdownDuration(90)).toBe('1分 30秒');
-    expect(formatCountdownDuration(3_661)).toBe('1小时 1分 1秒');
+    expect(formatCountdownDuration(90)).toBe('1分30秒');
+    expect(formatCountdownDuration(3_661)).toBe('1小时1分1秒');
     expect(statusLabel('ready')).toBe('额度已同步');
+  });
+
+  it('formats reset timestamps with a fixed weekday suffix and handles midnight safely', () => {
+    expect(formatResetDateTime('2030-01-08T12:57:00', 'zh-CN')).toBe('01/08 12:57 周二');
+    expect(formatResetDateTime('2030-01-08T12:57:00', 'en')).toBe('01/08 12:57 Tue');
+    expect(formatResetDateTime('2030-01-06T00:00:00', 'zh-CN')).toBe('01/06 00:00 周日');
+    expect(formatResetDateTime('not-a-date', 'zh-CN')).toBe('—');
+    expect(formatResetDateTime(null, 'en')).toBe('—');
   });
 });
 

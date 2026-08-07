@@ -32,7 +32,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Duration as ChronoDuration, Local, Timelike, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt::Write as _,
@@ -61,9 +61,12 @@ const AUTO_UPDATE_CHECK_START_DELAY: Duration = Duration::from_secs(8);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 // 悬浮卡的一张额度窗口尺寸。260px 恰好容纳成功态的一张额度卡，避免底部无效留白；
-// 窗口数量增加时只扩展高度，最高后由前端滚动额度区域。
+// 窗口数量或可靠建议增加时只扩展高度，最高后由前端分别滚动额度与建议区域。
 const MAIN_COMPACT_HEIGHT: u32 = 260;
 const MAIN_COMPACT_HEIGHT_PER_EXTRA_WINDOW: u32 = 145;
+const MAIN_ADVICE_SECTION_BASE_HEIGHT: u32 = 16;
+const MAIN_ADVICE_LINE_HEIGHT: u32 = 20;
+const MAIN_ADVICE_VISIBLE_LINE_LIMIT: usize = 3;
 const MAIN_COMPACT_MAX_HEIGHT: u32 = 560;
 const MAIN_MIN_WIDTH: u32 = 340;
 const MAIN_MIN_HEIGHT: u32 = 260;
@@ -509,7 +512,7 @@ impl AppState {
         Ok(())
     }
 
-    /// 自动模式只按窗口数量收敛高度，不触碰用户的位置和宽度。
+    /// 自动模式只按窗口与可靠建议数量收敛高度，不触碰用户的位置和宽度。
     fn apply_auto_main_height(&self, app: &AppHandle, snapshot: &DashboardSnapshot) {
         let (size_mode, locked) = {
             let stored = self.stored_settings();
@@ -530,7 +533,8 @@ impl AppState {
         let Ok(scale_factor) = window.scale_factor() else {
             return;
         };
-        let target_height = compact_height(snapshot.quota_windows.len());
+        let advice_count = reliable_advice_count(snapshot);
+        let target_height = compact_height(snapshot.quota_windows.len(), advice_count);
         // tauri.conf.json 的尺寸是逻辑像素；自动高度必须保持同一单位，
         // 否则 125%/150% DPI 下会把 260 错当作物理像素而压扁主卡。
         let current_logical = current_size.to_logical::<f64>(scale_factor);
@@ -543,7 +547,7 @@ impl AppState {
         }
 
         if window.set_size(Size::Logical(target_size)).is_err() {
-            log::warn!("无法按额度窗口数量更新主悬浮卡高度。");
+            log::warn!("更新主悬浮卡自动高度失败：类别=window-size。");
         }
     }
 }
@@ -746,6 +750,21 @@ enum HistoryResponseStorageStatus {
     Unavailable,
 }
 
+/// 设置页只能上报预先约定的脱敏故障类别，禁止把异常文本、路径或页面数据写入日志。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum SettingsUiFaultCode {
+    TrendsRenderFailed,
+}
+
+impl SettingsUiFaultCode {
+    fn as_log_code(self) -> &'static str {
+        match self {
+            Self::TrendsRenderFailed => "trends-render-failed",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageHistorySeriesResponse {
@@ -810,6 +829,16 @@ fn has_exact_window_label(actual_label: &str, expected_label: &str) -> bool {
     actual_label == expected_label
 }
 
+fn validate_settings_ui_fault_report(
+    actual_label: &str,
+    fault_code: SettingsUiFaultCode,
+) -> Result<&'static str, String> {
+    if !has_exact_window_label(actual_label, SETTINGS_WINDOW_LABEL) {
+        return Err("当前窗口无权执行该操作。".to_owned());
+    }
+    Ok(fault_code.as_log_code())
+}
+
 fn is_known_window_label(label: &str) -> bool {
     matches!(label, MAIN_WINDOW_LABEL | SETTINGS_WINDOW_LABEL)
 }
@@ -832,23 +861,7 @@ async fn refresh_dashboard(
 ) -> Result<DashboardSnapshot, String> {
     require_window_label(&window, MAIN_WINDOW_LABEL)?;
     let result = state.refresh_dashboard().await;
-    if result.should_emit && result.was_successful {
-        send_usage_notifications(
-            &app,
-            &state,
-            &result.snapshot,
-            result.history_effect.account_changed,
-        );
-    }
-    if result.should_emit && result.history_effect.changed {
-        emit_usage_history_updated(&app);
-    }
-    let snapshot = result.snapshot;
-    if result.should_emit {
-        state.apply_auto_main_height(&app, &snapshot);
-        emit_dashboard(&app, snapshot.clone());
-    }
-    Ok(snapshot)
+    Ok(finalize_refresh_result(&app, &state, result).await)
 }
 
 #[tauri::command]
@@ -1079,18 +1092,21 @@ async fn set_history_enabled(
     let schedule_guard = state.schedule_guard.lock().await;
     let mut settings = state.current_settings();
     settings.history_enabled = enabled;
-    let saved = state.save_preferences(settings)?;
+    let saved = state.save_preferences(settings).inspect_err(|_| {
+        log::warn!("更新本地趋势采集状态失败：类别=settings-storage。");
+    })?;
     if !enabled {
         state.clear_snapshot_forecasts().await;
     }
     let snapshot = state.reschedule_from_now_locked().await;
     drop(schedule_guard);
-    drop(refresh_barrier);
     if app.emit("settings-updated", saved.clone()).is_err() {
-        log::warn!("无法广播本地趋势采集设置。");
+        log::warn!("广播本地趋势采集设置失败：类别=event。");
     }
+    state.apply_auto_main_height(&app, &snapshot);
     emit_dashboard(&app, snapshot);
-    emit_usage_history_updated(&app);
+    drop(refresh_barrier);
+    log::info!("本地趋势采集状态已更新：enabled={enabled}。");
     Ok(saved)
 }
 
@@ -1114,12 +1130,26 @@ async fn clear_usage_history(
         } else {
             HistoryStorageStatus::Unavailable
         };
-        saved.map_err(|_| "historyStorageUnavailable".to_owned())?;
+        saved.map_err(|_| {
+            log::warn!("清除本地趋势历史失败：类别=storage。");
+            "historyStorageUnavailable".to_owned()
+        })?;
     }
     let snapshot = state.clear_snapshot_forecasts().await;
+    state.apply_auto_main_height(&app, &snapshot);
     emit_dashboard(&app, snapshot);
     emit_usage_history_updated(&app);
     log::info!("用户已清除本地趋势历史。");
+    Ok(())
+}
+
+#[tauri::command]
+fn report_settings_ui_fault(
+    fault_code: SettingsUiFaultCode,
+    window: WebviewWindow,
+) -> Result<(), String> {
+    let stable_code = validate_settings_ui_fault_report(window.label(), fault_code)?;
+    log::warn!("设置界面报告故障：类别={stable_code}。");
     Ok(())
 }
 
@@ -1486,6 +1516,27 @@ fn start_update_check_loop(app: AppHandle, state: Arc<AppState>) {
 
 async fn refresh_and_emit(app: &AppHandle, state: &AppState) {
     let result = state.refresh_dashboard().await;
+    let _ = finalize_refresh_result(app, state, result).await;
+}
+
+fn refresh_result_is_current(result: &RefreshResult, current: &DashboardSnapshot) -> bool {
+    result.should_emit && result.snapshot == *current
+}
+
+/**
+ * 把刷新结果的广播纳入 refresh_guard 提交序。
+ * 历史开关或清除若已先更新当前快照，旧刷新只能返回最新快照，不能重新发布旧预测与旧高度。
+ */
+async fn finalize_refresh_result(
+    app: &AppHandle,
+    state: &AppState,
+    result: RefreshResult,
+) -> DashboardSnapshot {
+    let _publish_barrier = state.refresh_guard.lock().await;
+    let current = state.current_snapshot().await;
+    if !refresh_result_is_current(&result, &current) {
+        return current;
+    }
     if result.should_emit && result.was_successful {
         send_usage_notifications(
             app,
@@ -1500,8 +1551,9 @@ async fn refresh_and_emit(app: &AppHandle, state: &AppState) {
     let snapshot = result.snapshot;
     if result.should_emit {
         state.apply_auto_main_height(app, &snapshot);
-        emit_dashboard(app, snapshot);
+        emit_dashboard(app, snapshot.clone());
     }
+    snapshot
 }
 
 fn emit_usage_history_updated(app: &AppHandle) {
@@ -1523,12 +1575,47 @@ fn emit_dashboard(app: &AppHandle, snapshot: DashboardSnapshot) {
     }
 }
 
-fn compact_height(window_count: usize) -> u32 {
-    MAIN_COMPACT_HEIGHT
-        .saturating_add(
-            (window_count.saturating_sub(1) as u32)
-                .saturating_mul(MAIN_COMPACT_HEIGHT_PER_EXTRA_WINDOW),
+fn reliable_advice_count(snapshot: &DashboardSnapshot) -> usize {
+    snapshot
+        .quota_windows
+        .iter()
+        .filter(|window| {
+            let has_valid_period = matches!(
+                (window.start_at.as_ref(), window.reset_at.as_ref()),
+                (Some(start), Some(reset)) if reset > start
+            );
+            let has_reliable_forecast = matches!(
+                window.forecast.as_ref(),
+                Some(QuotaForecast {
+                    status: ModelForecastStatus::LastsUntilReset,
+                    ..
+                }) | Some(QuotaForecast {
+                    status: ModelForecastStatus::ExhaustsBeforeReset,
+                    exhausts_at: Some(_),
+                    ..
+                })
+            );
+            window.show_pace_marker && has_valid_period && has_reliable_forecast
+        })
+        .count()
+}
+
+fn compact_height(window_count: usize, advice_count: usize) -> u32 {
+    let extra_window_height = u32::try_from(window_count.saturating_sub(1))
+        .unwrap_or(u32::MAX)
+        .saturating_mul(MAIN_COMPACT_HEIGHT_PER_EXTRA_WINDOW);
+    let advice_height = if advice_count == 0 {
+        0
+    } else {
+        MAIN_ADVICE_SECTION_BASE_HEIGHT.saturating_add(
+            u32::try_from(advice_count.min(MAIN_ADVICE_VISIBLE_LINE_LIMIT))
+                .unwrap_or(MAIN_ADVICE_VISIBLE_LINE_LIMIT as u32)
+                .saturating_mul(MAIN_ADVICE_LINE_HEIGHT),
         )
+    };
+    MAIN_COMPACT_HEIGHT
+        .saturating_add(extra_window_height)
+        .saturating_add(advice_height)
         .min(MAIN_COMPACT_MAX_HEIGHT)
 }
 
@@ -1709,6 +1796,7 @@ pub fn run() {
             get_usage_history,
             set_history_enabled,
             clear_usage_history,
+            report_settings_ui_fault,
             get_diagnostics,
             open_settings_window,
             mark_main_size_manual,
@@ -1748,13 +1836,125 @@ mod tests {
 
     #[test]
     fn compact_height_grows_by_window_and_stops_at_maximum() {
-        assert_eq!(compact_height(0), MAIN_COMPACT_HEIGHT);
-        assert_eq!(compact_height(1), MAIN_COMPACT_HEIGHT);
+        assert_eq!(compact_height(0, 0), MAIN_COMPACT_HEIGHT);
+        assert_eq!(compact_height(1, 0), MAIN_COMPACT_HEIGHT);
         assert_eq!(
-            compact_height(2),
+            compact_height(2, 0),
             MAIN_COMPACT_HEIGHT + MAIN_COMPACT_HEIGHT_PER_EXTRA_WINDOW
         );
-        assert_eq!(compact_height(9), MAIN_COMPACT_MAX_HEIGHT);
+        assert_eq!(
+            compact_height(1, 1),
+            MAIN_COMPACT_HEIGHT + MAIN_ADVICE_SECTION_BASE_HEIGHT + MAIN_ADVICE_LINE_HEIGHT
+        );
+        assert_eq!(
+            compact_height(1, 4),
+            MAIN_COMPACT_HEIGHT
+                + MAIN_ADVICE_SECTION_BASE_HEIGHT
+                + MAIN_ADVICE_LINE_HEIGHT * MAIN_ADVICE_VISIBLE_LINE_LIMIT as u32
+        );
+        assert_eq!(compact_height(9, 3), MAIN_COMPACT_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn stale_refresh_result_cannot_publish_after_a_newer_snapshot_commit() {
+        let snapshot = DashboardSnapshot::default();
+        let current_result = RefreshResult {
+            snapshot: snapshot.clone(),
+            was_successful: true,
+            should_emit: true,
+            history_effect: HistoryRefreshEffect::default(),
+        };
+        assert!(refresh_result_is_current(&current_result, &snapshot));
+
+        let mut newer_snapshot = snapshot.clone();
+        newer_snapshot.status = DashboardStatus::Stale;
+        assert!(!refresh_result_is_current(&current_result, &newer_snapshot));
+
+        let reused_result = RefreshResult {
+            should_emit: false,
+            ..current_result
+        };
+        assert!(!refresh_result_is_current(&reused_result, &snapshot));
+    }
+
+    #[test]
+    fn reliable_advice_requires_a_long_valid_period_and_supported_forecast() {
+        let start_at = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let reset_at = DateTime::parse_from_rfc3339("2030-01-08T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let reliable = crate::models::QuotaWindow {
+            id: "weekly".to_owned(),
+            label: None,
+            fallback_label: QuotaFallbackLabel::Weekly,
+            remaining_percent: 75,
+            used_percent: 25,
+            window_seconds: 7 * 24 * 60 * 60,
+            reset_at: Some(reset_at),
+            reset_after_seconds: 24 * 60 * 60,
+            start_at: Some(start_at),
+            show_pace_marker: true,
+            forecast: Some(QuotaForecast {
+                status: ModelForecastStatus::LastsUntilReset,
+                exhausts_at: None,
+                sample_count: 6,
+                observed_span_seconds: 3_600,
+                consumed_percent: 4.0,
+            }),
+        };
+        let mut snapshot = DashboardSnapshot {
+            quota_windows: vec![reliable.clone()],
+            ..DashboardSnapshot::default()
+        };
+        assert_eq!(reliable_advice_count(&snapshot), 1);
+
+        snapshot.quota_windows.push(crate::models::QuotaWindow {
+            forecast: Some(QuotaForecast {
+                status: ModelForecastStatus::ExhaustsBeforeReset,
+                exhausts_at: Some(start_at + ChronoDuration::days(2)),
+                sample_count: 6,
+                observed_span_seconds: 3_600,
+                consumed_percent: 4.0,
+            }),
+            ..reliable.clone()
+        });
+        assert_eq!(reliable_advice_count(&snapshot), 2);
+
+        snapshot.quota_windows.extend([
+            crate::models::QuotaWindow {
+                show_pace_marker: false,
+                ..reliable.clone()
+            },
+            crate::models::QuotaWindow {
+                reset_at: Some(start_at),
+                ..reliable.clone()
+            },
+            crate::models::QuotaWindow {
+                forecast: Some(QuotaForecast {
+                    status: ModelForecastStatus::ExhaustsBeforeReset,
+                    exhausts_at: None,
+                    sample_count: 6,
+                    observed_span_seconds: 3_600,
+                    consumed_percent: 4.0,
+                }),
+                ..reliable
+            },
+        ]);
+        assert_eq!(reliable_advice_count(&snapshot), 2);
+    }
+
+    #[test]
+    fn settings_ui_fault_reporting_is_fixed_and_window_scoped() {
+        let fault_code: SettingsUiFaultCode =
+            serde_json::from_str(r#""trends-render-failed""#).unwrap();
+        assert_eq!(
+            validate_settings_ui_fault_report(SETTINGS_WINDOW_LABEL, fault_code),
+            Ok("trends-render-failed")
+        );
+        assert!(validate_settings_ui_fault_report(MAIN_WINDOW_LABEL, fault_code).is_err());
+        assert!(serde_json::from_str::<SettingsUiFaultCode>(r#""raw-error-text""#).is_err());
     }
 
     #[test]
@@ -1859,6 +2059,7 @@ mod tests {
         assert_eq!(
             opener["allow"],
             serde_json::json!([
+                {"url": "https://github.com/creamtea47/codex-usage-bar"},
                 {"url": "https://github.com/creamtea47/codex-usage-bar/releases"},
                 {"url": "https://github.com/creamtea47/codex-usage-bar/releases/**"},
                 {"url": "https://github.com/creamtea47/codex-usage-bar/issues/new"},

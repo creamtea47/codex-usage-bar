@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from './App';
@@ -299,6 +299,104 @@ describe('App', () => {
     expect(screen.getByText('j***@example.com · Plus')).toBeTruthy();
     expect(screen.getByText(/下次自动刷新 \d+:\d{2} · 更新于/)).toBeTruthy();
     expect(screen.queryByText('数据已更新')).toBeNull();
+  });
+
+  it('shows only reliable long-cycle forecasts in an ordered, three-line footer', async () => {
+    const baseWindow = readySnapshot.quotaWindows[0];
+    const forecast = {
+      status: 'lastsUntilReset' as const,
+      exhaustsAt: null,
+      sampleCount: 6,
+      observedSpanSeconds: 3_600,
+      consumedPercent: 4,
+    };
+    prepareBridge({
+      ...readySnapshot,
+      quotaWindows: [
+        { ...baseWindow, id: 'weekly', label: '周限额', forecast },
+        { ...baseWindow, id: 'short', label: '短周期限额', showPaceMarker: false, forecast },
+        {
+          ...baseWindow,
+          id: 'monthly',
+          label: '月限额',
+          forecast: { ...forecast, status: 'exhaustsBeforeReset', exhaustsAt: '2030-01-07T10:30:00' },
+        },
+        { ...baseWindow, id: 'stable', label: '稳定额度', forecast: { ...forecast, status: 'stable' } },
+        {
+          ...baseWindow,
+          id: 'invalid',
+          label: '无效预测',
+          forecast: { ...forecast, status: 'exhaustsBeforeReset', exhaustsAt: 'invalid' },
+        },
+        { ...baseWindow, id: 'invalid-cycle', label: '无效周期', startAt: 'invalid', forecast },
+        {
+          ...baseWindow,
+          id: 'inverted-cycle',
+          label: '倒置周期',
+          startAt: '2030-01-09T00:00:00Z',
+          resetAt: '2030-01-08T00:00:00Z',
+          forecast,
+        },
+        { ...baseWindow, id: 'annual', label: '年限额', forecast },
+        {
+          ...baseWindow,
+          id: 'quarterly',
+          label: '季度限额',
+          forecast: { ...forecast, status: 'exhaustsBeforeReset', exhaustsAt: '2030-01-07T11:45:00' },
+        },
+      ],
+    });
+    const { container } = render(<App />);
+    await screen.findByText('j***@example.com · Plus');
+
+    const suggestions = screen.getByRole('region', { name: '额度预测建议' });
+    const suggestionRows = Array.from(suggestions.querySelectorAll('[data-forecast-suggestion]'));
+    expect(suggestionRows.map((row) => row.textContent)).toEqual([
+      '建议（周限额）：预计可撑到重置',
+      '建议（月限额）：预计 01/07 10:30 耗尽',
+      '建议（年限额）：预计可撑到重置',
+      '建议（季度限额）：预计 01/07 11:45 耗尽',
+    ]);
+    expect(getComputedStyle(suggestions).height).toBe('76px');
+    expect(getComputedStyle(suggestions).overflowY).toBe('auto');
+    expect(getComputedStyle(suggestionRows[0]).whiteSpace).toBe('nowrap');
+    expect(getComputedStyle(suggestionRows[0]).textOverflow).toBe('ellipsis');
+    fireEvent.mouseOver(suggestionRows[0]);
+    expect((await screen.findByRole('tooltip')).textContent).toBe('建议（周限额）：预计可撑到重置');
+    expect(screen.queryByText(/建议（短周期限额）/)).toBeNull();
+    expect(screen.queryByText(/建议（稳定额度）/)).toBeNull();
+    expect(screen.queryByText(/建议（无效预测）/)).toBeNull();
+    expect(screen.queryByText(/建议（无效周期）/)).toBeNull();
+    expect(screen.queryByText(/建议（倒置周期）/)).toBeNull();
+
+    const weeklyCard = within(container.querySelector('article[aria-label^="周限额"]')!);
+    expect(weeklyCard.queryByText('预计可撑到重置')).toBeNull();
+    expect(weeklyCard.getByText(/建议控量 ≥ \d+%/)).toBeTruthy();
+  });
+
+  it('removes the fixed forecast footer when a dashboard event clears forecasts', async () => {
+    let dashboardHandler: ((snapshot: DashboardSnapshot) => void) | undefined;
+    const forecast = {
+      status: 'lastsUntilReset' as const,
+      exhaustsAt: null,
+      sampleCount: 6,
+      observedSpanSeconds: 3_600,
+      consumedPercent: 4,
+    };
+    const forecastSnapshot = {
+      ...readySnapshot,
+      quotaWindows: readySnapshot.quotaWindows.map((quotaWindow) => ({ ...quotaWindow, forecast })),
+    };
+    prepareBridge(forecastSnapshot);
+    bridgeMocks.listenForDashboard.mockImplementation(async (handler: (snapshot: DashboardSnapshot) => void) => {
+      dashboardHandler = handler;
+      return () => undefined;
+    });
+    render(<App />);
+
+    expect(await screen.findByRole('region', { name: '额度预测建议' })).toBeTruthy();
+    await act(async () => dashboardHandler?.(readySnapshot));
+    expect(screen.queryByRole('region', { name: '额度预测建议' })).toBeNull();
   });
 
   it('falls back to the plan summary when Rust has no masked email', async () => {

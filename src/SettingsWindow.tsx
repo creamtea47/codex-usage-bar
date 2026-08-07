@@ -35,7 +35,6 @@ import {
   Snackbar,
   Stack,
   Switch,
-  TextField,
   ThemeProvider,
   Toolbar,
   Typography,
@@ -51,7 +50,9 @@ import { useTranslation } from 'react-i18next';
 import { usageBridge } from './bridge';
 import { formatDateTime } from './format';
 import { applyLanguagePreference, resolveSupportedLanguage } from './i18n';
+import NotificationsPage from './NotificationsPage';
 import { createUsageTheme } from './theme';
+import TrendsErrorBoundary from './TrendsErrorBoundary';
 import {
   defaultSettings,
   type AppUpdateInfo,
@@ -64,12 +65,12 @@ import {
 
 const TrendsPage = lazy(() => import('./TrendsPage'));
 
-type SettingsSection = 'display' | 'data' | 'trends' | 'startup' | 'about';
+type SettingsSection = 'display' | 'data' | 'notifications' | 'trends' | 'startup' | 'about';
 type SettingsLoadState = 'loading' | 'ready' | 'error';
 type SettingsUpdater = Partial<Settings> | ((current: Settings) => Settings);
 type FeedbackKey =
-  | 'settings.data.notifications.permissionDenied'
-  | 'settings.data.notifications.permissionUnavailable'
+  | 'settings.notifications.permissionDenied'
+  | 'settings.notifications.permissionUnavailable'
   | 'settings.feedback.loadFailed'
   | 'settings.feedback.nativeThemeFailed'
   | 'settings.feedback.saved'
@@ -87,14 +88,15 @@ type FeedbackKey =
   | 'settings.feedback.updateIncomplete'
   | 'settings.feedback.updateBusy'
   | 'settings.feedback.noPendingUpdate'
-  | 'settings.feedback.notificationsEnabled'
-  | 'settings.feedback.notificationsDisabled'
-  | 'settings.feedback.notificationTestSent'
-  | 'settings.feedback.notificationTestFailed'
+  | 'settings.notifications.feedback.enabled'
+  | 'settings.notifications.feedback.disabled'
+  | 'settings.notifications.feedback.testSent'
+  | 'settings.notifications.feedback.testFailed'
   | 'settings.feedback.diagnosticsCopied'
   | 'settings.feedback.diagnosticsCopyFailed'
   | 'settings.feedback.issueOpenFailed'
-  | 'settings.feedback.releaseNotesOpenFailed';
+  | 'settings.feedback.releaseNotesOpenFailed'
+  | 'settings.feedback.repositoryOpenFailed';
 
 interface Feedback {
   key: FeedbackKey;
@@ -102,6 +104,7 @@ interface Feedback {
 }
 
 const drawerWidth = 208;
+const repositoryPageUrl = 'https://github.com/creamtea47/codex-usage-bar';
 const releasePageUrl = 'https://github.com/creamtea47/codex-usage-bar/releases';
 const issuePageUrl = 'https://github.com/creamtea47/codex-usage-bar/issues/new/choose';
 const releaseVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
@@ -113,6 +116,7 @@ const navigation: Array<{
   labelKey:
     | 'settings.nav.display'
     | 'settings.nav.data'
+    | 'settings.nav.notifications'
     | 'settings.nav.trends'
     | 'settings.nav.startup'
     | 'settings.nav.about';
@@ -120,6 +124,11 @@ const navigation: Array<{
 }> = [
   { id: 'display', labelKey: 'settings.nav.display', icon: <PaletteOutlinedIcon fontSize="small" /> },
   { id: 'data', labelKey: 'settings.nav.data', icon: <RefreshRoundedIcon fontSize="small" /> },
+  {
+    id: 'notifications',
+    labelKey: 'settings.nav.notifications',
+    icon: <NotificationsOutlinedIcon fontSize="small" />,
+  },
   { id: 'trends', labelKey: 'settings.nav.trends', icon: <QueryStatsRoundedIcon fontSize="small" /> },
   { id: 'startup', labelKey: 'settings.nav.startup', icon: <RocketLaunchOutlinedIcon fontSize="small" /> },
   { id: 'about', labelKey: 'settings.nav.about', icon: <InfoOutlinedIcon fontSize="small" /> },
@@ -142,11 +151,6 @@ function resolveTheme(theme: Theme, prefersDark: boolean): Exclude<Theme, 'syste
 function safeUpdateErrorKey(error: unknown, fallback: FeedbackKey): FeedbackKey {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
   return knownUpdateErrors.find(([safeMessage]) => message.includes(safeMessage))?.[1] ?? fallback;
-}
-
-function clampPercent(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.min(100, Math.max(0, Math.round(value)));
 }
 
 function releaseNotesUrl(version: string | null | undefined): string {
@@ -341,18 +345,18 @@ export default function SettingsWindow() {
         setFeedback({
           key:
             result.permission === 'denied'
-              ? 'settings.data.notifications.permissionDenied'
-              : 'settings.data.notifications.permissionUnavailable',
+              ? 'settings.notifications.permissionDenied'
+              : 'settings.notifications.permissionUnavailable',
           severity: 'warning',
         });
       } else {
         setFeedback({
-          key: enabled ? 'settings.feedback.notificationsEnabled' : 'settings.feedback.notificationsDisabled',
+          key: enabled ? 'settings.notifications.feedback.enabled' : 'settings.notifications.feedback.disabled',
           severity: 'success',
         });
       }
     } catch {
-      setFeedback({ key: 'settings.data.notifications.permissionUnavailable', severity: 'error' });
+      setFeedback({ key: 'settings.notifications.permissionUnavailable', severity: 'error' });
     }
   };
 
@@ -371,9 +375,9 @@ export default function SettingsWindow() {
     setIsSendingTestNotification(true);
     try {
       await usageBridge.sendTestNotification();
-      setFeedback({ key: 'settings.feedback.notificationTestSent', severity: 'success' });
+      setFeedback({ key: 'settings.notifications.feedback.testSent', severity: 'success' });
     } catch {
-      setFeedback({ key: 'settings.feedback.notificationTestFailed', severity: 'error' });
+      setFeedback({ key: 'settings.notifications.feedback.testFailed', severity: 'error' });
     } finally {
       setIsSendingTestNotification(false);
     }
@@ -639,191 +643,33 @@ export default function SettingsWindow() {
                   </Stack>
                 </Paper>
 
-                <Paper variant="outlined" sx={{ p: 2 }}>
-                  <Stack spacing={1.5}>
-                    <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                      <NotificationsOutlinedIcon color="primary" />
-                      <Box>
-                        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
-                          {t('settings.data.notifications.title')}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          {t('settings.data.notifications.description')}
-                        </Typography>
-                      </Box>
-                    </Stack>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={settings.notifications.enabled}
-                          disabled={settingsControlsDisabled}
-                          onChange={(event) => void updateNotificationsEnabled(event.target.checked)}
-                        />
-                      }
-                      label={t('settings.data.notifications.enabled')}
-                    />
-                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      {t('settings.data.notifications.enabledDescription')}
-                    </Typography>
-                    <Divider />
-
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={settings.notifications.lowQuotaEnabled}
-                          disabled={settingsControlsDisabled}
-                          onChange={(event) =>
-                            void updateNotificationSettings({ lowQuotaEnabled: event.target.checked })
-                          }
-                        />
-                      }
-                      label={t('settings.data.notifications.lowQuota')}
-                    />
-                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      {t('settings.data.notifications.lowQuotaDescription')}
-                    </Typography>
-                    <TextField
-                      key={`low-quota-${settings.notifications.lowQuotaThresholdPercent}`}
-                      label={t('settings.data.notifications.lowQuotaThreshold')}
-                      size="small"
-                      type="number"
-                      defaultValue={settings.notifications.lowQuotaThresholdPercent}
-                      disabled={settingsControlsDisabled}
-                      onBlur={(event) => {
-                        const value = clampPercent(Number(event.target.value));
-                        event.target.value = String(value);
-                        void updateNotificationSettings({ lowQuotaThresholdPercent: value });
-                      }}
-                      slotProps={{ htmlInput: { min: 0, max: 100, step: 1 } }}
-                    />
-
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={settings.notifications.paceEnabled}
-                          disabled={settingsControlsDisabled}
-                          onChange={(event) => void updateNotificationSettings({ paceEnabled: event.target.checked })}
-                        />
-                      }
-                      label={t('settings.data.notifications.pace')}
-                    />
-                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      {t('settings.data.notifications.paceDescription')}
-                    </Typography>
-                    <TextField
-                      key={`pace-${settings.notifications.paceDeficitThresholdPercent}`}
-                      label={t('settings.data.notifications.paceThreshold')}
-                      size="small"
-                      type="number"
-                      defaultValue={settings.notifications.paceDeficitThresholdPercent}
-                      disabled={settingsControlsDisabled}
-                      onBlur={(event) => {
-                        const value = clampPercent(Number(event.target.value));
-                        event.target.value = String(value);
-                        void updateNotificationSettings({ paceDeficitThresholdPercent: value });
-                      }}
-                      slotProps={{ htmlInput: { min: 0, max: 100, step: 1 } }}
-                    />
-
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={settings.notifications.resetEnabled}
-                          disabled={settingsControlsDisabled}
-                          onChange={(event) => void updateNotificationSettings({ resetEnabled: event.target.checked })}
-                        />
-                      }
-                      label={t('settings.data.notifications.reset')}
-                    />
-                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      {t('settings.data.notifications.resetDescription')}
-                    </Typography>
-
-                    <Divider />
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={settings.notifications.quietHoursEnabled}
-                          disabled={settingsControlsDisabled}
-                          onChange={(event) =>
-                            void updateNotificationSettings({ quietHoursEnabled: event.target.checked })
-                          }
-                        />
-                      }
-                      label={t('settings.data.notifications.quietHours')}
-                    />
-                    <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
-                      {t('settings.data.notifications.quietHoursDescription')}
-                    </Typography>
-                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
-                      <TextField
-                        key={`quiet-start-${settings.notifications.quietHoursStart}`}
-                        fullWidth
-                        label={t('settings.data.notifications.quietStart')}
-                        size="small"
-                        type="time"
-                        defaultValue={settings.notifications.quietHoursStart}
-                        disabled={settingsControlsDisabled || !settings.notifications.quietHoursEnabled}
-                        onBlur={(event) => {
-                          const value = event.target.value;
-                          if (/^\d{2}:\d{2}$/.test(value)) {
-                            void updateNotificationSettings({ quietHoursStart: value });
-                          } else event.target.value = settings.notifications.quietHoursStart;
-                        }}
-                        slotProps={{ inputLabel: { shrink: true } }}
-                      />
-                      <TextField
-                        key={`quiet-end-${settings.notifications.quietHoursEnd}`}
-                        fullWidth
-                        label={t('settings.data.notifications.quietEnd')}
-                        size="small"
-                        type="time"
-                        defaultValue={settings.notifications.quietHoursEnd}
-                        disabled={settingsControlsDisabled || !settings.notifications.quietHoursEnabled}
-                        onBlur={(event) => {
-                          const value = event.target.value;
-                          if (/^\d{2}:\d{2}$/.test(value)) {
-                            void updateNotificationSettings({ quietHoursEnd: value });
-                          } else event.target.value = settings.notifications.quietHoursEnd;
-                        }}
-                        slotProps={{ inputLabel: { shrink: true } }}
-                      />
-                    </Stack>
-                    <Button
-                      disabled={
-                        settingsLoadState !== 'ready' ||
-                        !settings.notifications.enabled ||
-                        isSendingTestNotification ||
-                        isSaving
-                      }
-                      startIcon={
-                        isSendingTestNotification ? (
-                          <CircularProgress color="inherit" size={16} />
-                        ) : (
-                          <NotificationsOutlinedIcon />
-                        )
-                      }
-                      sx={{ alignSelf: 'flex-start' }}
-                      variant="outlined"
-                      onClick={() => void sendTestNotification()}
-                    >
-                      {t('settings.data.notifications.test')}
-                    </Button>
-                  </Stack>
-                </Paper>
               </Stack>
             )}
 
+            {activeSection === 'notifications' && (
+              <NotificationsPage
+                notifications={settings.notifications}
+                disabled={settingsControlsDisabled}
+                isSaving={isSaving}
+                isSendingTestNotification={isSendingTestNotification}
+                onSetEnabled={updateNotificationsEnabled}
+                onUpdate={updateNotificationSettings}
+                onSendTest={sendTestNotification}
+              />
+            )}
+
             {activeSection === 'trends' && settingsLoadState === 'ready' && (
-              <Suspense fallback={<LinearProgress aria-label={t('trends.loading')} />}>
-                <TrendsPage
-                  historyEnabled={settings.historyEnabled}
-                  getUsageHistory={usageBridge.getUsageHistory}
-                  onSetHistoryEnabled={updateHistoryEnabled}
-                  onClearUsageHistory={usageBridge.clearUsageHistory}
-                  listenForUsageHistory={usageBridge.listenForUsageHistory}
-                />
-              </Suspense>
+              <TrendsErrorBoundary>
+                <Suspense fallback={<LinearProgress aria-label={t('trends.loading')} />}>
+                  <TrendsPage
+                    historyEnabled={settings.historyEnabled}
+                    getUsageHistory={usageBridge.getUsageHistory}
+                    onSetHistoryEnabled={updateHistoryEnabled}
+                    onClearUsageHistory={usageBridge.clearUsageHistory}
+                    listenForUsageHistory={usageBridge.listenForUsageHistory}
+                  />
+                </Suspense>
+              </TrendsErrorBoundary>
             )}
 
             {activeSection === 'startup' && (
@@ -903,21 +749,31 @@ export default function SettingsWindow() {
                         {t('settings.about.updateAvailable', { version: updateInfo.latestVersion })}
                       </Alert>
                     )}
-                    <Button
-                      disabled={isCheckingUpdate}
-                      startIcon={
-                        isCheckingUpdate ? (
-                          <CircularProgress color="inherit" size={16} />
-                        ) : (
-                          <SystemUpdateAltRoundedIcon />
-                        )
-                      }
-                      sx={{ alignSelf: 'flex-start' }}
-                      variant="contained"
-                      onClick={() => void checkUpdate()}
-                    >
-                      {isCheckingUpdate ? t('settings.about.checking') : t('settings.about.check')}
-                    </Button>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ alignItems: 'flex-start' }}>
+                      <Button
+                        disabled={isCheckingUpdate}
+                        startIcon={
+                          isCheckingUpdate ? (
+                            <CircularProgress color="inherit" size={16} />
+                          ) : (
+                            <SystemUpdateAltRoundedIcon />
+                          )
+                        }
+                        variant="contained"
+                        onClick={() => void checkUpdate()}
+                      >
+                        {isCheckingUpdate ? t('settings.about.checking') : t('settings.about.check')}
+                      </Button>
+                      <Button
+                        startIcon={<LaunchRoundedIcon />}
+                        variant="outlined"
+                        onClick={() =>
+                          void openExternal(repositoryPageUrl, 'settings.feedback.repositoryOpenFailed')
+                        }
+                      >
+                        {t('settings.about.repository')}
+                      </Button>
+                    </Stack>
                   </Stack>
                 </Paper>
 

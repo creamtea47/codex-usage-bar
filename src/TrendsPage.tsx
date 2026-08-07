@@ -414,8 +414,10 @@ export default function TrendsPage({
   const isHistoryListenerReady =
     !listenForUsageHistory ||
     (historyListenerState.source === listenForUsageHistory && historyListenerState.ready);
-  const historyEventVersionRef = useRef(0);
+  const requestGenerationRef = useRef(0);
   const requestReload = useCallback(() => {
+    // 先同步作废所有在途读取，再触发下一次读取，避免旧响应覆盖更新事件后的快照。
+    requestGenerationRef.current += 1;
     setIsLoading(true);
     setLoadFailed(false);
     setReloadVersion((version) => version + 1);
@@ -429,7 +431,6 @@ export default function TrendsPage({
     let unlisten: Unlisten | undefined;
     void listenForUsageHistory(() => {
       if (!disposed) {
-        historyEventVersionRef.current += 1;
         requestReload();
       }
     })
@@ -457,28 +458,27 @@ export default function TrendsPage({
   useEffect(() => {
     if (!isHistoryListenerReady) return undefined;
     let disposed = false;
-    const eventVersionAtStart = historyEventVersionRef.current;
+    const requestGeneration = ++requestGenerationRef.current;
     void getUsageHistory(range)
       .then((response) => {
-        if (!disposed && eventVersionAtStart === historyEventVersionRef.current) {
+        if (!disposed && requestGeneration === requestGenerationRef.current) {
           setHistory(response);
         }
       })
       .catch(() => {
-        if (!disposed && eventVersionAtStart === historyEventVersionRef.current) {
-          setHistory(null);
+        if (!disposed && requestGeneration === requestGenerationRef.current) {
           setLoadFailed(true);
         }
       })
       .finally(() => {
-        if (!disposed && eventVersionAtStart === historyEventVersionRef.current) {
+        if (!disposed && requestGeneration === requestGenerationRef.current) {
           setIsLoading(false);
         }
       });
     return () => {
       disposed = true;
     };
-  }, [getUsageHistory, historyEnabled, isHistoryListenerReady, range, reloadVersion]);
+  }, [getUsageHistory, isHistoryListenerReady, range, reloadVersion]);
 
   const setCollectionEnabled = async (enabled: boolean) => {
     if (isMutating) return;
@@ -489,7 +489,6 @@ export default function TrendsPage({
         key: enabled ? 'trends.collection.enableSuccess' : 'trends.collection.disableSuccess',
         severity: 'success',
       });
-      requestReload();
     } catch {
       setFeedback({ key: 'trends.collection.error', severity: 'error' });
     } finally {
@@ -502,6 +501,10 @@ export default function TrendsPage({
     setIsMutating(true);
     try {
       await onClearUsageHistory();
+      // 即使历史事件监听失败，也要同步作废清除前的在途读取，避免旧快照让已删除数据重新出现。
+      requestGenerationRef.current += 1;
+      setIsLoading(false);
+      setLoadFailed(false);
       setHistory((current) =>
         current
           ? {
@@ -516,7 +519,6 @@ export default function TrendsPage({
       );
       setIsClearDialogOpen(false);
       setFeedback({ key: 'trends.clear.success', severity: 'success' });
-      requestReload();
     } catch {
       setFeedback({ key: 'trends.clear.error', severity: 'error' });
     } finally {
@@ -551,9 +553,8 @@ export default function TrendsPage({
           onChange={(_, nextRange: UsageHistoryRange | null) => {
             if (nextRange) {
               setHistory(null);
-              setIsLoading(true);
-              setLoadFailed(false);
               setRange(nextRange);
+              requestReload();
             }
           }}
           aria-label={translate('trends.range.aria')}

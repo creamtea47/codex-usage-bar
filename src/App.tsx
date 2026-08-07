@@ -25,9 +25,10 @@ import { useEffect, useMemo, useState, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { usageBridge } from './bridge';
-import { formatClock, statusLabel } from './format';
+import { formatClock, formatDateTime, formatDuration, statusLabel } from './format';
 import { applyLanguagePreference, resolveSupportedLanguage } from './i18n';
 import { QuotaWindowCard } from './QuotaWindowCard';
+import { hasValidPaceWindow } from './quotaWindowPresentation';
 import { createUsageTheme } from './theme';
 import {
   defaultSettings,
@@ -198,6 +199,40 @@ export default function App() {
   const dashboardMessage = messageCode
     ? t(isDashboardErrorCode(messageCode) ? dashboardErrorTranslationKeys[messageCode] : 'dashboardError.generic')
     : null;
+  const forecastSuggestions = useMemo(
+    () =>
+      snapshot.quotaWindows.flatMap((quotaWindow) => {
+        // Rust 用节奏标记区分长周期窗口；短周期、采集中和稳定状态不生成底部建议。
+        if (!hasValidPaceWindow(quotaWindow) || !quotaWindow.forecast) return [];
+
+        let forecastMessage: string | null = null;
+        if (quotaWindow.forecast.status === 'lastsUntilReset') {
+          forecastMessage = t('quota.forecast.lastsUntilReset');
+        } else if (
+          quotaWindow.forecast.status === 'exhaustsBeforeReset' &&
+          quotaWindow.forecast.exhaustsAt &&
+          Number.isFinite(new Date(quotaWindow.forecast.exhaustsAt).getTime())
+        ) {
+          forecastMessage = t('quota.forecast.exhaustsAt', {
+            date: formatDateTime(quotaWindow.forecast.exhaustsAt, language),
+          });
+        }
+        if (!forecastMessage) return [];
+
+        const label =
+          quotaWindow.label ??
+          (quotaWindow.fallbackLabel === 'fiveHour'
+            ? t('quota.fallbackLabel.fiveHour')
+            : quotaWindow.fallbackLabel === 'weekly'
+              ? t('quota.fallbackLabel.weekly')
+              : t('quota.fallbackLabel.window', {
+                  duration: formatDuration(quotaWindow.windowSeconds, language),
+                }));
+        const message = t('quota.forecast.suggestion', { label, forecast: forecastMessage });
+        return [{ id: quotaWindow.id, message }];
+      }),
+    [language, snapshot.quotaWindows, t],
+  );
 
   const refresh = async () => {
     if (isRefreshing) return;
@@ -414,6 +449,36 @@ export default function App() {
               </Stack>
             )}
           </Box>
+
+          {forecastSuggestions.length > 0 && (
+            <Box
+              component="section"
+              aria-label={t('quota.forecast.suggestionsAria')}
+              sx={{
+                flex: '0 0 auto',
+                height: 16 + Math.min(forecastSuggestions.length, 3) * 20,
+                overflowX: 'hidden',
+                overflowY: forecastSuggestions.length > 3 ? 'auto' : 'hidden',
+                boxShadow: (theme) => `inset 0 1px 0 ${theme.palette.divider}`,
+                px: 1.75,
+                py: 1,
+              }}
+            >
+              {forecastSuggestions.map(({ id, message }) => (
+                <Tooltip key={id} title={message} placement="top">
+                  <Typography
+                    data-forecast-suggestion
+                    noWrap
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ display: 'block', height: 20, lineHeight: '20px' }}
+                  >
+                    {message}
+                  </Typography>
+                </Tooltip>
+              ))}
+            </Box>
+          )}
         </Paper>
 
         {!settings.lockPosition && (
