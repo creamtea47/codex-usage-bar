@@ -1,6 +1,7 @@
 import BugReportOutlinedIcon from '@mui/icons-material/BugReportOutlined';
 import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import LoopRoundedIcon from '@mui/icons-material/LoopRounded';
 import LaunchRoundedIcon from '@mui/icons-material/LaunchRounded';
 import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined';
 import PaletteOutlinedIcon from '@mui/icons-material/PaletteOutlined';
@@ -51,6 +52,7 @@ import { usageBridge } from './bridge';
 import { formatDateTime } from './format';
 import { applyLanguagePreference, resolveSupportedLanguage } from './i18n';
 import NotificationsPage from './NotificationsPage';
+import QuotaAutoContinuePage from './QuotaAutoContinuePage';
 import { createUsageTheme } from './theme';
 import TrendsErrorBoundary from './TrendsErrorBoundary';
 import {
@@ -59,13 +61,14 @@ import {
   type AppUpdateProgress,
   type Language,
   type NotificationSettings,
+  type QuotaAutoContinueStatus,
   type Settings,
   type Theme,
 } from './types';
 
 const TrendsPage = lazy(() => import('./TrendsPage'));
 
-type SettingsSection = 'display' | 'data' | 'notifications' | 'trends' | 'startup' | 'about';
+type SettingsSection = 'display' | 'data' | 'notifications' | 'trends' | 'quota-auto-continue' | 'startup' | 'about';
 type SettingsLoadState = 'loading' | 'ready' | 'error';
 type SettingsUpdater = Partial<Settings> | ((current: Settings) => Settings);
 type FeedbackKey =
@@ -92,6 +95,11 @@ type FeedbackKey =
   | 'settings.notifications.feedback.disabled'
   | 'settings.notifications.feedback.testSent'
   | 'settings.notifications.feedback.testFailed'
+  | 'settings.quotaAutoContinue.feedback.enabled'
+  | 'settings.quotaAutoContinue.feedback.disabled'
+  | 'settings.quotaAutoContinue.feedback.operationFailed'
+  | 'settings.quotaAutoContinue.feedback.testSent'
+  | 'settings.quotaAutoContinue.feedback.testFailed'
   | 'settings.feedback.diagnosticsCopied'
   | 'settings.feedback.diagnosticsCopyFailed'
   | 'settings.feedback.issueOpenFailed'
@@ -118,6 +126,7 @@ const navigation: Array<{
     | 'settings.nav.data'
     | 'settings.nav.notifications'
     | 'settings.nav.trends'
+    | 'settings.nav.quotaAutoContinue'
     | 'settings.nav.startup'
     | 'settings.nav.about';
   icon: React.ReactElement;
@@ -130,6 +139,11 @@ const navigation: Array<{
     icon: <NotificationsOutlinedIcon fontSize="small" />,
   },
   { id: 'trends', labelKey: 'settings.nav.trends', icon: <QueryStatsRoundedIcon fontSize="small" /> },
+  {
+    id: 'quota-auto-continue',
+    labelKey: 'settings.nav.quotaAutoContinue',
+    icon: <LoopRoundedIcon fontSize="small" />,
+  },
   { id: 'startup', labelKey: 'settings.nav.startup', icon: <RocketLaunchOutlinedIcon fontSize="small" /> },
   { id: 'about', labelKey: 'settings.nav.about', icon: <InfoOutlinedIcon fontSize="small" /> },
 ];
@@ -172,6 +186,9 @@ export default function SettingsWindow() {
   const [isSaving, setIsSaving] = useState(false);
   const [isChangingAutostart, setIsChangingAutostart] = useState(false);
   const [isSendingTestNotification, setIsSendingTestNotification] = useState(false);
+  const [quotaAutoContinueStatus, setQuotaAutoContinueStatus] = useState<QuotaAutoContinueStatus | null>(null);
+  const [isChangingQuotaAutoContinue, setIsChangingQuotaAutoContinue] = useState(false);
+  const [isTestingQuotaAutoContinue, setIsTestingQuotaAutoContinue] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [isCopyingDiagnostics, setIsCopyingDiagnostics] = useState(false);
@@ -221,6 +238,7 @@ export default function SettingsWindow() {
     const removeListeners: Array<() => void> = [];
     let settingsEventReceived = false;
     let updateEventReceived = false;
+    let quotaAutoContinueEventReceived = false;
 
     void (async () => {
       const registerListener = async (listener: Promise<() => void>) => {
@@ -259,14 +277,21 @@ export default function SettingsWindow() {
             }
           }),
         ),
+        registerListener(
+          usageBridge.listenForQuotaAutoContinue((next) => {
+            quotaAutoContinueEventReceived = true;
+            if (!disposed) setQuotaAutoContinueStatus(next);
+          }),
+        ),
       ]);
 
       if (disposed) return;
 
-      const [settingsResult, autostartResult, updateResult] = await Promise.allSettled([
+      const [settingsResult, autostartResult, updateResult, quotaAutoContinueResult] = await Promise.allSettled([
         usageBridge.getSettings(),
         usageBridge.getAutostart(),
         usageBridge.getAppUpdateInfo(),
+        usageBridge.getQuotaAutoContinueStatus(),
       ]);
       if (disposed) return;
 
@@ -285,6 +310,9 @@ export default function SettingsWindow() {
       }
       if (updateResult.status === 'fulfilled' && !updateEventReceived) {
         setUpdateInfo(updateResult.value);
+      }
+      if (quotaAutoContinueResult.status === 'fulfilled' && !quotaAutoContinueEventReceived) {
+        setQuotaAutoContinueStatus(quotaAutoContinueResult.value);
       }
     })();
 
@@ -380,6 +408,49 @@ export default function SettingsWindow() {
       setFeedback({ key: 'settings.notifications.feedback.testFailed', severity: 'error' });
     } finally {
       setIsSendingTestNotification(false);
+    }
+  };
+
+  const updateQuotaAutoContinue = async (enabled: boolean) => {
+    if (isChangingQuotaAutoContinue) return;
+    setIsChangingQuotaAutoContinue(true);
+    try {
+      const status = await enqueueSettingsMutation(async (current) => {
+        const nextStatus = await usageBridge.setQuotaAutoContinueEnabled(enabled);
+        return {
+          settings: { ...current, quotaAutoContinueEnabled: nextStatus.enabled },
+          value: nextStatus,
+        };
+      });
+      setQuotaAutoContinueStatus(status);
+      setFeedback({
+        key: enabled
+          ? 'settings.quotaAutoContinue.feedback.enabled'
+          : 'settings.quotaAutoContinue.feedback.disabled',
+        severity: 'success',
+      });
+    } catch {
+      setFeedback({ key: 'settings.quotaAutoContinue.feedback.operationFailed', severity: 'error' });
+    } finally {
+      setIsChangingQuotaAutoContinue(false);
+    }
+  };
+
+  const testQuotaAutoContinue = async () => {
+    if (isTestingQuotaAutoContinue) return;
+    setIsTestingQuotaAutoContinue(true);
+    try {
+      setQuotaAutoContinueStatus(await usageBridge.testQuotaAutoContinue());
+      setFeedback({ key: 'settings.quotaAutoContinue.feedback.testSent', severity: 'success' });
+    } catch {
+      setFeedback({ key: 'settings.quotaAutoContinue.feedback.testFailed', severity: 'error' });
+      try {
+        setQuotaAutoContinueStatus(await usageBridge.getQuotaAutoContinueStatus());
+      } catch {
+        // 错误反馈已覆盖主操作失败；状态重读失败时保留上一次脱敏状态。
+      }
+    } finally {
+      setIsTestingQuotaAutoContinue(false);
     }
   };
 
@@ -672,6 +743,19 @@ export default function SettingsWindow() {
               </TrendsErrorBoundary>
             )}
 
+            {activeSection === 'quota-auto-continue' && (
+              <QuotaAutoContinuePage
+                enabled={settings.quotaAutoContinueEnabled}
+                status={quotaAutoContinueStatus}
+                language={settings.language}
+                disabled={settingsControlsDisabled}
+                isChanging={isChangingQuotaAutoContinue}
+                isTesting={isTestingQuotaAutoContinue}
+                onSetEnabled={updateQuotaAutoContinue}
+                onTest={testQuotaAutoContinue}
+              />
+            )}
+
             {activeSection === 'startup' && (
               <Stack spacing={2.5}>
                 <Box>
@@ -683,19 +767,37 @@ export default function SettingsWindow() {
                   </Typography>
                 </Box>
                 <Paper variant="outlined" sx={{ p: 2 }}>
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={autostart}
-                        disabled={!autostartLoaded || isChangingAutostart}
-                        onChange={(event) => void updateAutostart(event.target.checked)}
-                      />
-                    }
-                    label={t('settings.startup.autostart')}
-                  />
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', pl: 4 }}>
-                    {t('settings.startup.description')}
-                  </Typography>
+                  <Stack spacing={0.5}>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={autostart}
+                          disabled={!autostartLoaded || isChangingAutostart}
+                          onChange={(event) => void updateAutostart(event.target.checked)}
+                        />
+                      }
+                      label={t('settings.startup.autostart')}
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', pl: 4 }}>
+                      {t('settings.startup.description')}
+                    </Typography>
+                    <Divider sx={{ my: 1 }} />
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settings.minimizeToTrayOnClose}
+                          disabled={settingsControlsDisabled}
+                          onChange={(event) =>
+                            void updateSettings({ minimizeToTrayOnClose: event.target.checked })
+                          }
+                        />
+                      }
+                      label={t('settings.startup.minimizeToTrayOnClose')}
+                    />
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', pl: 4 }}>
+                      {t('settings.startup.minimizeToTrayOnCloseDescription')}
+                    </Typography>
+                  </Stack>
                 </Paper>
               </Stack>
             )}

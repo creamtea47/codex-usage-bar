@@ -64,7 +64,7 @@ impl UsageClient {
         // reqwest 的 system-proxy feature 会安全读取系统代理和 HTTP(S)_PROXY，
         // 仅用于发起本次只读请求；代理配置绝不记录到日志或传给 React。
         let client = Client::builder()
-            .user_agent("CodexUsageBar/0.3 (read-only)")
+            .user_agent("CodexUsageBar/0.3 (usage-read-only)")
             .connect_timeout(StdDuration::from_secs(10))
             .timeout(StdDuration::from_secs(20))
             .build()

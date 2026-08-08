@@ -229,6 +229,9 @@ fn valid_local_time(value: &str) -> bool {
 pub struct Settings {
     pub always_on_top: bool,
     pub lock_position: bool,
+    /// 默认拦截主窗口关闭并隐藏到托盘；旧设置缺少字段时也保持该安全默认。
+    #[serde(default = "default_minimize_to_tray_on_close")]
+    pub minimize_to_tray_on_close: bool,
     pub refresh_interval_seconds: u64,
     pub theme: Theme,
     #[serde(default)]
@@ -240,6 +243,13 @@ pub struct Settings {
     /// 默认开启；自动任务只检查公开签名清单，绝不自动下载、安装或重启。
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
+    /// 真实发送最小请求的副作用开关，必须通过专属 IPC 修改，默认关闭。
+    #[serde(default)]
+    pub quota_auto_continue_enabled: bool,
+}
+
+fn default_minimize_to_tray_on_close() -> bool {
+    true
 }
 
 fn default_auto_check_updates() -> bool {
@@ -255,12 +265,14 @@ impl Default for Settings {
         Self {
             always_on_top: false,
             lock_position: false,
+            minimize_to_tray_on_close: true,
             refresh_interval_seconds: 60,
             theme: Theme::System,
             language: Language::System,
             notifications: NotificationSettings::default(),
             history_enabled: true,
             auto_check_updates: true,
+            quota_auto_continue_enabled: false,
         }
     }
 }

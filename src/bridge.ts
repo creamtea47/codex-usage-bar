@@ -6,6 +6,7 @@ import type {
   AppUpdateProgress,
   DashboardSnapshot,
   NotificationEnableResult,
+  QuotaAutoContinueStatus,
   Settings,
   SettingsUiFaultCode,
   UsageHistoryRange,
@@ -24,6 +25,11 @@ export const usageBridge = {
   getUsageHistory: (range: UsageHistoryRange) =>
     invoke<UsageHistoryResponse>('get_usage_history', { range }),
   setHistoryEnabled: (enabled: boolean) => invoke<Settings>('set_history_enabled', { enabled }),
+  getQuotaAutoContinueStatus: () =>
+    invoke<QuotaAutoContinueStatus>('get_quota_auto_continue_status'),
+  setQuotaAutoContinueEnabled: (enabled: boolean) =>
+    invoke<QuotaAutoContinueStatus>('set_quota_auto_continue_enabled', { enabled }),
+  testQuotaAutoContinue: () => invoke<QuotaAutoContinueStatus>('test_quota_auto_continue'),
   clearUsageHistory: () => invoke<void>('clear_usage_history'),
   reportSettingsUiFault: (code: SettingsUiFaultCode) =>
     invoke<void>('report_settings_ui_fault', { faultCode: code }),
@@ -51,4 +57,6 @@ export const usageBridge = {
     listen<'about'>('settings-navigate', (event) => handler(event.payload)),
   listenForUsageHistory: (handler: () => void) =>
     listen('usage-history-updated', () => handler()),
+  listenForQuotaAutoContinue: (handler: (status: QuotaAutoContinueStatus) => void) =>
+    listen<QuotaAutoContinueStatus>('quota-auto-continue-updated', (event) => handler(event.payload)),
 };

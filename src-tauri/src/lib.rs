@@ -2,21 +2,29 @@ mod app_update;
 mod auth;
 mod models;
 mod notification_rules;
+mod quota_auto_continue;
 mod refresh_scheduler;
 mod settings;
+mod tray;
 mod usage;
 mod usage_history;
 
 use crate::{
     app_update::{check_for_update, install_pending_update, AppUpdateState},
     models::{
-        AppUpdateInfo, DashboardSnapshot, DashboardStatus, ForecastStatus as ModelForecastStatus,
-        Language, MainWindowSizeMode, NotificationEnableResult, NotificationPermission,
-        QuotaFallbackLabel, QuotaForecast, Settings, StoredSettings, WindowPlacement,
+        AppUpdateInfo, DashboardErrorCode, DashboardSnapshot, DashboardStatus,
+        ForecastStatus as ModelForecastStatus, Language, MainWindowSizeMode,
+        NotificationEnableResult, NotificationPermission, QuotaFallbackLabel, QuotaForecast,
+        Settings, StoredSettings, WindowPlacement,
     },
     notification_rules::{
         NotificationBatch, NotificationPolicy, NotificationReason, NotificationSnapshot,
         NotificationTracker, NotificationWindow, QuietHours,
+    },
+    quota_auto_continue::{
+        PreflightDecision, QuotaAutoContinueErrorCode, QuotaAutoContinuePhase,
+        QuotaAutoContinueRuntime, QuotaAutoContinueStatus,
+        STATE_FILE_NAME as QUOTA_AUTO_CONTINUE_STATE_FILE_NAME,
     },
     refresh_scheduler::failure_retry_seconds,
     settings::{
@@ -100,6 +108,7 @@ struct AppState {
     settings_path: PathBuf,
     history_path: PathBuf,
     usage_history: AsyncMutex<HistoryRuntime>,
+    quota_auto_continue: QuotaAutoContinueRuntime,
     /// 让通知设置发布与 baseline 重建相对通知评估保持原子。
     notification_evaluation_guard: StdMutex<()>,
     notification_tracker: StdMutex<NotificationTracker>,
@@ -128,6 +137,7 @@ struct RefreshResult {
     was_successful: bool,
     should_emit: bool,
     history_effect: HistoryRefreshEffect,
+    quota_auto_continue_changed: bool,
 }
 
 impl AppState {
@@ -135,11 +145,13 @@ impl AppState {
         usage_client: UsageClient,
         stored_settings: StoredSettings,
         settings_path: PathBuf,
-    ) -> Self {
+    ) -> Result<Self, QuotaAutoContinueErrorCode> {
         let (schedule_sender, _) = watch::channel(0_u64);
         let (update_check_sender, _) =
             watch::channel(stored_settings.preferences.auto_check_updates);
         let history_path = settings_path.with_file_name(USAGE_HISTORY_FILE_NAME);
+        let quota_auto_continue_path =
+            settings_path.with_file_name(QUOTA_AUTO_CONTINUE_STATE_FILE_NAME);
         let loaded_history = load_history(&history_path);
         let mut history_status = loaded_history.status;
         if loaded_history.needs_rewrite {
@@ -159,7 +171,7 @@ impl AppState {
                 history_status = HistoryStorageStatus::Unavailable;
             }
         }
-        Self {
+        Ok(Self {
             usage_client,
             snapshot: AsyncMutex::new(DashboardSnapshot::default()),
             refresh_guard: AsyncMutex::new(()),
@@ -172,6 +184,7 @@ impl AppState {
                 history: loaded_history.history,
                 storage_status: history_status,
             }),
+            quota_auto_continue: QuotaAutoContinueRuntime::new(quota_auto_continue_path)?,
             notification_evaluation_guard: StdMutex::new(()),
             notification_tracker: StdMutex::new(NotificationTracker::new()),
             schedule_sender,
@@ -179,7 +192,7 @@ impl AppState {
             update_check_sender,
             app_update: AppUpdateState::default(),
             geometry_generations: StdMutex::new(HashMap::new()),
-        }
+        })
     }
 
     fn stored_settings(&self) -> std::sync::MutexGuard<'_, StoredSettings> {
@@ -357,6 +370,7 @@ impl AppState {
                         was_successful: false,
                         should_emit: false,
                         history_effect: HistoryRefreshEffect::default(),
+                        quota_auto_continue_changed: false,
                     };
                 }
                 // 锁若只由历史开关/清除操作占用，不得吞掉用户或定时刷新。
@@ -370,6 +384,12 @@ impl AppState {
                 let history_effect = self
                     .apply_history_to_snapshot(&mut fresh, &fetched.account_identity)
                     .await;
+                let quota_auto_continue_changed = self.quota_auto_continue.observe_dashboard(
+                    self.current_settings().quota_auto_continue_enabled,
+                    &fetched.account_identity,
+                    &fresh,
+                    Utc::now(),
+                );
                 self.consecutive_failures.store(0, Ordering::Relaxed);
                 let _schedule_guard = self.schedule_guard.lock().await;
                 // 必须在请求完成后、持有排期锁时重读，避免旧请求覆盖新设置。
@@ -389,6 +409,7 @@ impl AppState {
                     was_successful: true,
                     should_emit: true,
                     history_effect,
+                    quota_auto_continue_changed,
                 }
             }
             Err(error) => {
@@ -421,6 +442,7 @@ impl AppState {
                     was_successful: false,
                     should_emit: true,
                     history_effect: HistoryRefreshEffect::default(),
+                    quota_auto_continue_changed: false,
                 }
             }
         };
@@ -442,9 +464,10 @@ impl AppState {
         };
         let _ = self.update_check_sender.send(result.auto_check_updates);
         log::info!(
-            "已保存挂件设置：置顶={}、锁定={}、刷新间隔={}秒、自动检查更新={}",
+            "已保存挂件设置：置顶={}、锁定={}、关闭到托盘={}、刷新间隔={}秒、自动检查更新={}",
             result.always_on_top,
             result.lock_position,
+            result.minimize_to_tray_on_close,
             result.refresh_interval_seconds,
             result.auto_check_updates
         );
@@ -801,9 +824,10 @@ fn fallback_label_for_duration(window_seconds: i64) -> QuotaFallbackLabel {
 
 fn normalize_general_settings(requested: Settings, current: &Settings) -> Settings {
     let mut normalized = requested.normalized();
-    // 两个副作用开关必须走各自带权限/并发屏障的专属命令。
+    // 三个副作用开关必须走各自带权限/并发屏障的专属命令。
     normalized.notifications.enabled = current.notifications.enabled;
     normalized.history_enabled = current.history_enabled;
+    normalized.quota_auto_continue_enabled = current.quota_auto_continue_enabled;
     normalized
 }
 
@@ -927,8 +951,109 @@ async fn save_settings(
     if let Some(settings_window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
         let _ = settings_window.set_title(settings_window_title(stored.language));
     }
+    tray::update_menu(&app, resolved_language(stored.language));
     emit_dashboard(&app, snapshot);
     Ok(stored)
+}
+
+#[tauri::command]
+fn get_quota_auto_continue_status(
+    window: WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<QuotaAutoContinueStatus, String> {
+    require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
+    let enabled = state.current_settings().quota_auto_continue_enabled;
+    Ok(state.quota_auto_continue.status(enabled, Utc::now()))
+}
+
+#[tauri::command]
+async fn set_quota_auto_continue_enabled(
+    enabled: bool,
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<QuotaAutoContinueStatus, String> {
+    require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
+    let mut next = state.current_settings();
+    next.quota_auto_continue_enabled = enabled;
+    let saved = state.save_preferences(next)?;
+    state
+        .quota_auto_continue
+        .activate_cached_observation(enabled, Utc::now());
+    if app.emit("settings-updated", saved).is_err() {
+        log::warn!("无法广播额度自动接续设置变更。");
+    }
+    if enabled
+        && state
+            .quota_auto_continue
+            .status(true, Utc::now())
+            .target_reset_at
+            .is_none()
+    {
+        let _ = refresh_and_emit(&app, &state).await;
+    }
+    emit_quota_auto_continue_status(&app, &state);
+    log::info!("额度自动接续设置已保存：启用={enabled}。");
+    Ok(state.quota_auto_continue.status(enabled, Utc::now()))
+}
+
+#[tauri::command]
+async fn test_quota_auto_continue(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<QuotaAutoContinueStatus, String> {
+    require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
+    let _guard = state
+        .quota_auto_continue
+        .execution_guard()
+        .map_err(quota_auto_continue_error_key)?;
+    let enabled = state.current_settings().quota_auto_continue_enabled;
+    let mut running = state.quota_auto_continue.status(enabled, Utc::now());
+    running.phase = crate::quota_auto_continue::QuotaAutoContinuePhase::Running;
+    let _ = app.emit_to(
+        SETTINGS_WINDOW_LABEL,
+        "quota-auto-continue-updated",
+        running,
+    );
+
+    match state.quota_auto_continue.send_manual_test().await {
+        Ok(model) => {
+            state
+                .quota_auto_continue
+                .record_manual_success(model.clone(), Utc::now());
+            log::info!("额度自动接续手动测试成功：模型={model}。");
+            let _ = refresh_and_emit(&app, &state).await;
+            emit_quota_auto_continue_status(&app, &state);
+            Ok(state.quota_auto_continue.status(enabled, Utc::now()))
+        }
+        Err(failure) => {
+            log::warn!(
+                "额度自动接续手动测试失败：类别={:?}、模型={}。",
+                failure.code,
+                failure.model.as_deref().unwrap_or("未选择")
+            );
+            state.quota_auto_continue.record_manual_failure(&failure);
+            emit_quota_auto_continue_status(&app, &state);
+            Err(quota_auto_continue_error_key(failure.code))
+        }
+    }
+}
+
+fn quota_auto_continue_error_key(error: QuotaAutoContinueErrorCode) -> String {
+    match error {
+        QuotaAutoContinueErrorCode::AuthMissing => "authMissing",
+        QuotaAutoContinueErrorCode::AuthInvalid => "authInvalid",
+        QuotaAutoContinueErrorCode::Network => "network",
+        QuotaAutoContinueErrorCode::RateLimited => "rateLimited",
+        QuotaAutoContinueErrorCode::ServiceUnavailable => "serviceUnavailable",
+        QuotaAutoContinueErrorCode::InvalidResponse => "invalidResponse",
+        QuotaAutoContinueErrorCode::NoTextModel => "noTextModel",
+        QuotaAutoContinueErrorCode::AccountChanged => "accountChanged",
+        QuotaAutoContinueErrorCode::Persistence => "persistence",
+        QuotaAutoContinueErrorCode::Busy => "busy",
+    }
+    .to_owned()
 }
 
 fn map_notification_permission(permission: PermissionState) -> NotificationPermission {
@@ -1210,6 +1335,21 @@ fn history_storage_status_name(status: HistoryStorageStatus) -> &'static str {
     }
 }
 
+fn quota_auto_continue_phase_name(phase: QuotaAutoContinuePhase) -> &'static str {
+    match phase {
+        QuotaAutoContinuePhase::Disabled => "disabled",
+        QuotaAutoContinuePhase::WaitingForWeeklyWindow => "waitingForWeeklyWindow",
+        QuotaAutoContinuePhase::Scheduled => "scheduled",
+        QuotaAutoContinuePhase::Running => "running",
+        QuotaAutoContinuePhase::WaitingForRetry => "waitingForRetry",
+        QuotaAutoContinuePhase::Succeeded => "succeeded",
+        QuotaAutoContinuePhase::SentAwaitingConfirmation => "sentAwaitingConfirmation",
+        QuotaAutoContinuePhase::AuthenticationRequired => "authenticationRequired",
+        QuotaAutoContinuePhase::Missed => "missed",
+        QuotaAutoContinuePhase::Failed => "failed",
+    }
+}
+
 fn diagnostic_timestamp(value: Option<DateTime<Utc>>) -> String {
     value
         .map(|value| value.to_rfc3339())
@@ -1236,13 +1376,16 @@ struct DiagnosticsSummary<'a> {
     history_enabled: bool,
     history_sample_count: u32,
     history_storage_status: HistoryStorageStatus,
+    minimize_to_tray_on_close: bool,
+    quota_auto_continue_enabled: bool,
+    quota_auto_continue_phase: QuotaAutoContinuePhase,
 }
 
 /// 诊断输出只接受固定白名单摘要，类型中没有账号、Token、路径、URL、百分比、
 /// reset 时间、历史点或原始错误/日志，因此这些数据无法被意外格式化进报告。
 fn build_diagnostics(summary: DiagnosticsSummary<'_>) -> String {
     let mut report = String::with_capacity(768);
-    let _ = writeln!(report, "CodexUsageBar diagnostics schema: 1");
+    let _ = writeln!(report, "CodexUsageBar diagnostics schema: 2");
     let _ = writeln!(report, "appVersion: {}", summary.app_version);
     let _ = writeln!(report, "platform: {}", summary.platform);
     let _ = writeln!(report, "architecture: {}", summary.architecture);
@@ -1310,6 +1453,21 @@ fn build_diagnostics(summary: DiagnosticsSummary<'_>) -> String {
         "historyStorageStatus: {}",
         history_storage_status_name(summary.history_storage_status)
     );
+    let _ = writeln!(
+        report,
+        "minimizeToTrayOnClose: {}",
+        summary.minimize_to_tray_on_close
+    );
+    let _ = writeln!(
+        report,
+        "quotaAutoContinueEnabled: {}",
+        summary.quota_auto_continue_enabled
+    );
+    let _ = writeln!(
+        report,
+        "quotaAutoContinuePhase: {}",
+        quota_auto_continue_phase_name(summary.quota_auto_continue_phase)
+    );
     report
 }
 
@@ -1337,6 +1495,9 @@ async fn get_diagnostics(
     } else {
         "current"
     };
+    let quota_auto_continue = state
+        .quota_auto_continue
+        .status(settings.quota_auto_continue_enabled, Utc::now());
 
     Ok(build_diagnostics(DiagnosticsSummary {
         app_version: env!("CARGO_PKG_VERSION"),
@@ -1358,6 +1519,9 @@ async fn get_diagnostics(
         history_enabled: settings.history_enabled,
         history_sample_count: history.sample_count,
         history_storage_status: runtime.storage_status,
+        minimize_to_tray_on_close: settings.minimize_to_tray_on_close,
+        quota_auto_continue_enabled: settings.quota_auto_continue_enabled,
+        quota_auto_continue_phase: quota_auto_continue.phase,
     }))
 }
 
@@ -1490,6 +1654,145 @@ fn start_refresh_loop(app: AppHandle, state: Arc<AppState>) {
     });
 }
 
+fn start_quota_auto_continue_loop(app: AppHandle, state: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        let mut receiver = state.quota_auto_continue.subscribe();
+        loop {
+            let enabled = state.current_settings().quota_auto_continue_enabled;
+            let status = state.quota_auto_continue.status(enabled, Utc::now());
+            let wait = status
+                .next_attempt_at
+                .and_then(|deadline| (deadline - Utc::now()).to_std().ok())
+                // 没有任务时由 watch 变更提前唤醒；长等待不产生轮询和网络请求。
+                .unwrap_or(Duration::from_secs(365 * 24 * 60 * 60));
+            tokio::select! {
+                changed = receiver.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(wait) => {
+                    run_scheduled_quota_auto_continue(&app, &state).await;
+                }
+            }
+        }
+    });
+}
+
+async fn run_scheduled_quota_auto_continue(app: &AppHandle, state: &AppState) {
+    let enabled = state.current_settings().quota_auto_continue_enabled;
+    let Ok(_guard) = state.quota_auto_continue.execution_guard() else {
+        // 手动测试正在运行时不占用自动尝试槽；短暂延后后由当前排期再次判断。
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        state
+            .quota_auto_continue
+            .activate_cached_observation(enabled, Utc::now());
+        return;
+    };
+    let attempt = match state
+        .quota_auto_continue
+        .claim_due_attempt(enabled, Utc::now())
+    {
+        Ok(Some(attempt)) => attempt,
+        Ok(None) => {
+            emit_quota_auto_continue_status(app, state);
+            return;
+        }
+        Err(error) => {
+            log::warn!("额度自动接续无法占用尝试槽：类别={error:?}。");
+            emit_quota_auto_continue_status(app, state);
+            return;
+        }
+    };
+    log::info!(
+        "额度自动接续开始尝试：序号={}、目标重置时间={}。",
+        attempt.slot_index + 1,
+        attempt.target_reset_at.to_rfc3339()
+    );
+    emit_quota_auto_continue_status(app, state);
+
+    if !refresh_and_emit(app, state).await {
+        let snapshot = state.current_snapshot().await;
+        let error = snapshot
+            .message
+            .map(quota_error_from_dashboard)
+            .unwrap_or(QuotaAutoContinueErrorCode::Network);
+        state
+            .quota_auto_continue
+            .finish_failure(&attempt, error, None);
+        log::warn!(
+            "额度自动接续只读预检失败：类别={error:?}、序号={}。",
+            attempt.slot_index + 1
+        );
+        emit_quota_auto_continue_status(app, state);
+        return;
+    }
+
+    match state.quota_auto_continue.preflight_decision(&attempt) {
+        PreflightDecision::AlreadyAdvanced => {
+            state
+                .quota_auto_continue
+                .mark_already_advanced(&attempt, Utc::now());
+            log::info!("额度自动接续无需发送：周额度周期已由其他请求推进。");
+            emit_quota_auto_continue_status(app, state);
+            return;
+        }
+        PreflightDecision::AccountChanged => {
+            state.quota_auto_continue.finish_failure(
+                &attempt,
+                QuotaAutoContinueErrorCode::AccountChanged,
+                None,
+            );
+            log::info!("额度自动接续已取消旧任务：当前账号已变化。");
+            emit_quota_auto_continue_status(app, state);
+            return;
+        }
+        PreflightDecision::Proceed => {}
+    }
+
+    match state.quota_auto_continue.send_for_attempt(&attempt).await {
+        Ok(model) => {
+            state
+                .quota_auto_continue
+                .finish_sent(&attempt, model.clone(), Utc::now());
+            log::info!(
+                "额度自动接续最小请求成功：序号={}、模型={}。",
+                attempt.slot_index + 1,
+                model
+            );
+            emit_quota_auto_continue_status(app, state);
+            // 发送成功即停止本周期重试；后续刷新仅用于确认新 reset_at。
+            let _ = refresh_and_emit(app, state).await;
+            emit_quota_auto_continue_status(app, state);
+        }
+        Err(failure) => {
+            log::warn!(
+                "额度自动接续最小请求失败：序号={}、类别={:?}、模型={}。",
+                attempt.slot_index + 1,
+                failure.code,
+                failure.model.as_deref().unwrap_or("未选择")
+            );
+            state
+                .quota_auto_continue
+                .finish_failure(&attempt, failure.code, failure.model);
+            emit_quota_auto_continue_status(app, state);
+        }
+    }
+}
+
+fn quota_error_from_dashboard(error: DashboardErrorCode) -> QuotaAutoContinueErrorCode {
+    match error {
+        DashboardErrorCode::AuthMissing => QuotaAutoContinueErrorCode::AuthMissing,
+        DashboardErrorCode::AuthInvalid => QuotaAutoContinueErrorCode::AuthInvalid,
+        DashboardErrorCode::Network | DashboardErrorCode::LocalBridge => {
+            QuotaAutoContinueErrorCode::Network
+        }
+        DashboardErrorCode::RateLimited => QuotaAutoContinueErrorCode::RateLimited,
+        DashboardErrorCode::ServiceUnavailable => QuotaAutoContinueErrorCode::ServiceUnavailable,
+        DashboardErrorCode::InvalidResponse => QuotaAutoContinueErrorCode::InvalidResponse,
+    }
+}
+
 fn start_update_check_loop(app: AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         // 不与主卡首屏初始化抢资源；启动后的短延迟可避免网络尚未恢复时产生无意义失败。
@@ -1514,9 +1817,11 @@ fn start_update_check_loop(app: AppHandle, state: Arc<AppState>) {
     });
 }
 
-async fn refresh_and_emit(app: &AppHandle, state: &AppState) {
+async fn refresh_and_emit(app: &AppHandle, state: &AppState) -> bool {
     let result = state.refresh_dashboard().await;
+    let was_successful = result.was_successful;
     let _ = finalize_refresh_result(app, state, result).await;
+    was_successful
 }
 
 fn refresh_result_is_current(result: &RefreshResult, current: &DashboardSnapshot) -> bool {
@@ -1548,12 +1853,26 @@ async fn finalize_refresh_result(
     if result.should_emit && result.history_effect.changed {
         emit_usage_history_updated(app);
     }
+    if result.should_emit && result.quota_auto_continue_changed {
+        emit_quota_auto_continue_status(app, state);
+    }
     let snapshot = result.snapshot;
     if result.should_emit {
         state.apply_auto_main_height(app, &snapshot);
         emit_dashboard(app, snapshot.clone());
     }
     snapshot
+}
+
+fn emit_quota_auto_continue_status(app: &AppHandle, state: &AppState) {
+    let enabled = state.current_settings().quota_auto_continue_enabled;
+    let status = state.quota_auto_continue.status(enabled, Utc::now());
+    if app
+        .emit_to(SETTINGS_WINDOW_LABEL, "quota-auto-continue-updated", status)
+        .is_err()
+    {
+        log::warn!("无法向设置窗口广播额度自动接续状态。");
+    }
 }
 
 fn emit_usage_history_updated(app: &AppHandle) {
@@ -1729,11 +2048,10 @@ pub fn run() {
 
             let usage_client =
                 UsageClient::new().map_err(|error| io::Error::other(error.to_string()))?;
-            let state = Arc::new(AppState::new(
-                usage_client,
-                stored_settings.clone(),
-                settings_path,
-            ));
+            let state = Arc::new(
+                AppState::new(usage_client, stored_settings.clone(), settings_path)
+                    .map_err(|_| io::Error::other("无法初始化额度自动接续运行时。"))?,
+            );
             app.manage(state.clone());
 
             if let Ok(log_directory) = app.path().app_log_dir() {
@@ -1750,10 +2068,15 @@ pub fn run() {
                 .set_title(settings_window_title(stored_settings.preferences.language));
             restore_main_window(&main_window, &stored_settings, &state);
             restore_settings_window(&settings_window, &stored_settings);
+            tray::create(
+                app.handle(),
+                resolved_language(stored_settings.preferences.language),
+            )?;
             // 静态窗口在配置中默认隐藏；显式隐藏保证升级时不会与主卡同时出现。
             let _ = settings_window.hide();
             main_window.show()?;
             start_refresh_loop(app.handle().clone(), state.clone());
+            start_quota_auto_continue_loop(app.handle().clone(), state.clone());
             start_update_check_loop(app.handle().clone(), state);
             Ok(())
         })
@@ -1772,13 +2095,19 @@ pub fn run() {
                             if window.hide().is_err() {
                                 log::warn!("无法隐藏设置窗口。");
                             }
+                            tray::sync_platform_visibility(&app);
                         }
                         MAIN_WINDOW_LABEL => {
-                            // 关闭主卡就是退出整个应用。先同步保存几何，避免退出竞态丢失用户布局。
+                            // 关闭主卡前同步保存几何；是否退出由用户显式设置决定。
                             api.prevent_close();
                             state.save_window_placement_for_label(&app, MAIN_WINDOW_LABEL);
-                            log::info!("主悬浮卡已关闭，应用即将退出。");
-                            app.exit(0);
+                            if state.current_settings().minimize_to_tray_on_close {
+                                tray::hide_main_window(&app);
+                                log::info!("主悬浮卡已隐藏到系统托盘。");
+                            } else {
+                                log::info!("主悬浮卡已关闭，应用即将退出。");
+                                app.exit(0);
+                            }
                         }
                         _ => {}
                     }
@@ -1791,6 +2120,9 @@ pub fn run() {
             refresh_dashboard,
             get_settings,
             save_settings,
+            get_quota_auto_continue_status,
+            set_quota_auto_continue_enabled,
+            test_quota_auto_continue,
             set_notifications_enabled,
             send_test_notification,
             get_usage_history,
@@ -1863,6 +2195,7 @@ mod tests {
             was_successful: true,
             should_emit: true,
             history_effect: HistoryRefreshEffect::default(),
+            quota_auto_continue_changed: false,
         };
         assert!(refresh_result_is_current(&current_result, &snapshot));
 
@@ -2106,6 +2439,9 @@ mod tests {
             history_enabled: true,
             history_sample_count: 12,
             history_storage_status: HistoryStorageStatus::Ready,
+            minimize_to_tray_on_close: true,
+            quota_auto_continue_enabled: true,
+            quota_auto_continue_phase: QuotaAutoContinuePhase::Scheduled,
         });
         let fields = report
             .lines()
@@ -2134,6 +2470,9 @@ mod tests {
                 "historyEnabled",
                 "historySampleCount",
                 "historyStorageStatus",
+                "minimizeToTrayOnClose",
+                "quotaAutoContinueEnabled",
+                "quotaAutoContinuePhase",
             ]
         );
         let normalized = report.to_ascii_lowercase();
@@ -2247,7 +2586,8 @@ mod tests {
             UsageClient::new().unwrap(),
             StoredSettings::default(),
             PathBuf::from("unused-schedule-test-settings.json"),
-        );
+        )
+        .unwrap();
         state.stored_settings().preferences.refresh_interval_seconds = 1_800;
         let schedule_guard = state.schedule_guard.lock().await;
         let before = Utc::now();
@@ -2269,11 +2609,14 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_refresh_waits_for_the_single_flight_result_without_rebroadcasting_cache() {
-        let state = Arc::new(AppState::new(
-            UsageClient::new().unwrap(),
-            StoredSettings::default(),
-            PathBuf::from("unused-test-settings.json"),
-        ));
+        let state = Arc::new(
+            AppState::new(
+                UsageClient::new().unwrap(),
+                StoredSettings::default(),
+                PathBuf::from("unused-test-settings.json"),
+            )
+            .unwrap(),
+        );
         let expected = DashboardSnapshot {
             status: DashboardStatus::Ready,
             account_email_masked: Some("p***@example.com".to_owned()),

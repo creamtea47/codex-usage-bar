@@ -73,6 +73,8 @@ export interface AppUpdateProgress {
 export interface Settings {
   alwaysOnTop: boolean;
   lockPosition: boolean;
+  /** 默认拦截主窗口关闭并隐藏到系统托盘。 */
+  minimizeToTrayOnClose: boolean;
   refreshIntervalSeconds: number;
   theme: Theme;
   language: Language;
@@ -80,6 +82,8 @@ export interface Settings {
   historyEnabled: boolean;
   /** 自动检查只读取公开 HTTPS 更新清单；不会自动下载、安装或重启。 */
   autoCheckUpdates: boolean;
+  /** 真实请求开关只能通过专属 IPC 修改，普通设置保存会保留当前值。 */
+  quotaAutoContinueEnabled: boolean;
 }
 
 export interface NotificationSettings {
@@ -100,6 +104,43 @@ export interface NotificationEnableResult {
   enabled: boolean;
   permission: NotificationPermission;
   settings: Settings;
+}
+
+export type QuotaAutoContinuePhase =
+  | 'disabled'
+  | 'waitingForWeeklyWindow'
+  | 'scheduled'
+  | 'running'
+  | 'waitingForRetry'
+  | 'succeeded'
+  | 'sentAwaitingConfirmation'
+  | 'authenticationRequired'
+  | 'missed'
+  | 'failed';
+
+export type QuotaAutoContinueErrorCode =
+  | 'authMissing'
+  | 'authInvalid'
+  | 'network'
+  | 'rateLimited'
+  | 'serviceUnavailable'
+  | 'invalidResponse'
+  | 'noTextModel'
+  | 'accountChanged'
+  | 'persistence'
+  | 'busy';
+
+/** 自动接续状态严格限制为脱敏排期字段，不向前端暴露账号或请求内容。 */
+export interface QuotaAutoContinueStatus {
+  enabled: boolean;
+  phase: QuotaAutoContinuePhase;
+  targetResetAt: string | null;
+  nextAttemptAt: string | null;
+  attemptedCount: number;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastErrorCode: QuotaAutoContinueErrorCode | null;
+  selectedModel: string | null;
 }
 
 export type UsageHistoryRange = '24h' | '7d';
@@ -134,6 +175,7 @@ export interface UsageHistoryResponse {
 export const defaultSettings: Settings = {
   alwaysOnTop: false,
   lockPosition: false,
+  minimizeToTrayOnClose: true,
   refreshIntervalSeconds: 60,
   theme: 'system',
   language: 'system',
@@ -150,6 +192,7 @@ export const defaultSettings: Settings = {
   },
   historyEnabled: true,
   autoCheckUpdates: true,
+  quotaAutoContinueEnabled: false,
 };
 
 export const loadingSnapshot: DashboardSnapshot = {

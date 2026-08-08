@@ -20,4 +20,19 @@ describe('usageBridge', () => {
       faultCode: 'trends-render-failed',
     });
   });
+
+  it('routes quota auto-continuation through dedicated commands and its status event', async () => {
+    const handler = vi.fn();
+    tauriMocks.listen.mockResolvedValue(() => undefined);
+
+    await usageBridge.getQuotaAutoContinueStatus();
+    await usageBridge.setQuotaAutoContinueEnabled(true);
+    await usageBridge.testQuotaAutoContinue();
+    await usageBridge.listenForQuotaAutoContinue(handler);
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'get_quota_auto_continue_status');
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'set_quota_auto_continue_enabled', { enabled: true });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, 'test_quota_auto_continue');
+    expect(tauriMocks.listen).toHaveBeenCalledWith('quota-auto-continue-updated', expect.any(Function));
+  });
 });

@@ -7,6 +7,7 @@ import {
   defaultSettings,
   type AppUpdateInfo,
   type NotificationEnableResult,
+  type QuotaAutoContinueStatus,
   type Settings,
   type UsageHistoryResponse,
 } from './types';
@@ -20,6 +21,9 @@ const bridgeMocks = vi.hoisted(() => ({
   sendTestNotification: vi.fn(),
   getUsageHistory: vi.fn(),
   setHistoryEnabled: vi.fn(),
+  getQuotaAutoContinueStatus: vi.fn(),
+  setQuotaAutoContinueEnabled: vi.fn(),
+  testQuotaAutoContinue: vi.fn(),
   clearUsageHistory: vi.fn(),
   reportSettingsUiFault: vi.fn(),
   getDiagnostics: vi.fn(),
@@ -35,6 +39,7 @@ const bridgeMocks = vi.hoisted(() => ({
   listenForAppUpdateProgress: vi.fn(),
   listenForSettingsNavigation: vi.fn(),
   listenForUsageHistory: vi.fn(),
+  listenForQuotaAutoContinue: vi.fn(),
 }));
 
 const openerMocks = vi.hoisted(() => ({ openUrl: vi.fn() }));
@@ -66,6 +71,18 @@ const emptyHistory: UsageHistoryResponse = {
   series: [],
 };
 
+const disabledQuotaAutoContinue: QuotaAutoContinueStatus = {
+  enabled: false,
+  phase: 'disabled',
+  targetResetAt: null,
+  nextAttemptAt: null,
+  attemptedCount: 0,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  lastErrorCode: null,
+  selectedModel: null,
+};
+
 function installMatchMedia(prefersDark = false) {
   vi.stubGlobal(
     'matchMedia',
@@ -90,6 +107,22 @@ function prepareBridge(settings: Settings = zhSettings) {
   bridgeMocks.sendTestNotification.mockResolvedValue(undefined);
   bridgeMocks.getUsageHistory.mockResolvedValue(emptyHistory);
   bridgeMocks.setHistoryEnabled.mockImplementation(async (enabled: boolean) => ({ ...settings, historyEnabled: enabled }));
+  bridgeMocks.getQuotaAutoContinueStatus.mockResolvedValue({
+    ...disabledQuotaAutoContinue,
+    enabled: settings.quotaAutoContinueEnabled,
+    phase: settings.quotaAutoContinueEnabled ? 'scheduled' : 'disabled',
+  });
+  bridgeMocks.setQuotaAutoContinueEnabled.mockImplementation(async (enabled: boolean) => ({
+    ...disabledQuotaAutoContinue,
+    enabled,
+    phase: enabled ? 'waitingForWeeklyWindow' : 'disabled',
+  }));
+  bridgeMocks.testQuotaAutoContinue.mockResolvedValue({
+    ...disabledQuotaAutoContinue,
+    phase: 'succeeded',
+    lastSuccessAt: '2030-01-04T12:00:00Z',
+    selectedModel: 'gpt-5.4',
+  });
   bridgeMocks.clearUsageHistory.mockResolvedValue(undefined);
   bridgeMocks.reportSettingsUiFault.mockResolvedValue(undefined);
   bridgeMocks.getDiagnostics.mockResolvedValue('CodexUsageBar diagnostics schema: 1\nplatform: macos');
@@ -105,6 +138,7 @@ function prepareBridge(settings: Settings = zhSettings) {
   bridgeMocks.listenForAppUpdateProgress.mockResolvedValue(() => undefined);
   bridgeMocks.listenForSettingsNavigation.mockResolvedValue(() => undefined);
   bridgeMocks.listenForUsageHistory.mockResolvedValue(() => undefined);
+  bridgeMocks.listenForQuotaAutoContinue.mockResolvedValue(() => undefined);
   openerMocks.openUrl.mockResolvedValue(undefined);
   clipboardMocks.writeText.mockResolvedValue(undefined);
 }
@@ -142,20 +176,22 @@ describe('SettingsWindow', () => {
     await waitFor(() => expect(windowMocks.setTheme).toHaveBeenLastCalledWith(null));
   });
 
-  it('provides six ordered sidebar categories and keeps data settings focused on refresh and privacy', async () => {
+  it('provides seven ordered sidebar categories and keeps data settings focused on refresh and privacy', async () => {
     await renderLoaded();
 
     expect(screen.getByRole('button', { name: '显示' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '数据与刷新' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '通知' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '趋势' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '额度自动接续' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '启动' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '关于与更新' })).toBeTruthy();
-    expect(screen.getAllByRole('button').slice(0, 6).map((button) => button.textContent)).toEqual([
+    expect(screen.getAllByRole('button').slice(0, 7).map((button) => button.textContent)).toEqual([
       '显示',
       '数据与刷新',
       '通知',
       '趋势',
+      '额度自动接续',
       '启动',
       '关于与更新',
     ]);
@@ -173,12 +209,69 @@ describe('SettingsWindow', () => {
     expect(screen.queryByRole('spinbutton', { name: '低额度阈值 (%)' })).toBeNull();
     expect(screen.queryByRole('switch', { name: '静默时段' })).toBeNull();
     expect(
-      screen.getByText('用量数据仅由 Rust 后端只读获取。前端不会读取认证文件，也不会续期 Token 或操作重置额度。'),
+      screen.getByText(/用量数据默认由 Rust 后端只读获取/),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: '启动' }));
     expect(await screen.findByRole('heading', { name: '启动' })).toBeTruthy();
     expect(screen.getByRole('switch', { name: '开机启动' })).toBeTruthy();
+    expect(screen.getByRole('switch', { name: '关闭时最小化到托盘' })).toBeTruthy();
+  });
+
+  it('requires confirmation before enabling or manually testing quota auto-continuation', async () => {
+    await renderLoaded();
+    fireEvent.click(screen.getByRole('button', { name: '额度自动接续' }));
+    expect(await screen.findByRole('heading', { name: '额度自动接续' })).toBeTruthy();
+    expect((screen.getByRole('switch', { name: '启用额度自动接续' }) as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByText('关闭')).toBeTruthy();
+    expect(screen.getByText('0 / 4')).toBeTruthy();
+    expect(screen.getByText(/这不是只读操作/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('switch', { name: '启用额度自动接续' }));
+    expect(await screen.findByRole('dialog', { name: '启用额度自动接续？' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(bridgeMocks.setQuotaAutoContinueEnabled).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('switch', { name: '启用额度自动接续' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认发送' }));
+    await waitFor(() => expect(bridgeMocks.setQuotaAutoContinueEnabled).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: '立即测试' }));
+    expect(await screen.findByRole('dialog', { name: '立即发送真实测试请求？' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(bridgeMocks.testQuotaAutoContinue).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '立即测试' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认发送' }));
+    await waitFor(() => expect(bridgeMocks.testQuotaAutoContinue).toHaveBeenCalledTimes(1));
+  });
+
+  it('renders the quota auto-continuation safety boundary in English', async () => {
+    await renderLoaded(enSettings);
+    fireEvent.click(screen.getByRole('button', { name: 'Quota Auto-Continuation' }));
+
+    expect(await screen.findByRole('heading', { name: 'Quota Auto-Continuation' })).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Enable Quota Auto-Continuation' })).toBeTruthy();
+    expect(screen.getByText(/This is not read-only/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Test now' })).toBeTruthy();
+  });
+
+  it('preserves the dedicated quota auto-continuation flag during ordinary settings saves', async () => {
+    const enabledSettings = { ...zhSettings, quotaAutoContinueEnabled: true };
+    await renderLoaded(enabledSettings);
+
+    fireEvent.click(screen.getByRole('switch', { name: '始终置顶' }));
+    await waitFor(() =>
+      expect(bridgeMocks.saveSettings).toHaveBeenCalledWith({
+        ...enabledSettings,
+        alwaysOnTop: true,
+        quotaAutoContinueEnabled: true,
+      }),
+    );
+    expect(bridgeMocks.setQuotaAutoContinueEnabled).not.toHaveBeenCalled();
   });
 
   it('persists display settings and reports the result', async () => {
@@ -211,6 +304,10 @@ describe('SettingsWindow', () => {
       order.push('listen-navigation');
       return () => undefined;
     });
+    bridgeMocks.listenForQuotaAutoContinue.mockImplementation(async () => {
+      order.push('listen-quota-auto-continue');
+      return () => undefined;
+    });
     bridgeMocks.getSettings.mockImplementation(async () => {
       order.push('get-settings');
       settingsListener?.(newerSettings);
@@ -224,6 +321,10 @@ describe('SettingsWindow', () => {
       order.push('get-update');
       return { ...availableUpdate, updateAvailable: false };
     });
+    bridgeMocks.getQuotaAutoContinueStatus.mockImplementation(async () => {
+      order.push('get-quota-auto-continue');
+      return disabledQuotaAutoContinue;
+    });
 
     render(<SettingsWindow />);
     await screen.findByRole('heading', { name: '显示' });
@@ -233,8 +334,15 @@ describe('SettingsWindow', () => {
       order.indexOf('get-settings'),
       order.indexOf('get-autostart'),
       order.indexOf('get-update'),
+      order.indexOf('get-quota-auto-continue'),
     );
-    for (const listener of ['listen-settings', 'listen-update', 'listen-progress', 'listen-navigation']) {
+    for (const listener of [
+      'listen-settings',
+      'listen-update',
+      'listen-progress',
+      'listen-navigation',
+      'listen-quota-auto-continue',
+    ]) {
       expect(order.indexOf(listener)).toBeLessThan(firstRead);
     }
   });

@@ -6,7 +6,7 @@
 
 Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
-[Download](https://github.com/creamtea47/codex-usage-bar/releases/latest) · [Screenshots](#screenshots) · [Privacy](#privacy-and-read-only-boundary) · [Development](#development)
+[Download](https://github.com/creamtea47/codex-usage-bar/releases/latest) · [Screenshots](#screenshots) · [Privacy](#privacy-and-feature-boundary) · [Development](#development)
 
 [![Build](https://github.com/creamtea47/codex-usage-bar/actions/workflows/build.yml/badge.svg)](https://github.com/creamtea47/codex-usage-bar/actions/workflows/build.yml)
 [![Latest Release](https://img.shields.io/github/v/release/creamtea47/codex-usage-bar?display_name=tag)](https://github.com/creamtea47/codex-usage-bar/releases/latest)
@@ -17,7 +17,7 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 
 </div>
 
-> CodexUsageBar reads usage data from a locally signed-in Codex session. It never uploads credentials, refreshes tokens, or operates reset cards.
+> CodexUsageBar reads signed-in Codex usage locally by default. It sends a fixed minimal `hi` only after the user explicitly enables **Quota Auto-Continuation** or confirms **Test now**. It never uploads credentials, refreshes tokens, or modifies authentication files.
 
 ## Screenshots
 
@@ -41,8 +41,9 @@ Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
 - Draws a pace marker for long quota windows and always repeats its rounded value as the card's suggested minimum remaining quota. Its tooltip explains that this is a local pacing estimate, not an official limit. Reliable long-window forecasts appear separately in the bottom advice area, in quota-card order, without replacing the pace suggestion.
 - Provides a complete Simplified Chinese and English interface. **Display** can follow the system language or override it; any `zh-*` system locale resolves to Simplified Chinese and other locales fall back to English.
 - Uses a borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position / size lock, and responds to the first click while unfocused on macOS.
-- Closes completely with its window—no tray-resident process. Autostart for the current account is optional.
-- Opens Settings in a separate opaque native window with sidebar categories: **Display**, **Data & refresh**, **Notifications**, **Trends**, **Startup**, and **About & updates**.
+- Hides the main window to the system tray by default. The tray can show the main window, open Settings, or explicitly quit; disabling **Minimize to tray on close** makes the close button exit instead.
+- Opens Settings in a separate opaque native window with seven sidebar categories: **Display**, **Data & refresh**, **Notifications**, **Trends**, **Quota Auto-Continuation**, **Startup**, and **About & updates**.
+- Keeps **Quota Auto-Continuation** off by default. When enabled, it schedules from the current account’s 6–8 day `reset_at`, sends a fixed `hi` at the boundary, and retries failures at `+1`, `+5`, and `+30` minutes. Because the [OpenAI model catalog](https://developers.openai.com/api/docs/models) evolves, it uses the account’s live manifest: prefer `gpt-5.4` when advertised, otherwise choose the first non-image text model, and use a compatibility fallback only when the manifest is unavailable.
 - Offers an independent **Notifications** page for opt-in alerts about low remaining quota, usage running ahead of elapsed-time pace, and a newly reset quota cycle. The master switch is off by default while all three rules default on: low quota starts at 20%, pace deficit at 10 percentage points, and both thresholds accept 0–100. Quiet hours default off with an initial 22:00–08:00 range, support crossing midnight, and never replay suppressed alerts later.
 - Keeps a lightweight 24-hour / 7-day trend view in Settings. Collection is enabled by default, stored only in `usage-history.json`, can be paused or cleared, and is immediately cleared when the local account fingerprint changes. Pausing stops new samples while keeping existing charts and forecasts visible. Each quota window has a fixed 0–100% chart with reset-cycle breaks, recent consumption, and a four-state local forecast.
 - Adds **Diagnostics & feedback** with a whitelist-only diagnostic summary, a write-only clipboard action, a separate new-Issue link, and a validated current-version Release-notes link. Diagnostic text is never inserted into the Issue URL.
@@ -76,9 +77,11 @@ If an old v0.2.1 installer is currently showing that error, exit it and download
 
 ## Usage
 
-The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry immediately, including while an automatic failure-backoff deadline is pending. The adjacent **Settings** button opens a separate window where settings are organized into **Display**, **Data & refresh**, **Notifications**, **Trends**, **Startup**, and **About & updates**.
+The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry immediately, including while an automatic failure-backoff deadline is pending. The adjacent **Settings** button opens a separate window organized into **Display**, **Data & refresh**, **Notifications**, **Trends**, **Quota Auto-Continuation**, **Startup**, and **About & updates**.
 
-**Display** controls language, theme, always-on-top, and position / size lock. **Data & refresh** contains the fixed refresh interval and privacy explanation. **Notifications** contains OS permission, alert rules, quiet hours, and the test action. **Trends** switches between 24 hours and 7 days, controls local collection, and provides the confirmed clear action. **Startup** controls autostart. **About & updates** contains the current version, update actions, the exact repository link, sanitized diagnostics, feedback, and Release notes. Closing Settings only hides that window—the floating card remains running. Closing the floating card exits the application.
+**Display** controls language, theme, always-on-top, and position / size lock. **Data & refresh** contains the fixed refresh interval and privacy explanation. **Notifications** contains OS permission, alert rules, quiet hours, and the test action. **Trends** controls local collection and confirmed deletion. **Quota Auto-Continuation** shows the target reset, next attempt, consumed slots, and sanitized result. **Startup** controls autostart and close-to-tray behavior. Closing Settings only hides it; closing the main window hides to the tray by default, while tray **Quit** always exits.
+
+Auto-continuation requires the app to remain running in the tray while the computer is awake. Resuming or restarting more than 30 minutes after the target marks that cycle missed; only the latest due slot runs, so earlier slots are never replayed back-to-back. **Test now** always requires a second confirmation, sends once, and never retries.
 
 System notifications remain disabled until you turn them on and grant operating-system permission. The first successful snapshot establishes a baseline rather than immediately warning about an already-low window. Within one quota cycle, each enabled low-quota or pace event is sent once; a later `resetAt` starts a new cycle and can produce one reset notification. Events from several windows are merged into one account-free notification with at most three window entries. Quiet hours use local time in the half-open `[start, end)` interval, including cross-midnight ranges, and suppressed events are not replayed. On Windows, notification name and icon behavior must be judged from an installed NSIS package; development notifications are not a release acceptance result.
 
@@ -92,9 +95,9 @@ The app checks once shortly after launch and then at most every six hours by def
 - Windows closes CodexUsageBar when installation starts; macOS restarts after replacing the app. The app never silently downloads, replaces, or restarts without confirmation.
 - A current build, network error, or signature-verification failure never affects the quota data already on screen. A signature failure cancels installation.
 
-## Privacy and read-only boundary
+## Privacy and feature boundary
 
-Only the Rust backend reads local credentials during a request. React receives a filtered snapshot containing status, plan label, refresh time, a stable error code, quota windows, and—when the successful usage response provides it—a masked account email. The frontend translates known error codes for authentication missing / invalid, network, rate limit, service unavailable, invalid response, and local bridge failures, with a safe generic fallback for unknown codes. The raw email is transformed in Rust (for example, `j***@example.com`) before it reaches the UI. React never receives `auth.json`, access tokens, request headers, raw API responses, raw errors, or an unmasked email address.
+Only the Rust backend reads local credentials during a request. Usage, trends, and notifications remain read-only; auto-continuation sends a real request only after explicit opt-in or test confirmation. React receives filtered usage and sanitized continuation status, never `auth.json`, access tokens, request headers, raw API responses, model replies, raw errors, or an unmasked email address.
 
 `auth.json` is searched in this order:
 
@@ -104,14 +107,16 @@ Only the Rust backend reads local credentials during a request. React receives a
 
 The usage feature only reads `GET https://chatgpt.com/backend-api/wham/usage`; the update feature separately reads the public HTTPS `latest.json` manifest, and the app:
 
-- Does not refresh OAuth tokens or write to `auth.json`.
+- Never reads refresh tokens, refreshes OAuth tokens, or writes to `auth.json`; every attempt rereads the latest access token.
+- Auto-continuation first refreshes usage read-only and skips sending when `reset_at` has already advanced. Otherwise it reads the live Codex model manifest and sends fixed `hi` to `POST https://chatgpt.com/backend-api/codex/responses` with `stream: true` and `store: false`. Only an SSE `response.completed` event counts as success; response text is neither displayed nor stored.
+- Stores auto-continuation runtime state in a separate versioned `quota-auto-continue.json` beside `settings.json`. It contains only a local salt, salted account/window fingerprints, target time, consumed slots, completion marker, timestamps, and sanitized phase/error codes. It never stores tokens, account IDs, email, request headers, model names, response bodies, or model replies. A slot is atomically persisted before sending, so crash recovery cannot repeat it.
 - Does not query or consume reset cards and never begins an OAuth flow.
 - Does not install frontend filesystem or HTTP permissions; sensitive I/O stays in Rust.
 - Derives the optional masked account summary only from a successful usage response. It does not read an email from `auth.json`, persist an unmasked email, or write either form of the email to runtime logs.
 - Stores trend history in a separate, versioned `usage-history.json` beside `settings.json`. The file contains a local random salt, an irreversible salted account fingerprint, anonymous locally salted quota-window stream keys / durations, reset-cycle timestamps, sample times, and remaining percentages. Raw upstream window IDs are hash inputs only. It never stores an account ID, Token, email, upstream label, raw response, proxy, URL, or authentication path. An account-fingerprint change clears all previous samples before the new account is recorded.
 - Exposes only sanitized percentages, timestamps, forecast metadata, and fallback-label metadata through the Settings-only history IPC. The Settings window cannot call the main card's `get_dashboard`, so it never receives the masked account, plan, or live raw snapshot.
 - Builds system-notification text from localized fallback window names and quota values only; it never includes the masked account, upstream window label, Token, or raw response.
-- Generates diagnostics from a fixed whitelist: schema and app version, platform / architecture, language, theme, refresh interval, consecutive failures, notification status / permission, dashboard status / error code, window count, refresh and update status, and history counts / storage state. It excludes Tokens, accounts, email, paths, proxy settings, URLs, quota percentages, reset times, curve points, raw errors, and logs.
+- Generates diagnostics from a fixed whitelist: schema/app/platform fields, refresh and notification status, dashboard/update/history summaries, the close-to-tray setting, and the continuation enabled flag/fixed enum phase. It excludes tokens, accounts, email, paths, proxy settings, URLs, quota percentages, reset or attempt times, curve points, raw errors, and logs.
 - Grants the Settings WebView clipboard **write-text only**—never clipboard read—and restricts external opening to the exact repository root, its Release pages, and its new-Issue page. No wildcard is granted for the repository root. The main WebView has neither clipboard nor notification-plugin permission; notification permission and test actions go through Settings-only Rust commands.
 - Checks updates only against the public HTTPS `latest.json` manifest containing signatures for each platform update payload for `creamtea47/codex-usage-bar`, without sending `auth.json`, tokens, email, or usage data. A payload must match the embedded public key before it can be installed.
 
@@ -123,16 +128,17 @@ If credentials are missing, expired, or rejected, the last successful snapshot r
 | --- | --- | --- |
 | Desktop UI | React 19 + TypeScript + Material UI + i18next + Recharts 3 + Vite | Compact bilingual card, lazy-loaded Trends page, themes, sidebar Settings, accessibility, drag and resize interactions |
 | Native boundary | Tauri 2 commands, events, and capabilities | Window-scoped IPC, OS notification permission / delivery, write-only clipboard, and exact repository / Issue / Release links |
-| Data and persistence | Rust + Tokio + Reqwest + Serde | Read-only credentials, fixed refresh and failure backoff, request de-duplication, cached snapshots, versioned local history, forecasting, settings, autostart, and redacted logs |
+| Data and persistence | Rust + Tokio + Reqwest + Serde | Read-only usage by default, opt-in minimal continuation requests, fixed refresh/backoff, request de-duplication, versioned sanitized runtime state, local history, forecasting, settings, autostart, and redacted logs |
 
-The complete frontend IPC surface is `get_dashboard`, `refresh_dashboard`, `get_settings`, `save_settings`, `set_notifications_enabled`, `send_test_notification`, `get_usage_history`, `set_history_enabled`, `clear_usage_history`, `report_settings_ui_fault`, `get_diagnostics`, `get_autostart`, `set_autostart`, `open_settings_window`, `mark_main_size_manual`, `get_app_update_info`, `check_app_update`, and `install_app_update`. `get_dashboard` and manual refresh are main-window only; notification, history, UI-fault reporting, diagnostics, autostart, and update actions are Settings-window only; `get_settings` is the minimal shared preference read. UI-fault reporting accepts only the fixed `trends-render-failed` code and never accepts exception text. `dashboard-updated` is emitted only to the main window; `usage-history-updated` is emitted only to Settings when samples, the account partition, or the history file actually change—not when collection is merely paused or resumed. Update IPC returns only version summaries and progress; URLs, signatures, raw manifests, credentials, and unmasked account details never cross the Rust boundary.
+The frontend IPC also includes Settings-only `get_quota_auto_continue_status`, `set_quota_auto_continue_enabled`, and `test_quota_auto_continue`, with sanitized updates on `quota-auto-continue-updated`. Ordinary `save_settings` preserves the current continuation flag and cannot bypass the dedicated side-effect command. Dashboard/manual refresh remain main-window only; notification, history, continuation, diagnostics, autostart, and update actions are Settings-window only. URLs, signatures, raw manifests, credentials, and unmasked account details never cross the Rust boundary.
 
 ## Logs and troubleshooting
 
 - Settings and independent main/settings-window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
+- Sanitized auto-continuation state: `quota-auto-continue.json` beside `settings.json`. Disabling the feature does not delete it; re-enabling first validates it against the latest current-account snapshot.
 - Local trend samples: `usage-history.json` beside `settings.json`. It is retained for seven days, capped at 2,500 points per stream and 16 streams, can be paused or cleared in **Trends**, and is never uploaded.
 - Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
-- Logs contain timestamps, operation results, HTTP status or transport categories, and redacted errors only. Settings UI faults use the fixed `trends-render-failed` category rather than exception text. Updater logs retain only version numbers and redacted categories such as available version, network, signature, or install—never tokens, Authorization headers, authentication-file contents, update URLs, or signature data.
+- Logs contain timestamps, levels, task deadlines, attempt numbers, selected model names, operation results, and sanitized result categories. They never contain tokens, account identifiers, Authorization headers, authentication-file contents, raw SSE, response bodies, or model replies.
 - On proxy-restricted networks, native requests follow the Windows/macOS system proxy and `HTTP_PROXY` / `HTTPS_PROXY`; proxy addresses and credentials are never written to logs.
 - If usage cannot be loaded, first confirm that Codex is signed in, then choose top-right **Refresh**. Automatic failures use the visible 1 / 3 / 5 / 10 / 30 minute retry schedule and return to the selected fixed interval after success.
 - Use **Copy sanitized diagnostics** for the whitelist summary. Never submit `auth.json`, a Token, unreviewed logs, credentials, or private account details to an Issue, screenshot, or comment.
@@ -187,11 +193,11 @@ The current signing key has no password. If a future encrypted key is used, conf
 Example maintainer release:
 
 ```powershell
-git tag -a v0.3.1 -m "v0.3.1 quota, notifications, and trends refinements"
+git tag -a v0.4.0 -m "v0.4.0 close-to-tray and quota auto-continuation"
 git push origin master
-git push origin v0.3.1
+git push origin v0.4.0
 ```
 
 ## Intentionally excluded
 
-There are no unconfirmed silent downloads or updates, taskbar-docked mode, general legacy-layout migration, cloud history sync, custom trend date ranges, OAuth token refresh, or reset-card operations. Existing installations receive only the one-time compact-height adjustment described above.
+There are no unconfirmed silent downloads or updates, taskbar-docked mode, general legacy-layout migration, cloud history sync, custom trend date ranges, custom continuation prompts, OAuth token refresh, OS-level forced wake, or multi-account management. Existing installations receive only the one-time compact-height adjustment described above.

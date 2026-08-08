@@ -1,6 +1,7 @@
 use crate::models::{MainWindowSizeMode, Settings, StoredSettings, WindowPlacement};
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::Path,
     time::{Duration, SystemTime},
 };
@@ -20,11 +21,21 @@ pub fn save_settings(path: &Path, settings: &StoredSettings) -> io::Result<()> {
     }
     let temporary_path = path.with_extension("json.tmp");
     let content = serde_json::to_vec_pretty(settings).map_err(io::Error::other)?;
-    fs::write(&temporary_path, content)?;
-    if path.exists() {
-        let _ = fs::remove_file(path);
+    let mut temporary = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary_path)?;
+    temporary.write_all(&content)?;
+    temporary.sync_all()?;
+    drop(temporary);
+    match fs::rename(&temporary_path, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_path);
+            Err(error)
+        }
     }
-    fs::rename(temporary_path, path)
 }
 
 pub fn normalize_stored_settings(mut settings: StoredSettings) -> StoredSettings {
@@ -215,6 +226,28 @@ mod tests {
             NotificationSettings::default()
         );
         assert!(settings.preferences.history_enabled);
+        assert!(settings.preferences.minimize_to_tray_on_close);
+        assert!(!settings.preferences.quota_auto_continue_enabled);
+    }
+
+    #[test]
+    fn settings_replace_atomically_without_leaving_a_temporary_file() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!("codex-usage-bar-settings-{nonce}.json"));
+        let mut stored = StoredSettings::default();
+        save_settings(&path, &stored).unwrap();
+        stored.preferences.minimize_to_tray_on_close = false;
+        stored.preferences.quota_auto_continue_enabled = true;
+        save_settings(&path, &stored).unwrap();
+
+        let loaded = load_settings(&path);
+        assert!(!loaded.preferences.minimize_to_tray_on_close);
+        assert!(loaded.preferences.quota_auto_continue_enabled);
+        assert!(!path.with_extension("json.tmp").exists());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
