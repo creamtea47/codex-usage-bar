@@ -2,7 +2,9 @@ mod app_update;
 mod auth;
 mod models;
 mod notification_rules;
+mod quota_audit;
 mod quota_auto_continue;
+mod quota_reset;
 mod refresh_scheduler;
 mod settings;
 mod tray;
@@ -18,14 +20,15 @@ use crate::{
         Settings, StoredSettings, WindowPlacement,
     },
     notification_rules::{
-        NotificationBatch, NotificationPolicy, NotificationReason, NotificationSnapshot,
-        NotificationTracker, NotificationWindow, QuietHours,
+        MatchedQuotaResetEvent, NotificationBatch, NotificationPolicy, NotificationReason,
+        NotificationSnapshot, NotificationTracker, NotificationWindow, QuietHours,
     },
     quota_auto_continue::{
         PreflightDecision, QuotaAutoContinueErrorCode, QuotaAutoContinuePhase,
         QuotaAutoContinueRuntime, QuotaAutoContinueStatus,
         STATE_FILE_NAME as QUOTA_AUTO_CONTINUE_STATE_FILE_NAME,
     },
+    quota_reset::NotificationDisposition,
     refresh_scheduler::failure_retry_seconds,
     settings::{
         apply_compact_layout_migration, cleanup_logs, load_settings,
@@ -35,8 +38,9 @@ use crate::{
     usage::{UsageAccountIdentity, UsageClient},
     usage_history::{
         clear_history_storage, load_history, save_history, AccountIdentity, AccountSelection,
-        Forecast as HistoryForecast, ForecastStatus as HistoryForecastStatus, HistoryStorageStatus,
-        HistoryWindowInput, UsageHistory, UsageHistoryRange, USAGE_HISTORY_FILE_NAME,
+        Forecast as HistoryForecast, ForecastStatus as HistoryForecastStatus,
+        HistoryGenerationInput, HistoryStorageStatus, HistoryWindowInput, UsageHistory,
+        UsageHistoryRange, USAGE_HISTORY_FILE_NAME,
     },
 };
 use chrono::{DateTime, Duration as ChronoDuration, Local, Timelike, Utc};
@@ -276,6 +280,20 @@ impl AppState {
                 remaining_percent: window.remaining_percent,
             })
             .collect::<Vec<_>>();
+        let generations = self
+            .quota_auto_continue
+            .current_generation()
+            .and_then(|generation| {
+                quota_window_index(snapshot, generation.window_seconds).map(|window_index| {
+                    HistoryGenerationInput {
+                        window_id: snapshot.quota_windows[window_index].id.clone(),
+                        window_seconds: generation.window_seconds,
+                        generation_id: generation.generation_id,
+                    }
+                })
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
         let identity = match account_identity {
             UsageAccountIdentity::AccountId(value) => AccountIdentity::AccountId(value),
             UsageAccountIdentity::Token(value) => AccountIdentity::Token(value),
@@ -311,10 +329,12 @@ impl AppState {
                 account_changed,
             };
         }
-        let mutation = match runtime
-            .history
-            .record_successful_snapshot(identity, sampled_at, &inputs)
-        {
+        let mutation = match runtime.history.record_successful_snapshot_with_generations(
+            identity,
+            sampled_at,
+            &inputs,
+            &generations,
+        ) {
             Ok(mutation) => mutation,
             Err(_) => {
                 runtime.storage_status = HistoryStorageStatus::Unavailable;
@@ -381,15 +401,16 @@ impl AppState {
         let result = match self.usage_client.fetch_dashboard().await {
             Ok(fetched) => {
                 let mut fresh = fetched.snapshot;
-                let history_effect = self
-                    .apply_history_to_snapshot(&mut fresh, &fetched.account_identity)
-                    .await;
                 let quota_auto_continue_changed = self.quota_auto_continue.observe_dashboard(
                     self.current_settings().quota_auto_continue_enabled,
                     &fetched.account_identity,
                     &fresh,
                     Utc::now(),
                 );
+                // 统一识别器必须先换代，趋势才能把当前成功快照写入正确 generation。
+                let history_effect = self
+                    .apply_history_to_snapshot(&mut fresh, &fetched.account_identity)
+                    .await;
                 self.consecutive_failures.store(0, Ordering::Relaxed);
                 let _schedule_guard = self.schedule_guard.lock().await;
                 // 必须在请求完成后、持有排期锁时重读，避免旧请求覆盖新设置。
@@ -638,6 +659,18 @@ fn notification_policy(settings: &Settings) -> NotificationPolicy {
     }
 }
 
+/// 统一识别器只暴露脱敏窗口范围；调用层在同一成功快照中选择相同范围、
+/// 最早重置的窗口，从而关联通知和趋势，同时不把上游窗口 ID 写入状态文件。
+fn quota_window_index(snapshot: &DashboardSnapshot, window_seconds: i64) -> Option<usize> {
+    snapshot
+        .quota_windows
+        .iter()
+        .enumerate()
+        .filter(|(_, window)| window.window_seconds == window_seconds && window.reset_at.is_some())
+        .min_by_key(|(_, window)| window.reset_at)
+        .map(|(index, _)| index)
+}
+
 fn localized_quota_label(window: &crate::models::QuotaWindow, language: Language) -> String {
     match (resolved_language(language), window.fallback_label) {
         (Language::ZhCn, QuotaFallbackLabel::FiveHour) => "5 小时限额".to_owned(),
@@ -705,6 +738,7 @@ fn send_usage_notifications(
     }
     let policy = notification_policy(&settings);
     let now_local = Local::now();
+    let local_minute_of_day = now_local.hour() as u16 * 60 + now_local.minute() as u16;
     let windows = snapshot
         .quota_windows
         .iter()
@@ -718,27 +752,54 @@ fn send_usage_notifications(
         })
         .collect::<Vec<_>>();
     let observed_at = snapshot.refreshed_at.unwrap_or_else(Utc::now);
+    let pending_event = state.quota_auto_continue.pending_reset_event(observed_at);
+    let matched_event = pending_event.as_ref().and_then(|event| {
+        quota_window_index(snapshot, event.window_seconds).map(|window_index| {
+            MatchedQuotaResetEvent {
+                window_index,
+                event,
+            }
+        })
+    });
+    let confirmed_resets = matched_event.as_slice();
     let batch = state
         .notification_tracker
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .evaluate(
+        .evaluate_with_confirmed_resets(
             &NotificationSnapshot {
                 observed_at_unix_seconds: observed_at.timestamp(),
-                local_minute_of_day: now_local.hour() as u16 * 60 + now_local.minute() as u16,
+                local_minute_of_day,
                 windows: &windows,
             },
             &policy,
-            |event_at| {
-                DateTime::<Utc>::from_timestamp(event_at, 0)
-                    .map(|value| value.with_timezone(&Local))
-                    .is_some_and(|local| {
-                        policy
-                            .quiet_hours
-                            .contains(local.hour() as u16 * 60 + local.minute() as u16)
-                    })
-            },
+            confirmed_resets,
+            |event_at| notification_event_is_quiet(&policy, event_at),
         );
+
+    let matched_window_index = matched_event.as_ref().map(|matched| matched.window_index);
+    if let Some(event) = pending_event
+        .as_ref()
+        .filter(|_| matched_window_index.is_some())
+    {
+        let disposition = if !policy.enabled || !policy.reset_enabled {
+            Some(NotificationDisposition::SuppressedDisabled)
+        } else if notification_event_is_quiet(&policy, event.detected_at.timestamp())
+            || policy.quiet_hours.contains(local_minute_of_day)
+        {
+            Some(NotificationDisposition::SuppressedQuiet)
+        } else {
+            None
+        };
+        if let Some(disposition) = disposition {
+            state.quota_auto_continue.mark_notification_suppressed(
+                &event.event_id,
+                disposition,
+                Utc::now(),
+            );
+        }
+    }
+
     let Some(batch) = batch else {
         return;
     };
@@ -752,16 +813,59 @@ fn send_usage_notifications(
     if body.is_empty() {
         return;
     }
-    if app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
-        .is_err()
-    {
-        log::warn!("系统通知发送失败：类别=platform。");
+    let reset_event_id = pending_event.as_ref().and_then(|event| {
+        let window_index = matched_window_index?;
+        batch
+            .items
+            .iter()
+            .any(|item| {
+                item.window_index == window_index
+                    && item.reasons.contains(&NotificationReason::Reset)
+            })
+            .then_some(event.event_id.as_str())
+    });
+    // 先持久化领取通知事件，再调用平台，避免进程在 show() 附近退出后重复投递；
+    // `queued` 只在平台调用成功后记录，保证审计日志描述的是真实调用结果。
+    if let Some(event_id) = reset_event_id {
+        if !state
+            .quota_auto_continue
+            .mark_notification_claimed(event_id, Utc::now())
+        {
+            log::warn!("额度重置通知未能持久化领取状态，已取消本次平台调用。");
+            return;
+        }
     }
+    let platform_result = app.notification().builder().title(title).body(body).show();
+    match platform_result {
+        Ok(()) => {
+            if let Some(event_id) = reset_event_id {
+                if !state
+                    .quota_auto_continue
+                    .mark_notification_queued(event_id, Utc::now())
+                {
+                    log::warn!("额度重置通知平台调用成功，但处置结果未能持久化。");
+                }
+            }
+        }
+        Err(_) => {
+            if let Some(event_id) = reset_event_id {
+                state
+                    .quota_auto_continue
+                    .mark_notification_failed(event_id, Utc::now());
+            }
+            log::warn!("系统通知发送失败：类别=platform。");
+        }
+    }
+}
+
+fn notification_event_is_quiet(policy: &NotificationPolicy, event_at: i64) -> bool {
+    DateTime::<Utc>::from_timestamp(event_at, 0)
+        .map(|value| value.with_timezone(&Local))
+        .is_some_and(|local| {
+            policy
+                .quiet_hours
+                .contains(local.hour() as u16 * 60 + local.minute() as u16)
+        })
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1733,7 +1837,7 @@ async fn run_scheduled_quota_auto_continue(app: &AppHandle, state: &AppState) {
             state
                 .quota_auto_continue
                 .mark_already_advanced(&attempt, Utc::now());
-            log::info!("额度自动接续无需发送：周额度周期已由其他请求推进。");
+            log::info!("额度自动接续无需发送：当前事件已由其他执行路径结案。");
             emit_quota_auto_continue_status(app, state);
             return;
         }
@@ -1748,6 +1852,16 @@ async fn run_scheduled_quota_auto_continue(app: &AppHandle, state: &AppState) {
             return;
         }
         PreflightDecision::Proceed => {}
+    }
+
+    // 只读预检期间用户可能关闭开关；真实 POST 前必须重新读取已落盘设置。
+    if !state.current_settings().quota_auto_continue_enabled {
+        state
+            .quota_auto_continue
+            .activate_cached_observation(false, Utc::now());
+        log::info!("额度自动接续已在真实请求前取消：用户关闭了功能。");
+        emit_quota_auto_continue_status(app, state);
+        return;
     }
 
     match state.quota_auto_continue.send_for_attempt(&attempt).await {

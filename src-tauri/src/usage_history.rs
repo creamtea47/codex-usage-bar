@@ -1,7 +1,11 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, fmt, fs, io, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt, fs, io,
+    path::Path,
+};
 
 pub const USAGE_HISTORY_FILE_NAME: &str = "usage-history.json";
 pub const USAGE_HISTORY_SCHEMA_VERSION: u32 = 1;
@@ -20,6 +24,7 @@ const SEVEN_DAY_BUCKET_SECONDS: i64 = 15 * 60;
 const MAX_POINTS_PER_STREAM: usize = 2_500;
 const MAX_STREAMS: usize = 16;
 const MAX_WINDOW_ID_BYTES: usize = 256;
+const GENERATION_ID_BYTES: usize = 32;
 
 /// 原始账号标识只应短暂存在于调用栈中。自定义 `Debug` 会固定脱敏，避免测试或错误
 /// 日志不慎打印 account id / Token。
@@ -112,6 +117,10 @@ struct StoredUsageStream {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredUsageCycle {
+    /// 统一重置识别器生成的脱敏代次 ID。旧版历史没有该字段时保持 `None`，
+    /// 由首次带代次的采样就地接管，避免升级本身制造一条虚假的趋势断点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_id: Option<String>,
     reset_at: Option<DateTime<Utc>>,
     samples: Vec<StoredUsageSample>,
 }
@@ -131,6 +140,15 @@ pub struct HistoryWindowInput {
     pub remaining_percent: u8,
 }
 
+/// 调用层把统一重置识别器的当前代次与同一份成功快照配对后传入。
+/// 原始窗口 ID 仅用于本次内存关联，持久化前仍会转换为本机加盐的流指纹。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryGenerationInput {
+    pub window_id: String,
+    pub window_seconds: i64,
+    pub generation_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountSelection {
     Initialized,
@@ -141,6 +159,8 @@ pub enum AccountSelection {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HistoryMutation {
     pub account_changed: bool,
+    /// 升级旧历史时可能只补上代次元数据而不新增采样点，仍需要触发安全落盘。
+    pub generation_metadata_updated: bool,
     pub samples_recorded: usize,
     pub samples_pruned: usize,
     pub samples_cleared: usize,
@@ -151,6 +171,7 @@ pub struct HistoryMutation {
 impl HistoryMutation {
     pub fn changed(self) -> bool {
         self.account_changed
+            || self.generation_metadata_updated
             || self.samples_recorded > 0
             || self.samples_pruned > 0
             || self.samples_cleared > 0
@@ -309,11 +330,27 @@ impl UsageHistory {
     }
 
     /// 只应在成功获取用量快照后调用。该方法先完成账号隔离，再依据采样策略写入。
+    #[allow(dead_code)] // 保留 v0.4.0 调用兼容与旧历史启发式回归测试。
     pub fn record_successful_snapshot(
         &mut self,
         identity: AccountIdentity<'_>,
         sampled_at: DateTime<Utc>,
         windows: &[HistoryWindowInput],
+    ) -> Result<HistoryMutation, FingerprintError> {
+        self.record_successful_snapshot_with_generations(identity, sampled_at, windows, &[])
+    }
+
+    /// 使用统一重置识别器的代次记录成功快照。只要同一额度窗口的代次发生变化，
+    /// 即使 `reset_at` 没变、额度只从 98/99% 恢复到 100%，趋势也会可靠断开。
+    ///
+    /// `generations` 是可选旁路输入，保留旧调用方的兼容行为；无代次时仍使用
+    /// 原有的 `reset_at`/额度回升推断，便于升级期间连续采样。
+    pub fn record_successful_snapshot_with_generations(
+        &mut self,
+        identity: AccountIdentity<'_>,
+        sampled_at: DateTime<Utc>,
+        windows: &[HistoryWindowInput],
+        generations: &[HistoryGenerationInput],
     ) -> Result<HistoryMutation, FingerprintError> {
         let mut mutation = HistoryMutation::default();
         match self.select_account(identity)? {
@@ -326,6 +363,16 @@ impl UsageHistory {
         }
 
         mutation.samples_pruned = self.prune_at(sampled_at);
+        let generation_by_window = generations
+            .iter()
+            .filter(|generation| valid_generation_input(generation))
+            .map(|generation| {
+                (
+                    (generation.window_id.as_str(), generation.window_seconds),
+                    generation.generation_id.as_str(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let mut seen = HashSet::new();
         for window in windows {
             if !valid_window_input(window) {
@@ -349,13 +396,16 @@ impl UsageHistory {
                 cycle_reset_at: window.cycle_reset_at,
                 remaining_percent: window.remaining_percent,
             };
+            let generation_id = generation_by_window
+                .get(&(window.window_id.as_str(), window.window_seconds))
+                .copied();
 
             let stream_index = self
                 .streams
                 .iter()
                 .position(|stream| stream.matches(&stored_window));
-            let recorded = if let Some(index) = stream_index {
-                self.streams[index].record(sampled_at, &stored_window)
+            let (recorded, generation_metadata_updated) = if let Some(index) = stream_index {
+                self.streams[index].record(sampled_at, &stored_window, generation_id)
             } else {
                 if self.streams.len() >= MAX_STREAMS {
                     mutation.samples_pruned += self.evict_oldest_stream();
@@ -364,9 +414,11 @@ impl UsageHistory {
                 self.streams.push(StoredUsageStream::from_first_sample(
                     sampled_at,
                     &stored_window,
+                    generation_id,
                 ));
-                true
+                (true, false)
             };
+            mutation.generation_metadata_updated |= generation_metadata_updated;
 
             if recorded {
                 mutation.samples_recorded += 1;
@@ -575,11 +627,16 @@ impl UsageHistory {
 }
 
 impl StoredUsageStream {
-    fn from_first_sample(sampled_at: DateTime<Utc>, window: &HistoryWindowInput) -> Self {
+    fn from_first_sample(
+        sampled_at: DateTime<Utc>,
+        window: &HistoryWindowInput,
+        generation_id: Option<&str>,
+    ) -> Self {
         Self {
             window_id: window.window_id.clone(),
             window_seconds: window.window_seconds,
             cycles: vec![StoredUsageCycle {
+                generation_id: generation_id.map(ToOwned::to_owned),
                 reset_at: window.cycle_reset_at,
                 samples: vec![StoredUsageSample {
                     sampled_at,
@@ -593,14 +650,19 @@ impl StoredUsageStream {
         self.window_id == window.window_id && self.window_seconds == window.window_seconds
     }
 
-    fn record(&mut self, sampled_at: DateTime<Utc>, window: &HistoryWindowInput) -> bool {
+    fn record(
+        &mut self,
+        sampled_at: DateTime<Utc>,
+        window: &HistoryWindowInput,
+        generation_id: Option<&str>,
+    ) -> (bool, bool) {
         let Some(latest_at) = self.latest_sample_at() else {
-            *self = Self::from_first_sample(sampled_at, window);
-            return true;
+            *self = Self::from_first_sample(sampled_at, window, generation_id);
+            return (true, false);
         };
         // 系统时间倒退时跳过该点，避免把当前周期写成非单调时间序列。
         if sampled_at < latest_at {
-            return false;
+            return (false, false);
         }
 
         let cycle = self
@@ -611,25 +673,41 @@ impl StoredUsageStream {
             .samples
             .last()
             .expect("non-empty cycle must contain a sample");
-        let reset_advanced = match (cycle.reset_at, window.cycle_reset_at) {
-            (Some(previous), Some(next)) => next > previous && sampled_at >= previous,
-            _ => false,
-        };
-        let inferred_reset = window.remaining_percent > last.remaining_percent
+        let generation_changed = cycle
+            .generation_id
+            .as_deref()
+            .zip(generation_id)
+            .is_some_and(|(previous, current)| previous != current);
+        // 一旦调用层提供统一代次，它就是唯一的分段依据；继续叠加旧启发式会让
+        // 同一代次内的 reset_at 校正或 99↔100 抖动制造重复断点。
+        let reset_advanced = generation_id.is_none()
+            && match (cycle.reset_at, window.cycle_reset_at) {
+                (Some(previous), Some(next)) => next > previous && sampled_at >= previous,
+                _ => false,
+            };
+        let inferred_reset = generation_id.is_none()
+            && window.remaining_percent > last.remaining_percent
             && (cycle.reset_at.is_none()
                 || cycle
                     .reset_at
                     .is_some_and(|known_reset| sampled_at >= known_reset));
 
-        if reset_advanced || inferred_reset {
+        if generation_changed || reset_advanced || inferred_reset {
             self.cycles.push(StoredUsageCycle {
+                generation_id: generation_id.map(ToOwned::to_owned),
                 reset_at: window.cycle_reset_at,
                 samples: vec![StoredUsageSample {
                     sampled_at,
                     remaining_percent: window.remaining_percent,
                 }],
             });
-            return true;
+            return (true, false);
+        }
+
+        let generation_metadata_updated = cycle.generation_id.is_none() && generation_id.is_some();
+        if generation_metadata_updated {
+            // 从 v0.4.0 历史平滑迁移：首次获知代次只补元数据，不把升级时刻伪装成重置。
+            cycle.generation_id = generation_id.map(ToOwned::to_owned);
         }
 
         if let Some(next_reset) = window.cycle_reset_at {
@@ -648,22 +726,22 @@ impl StoredUsageStream {
         if sampled_at == last.sampled_at {
             if last.remaining_percent != window.remaining_percent {
                 last.remaining_percent = window.remaining_percent;
-                return true;
+                return (true, generation_metadata_updated);
             }
-            return false;
+            return (false, generation_metadata_updated);
         }
 
         let interval_elapsed =
             sampled_at - last.sampled_at >= Duration::minutes(SAMPLE_INTERVAL_MINUTES);
         let percentage_changed = last.remaining_percent != window.remaining_percent;
         if !interval_elapsed && !percentage_changed {
-            return false;
+            return (false, generation_metadata_updated);
         }
         cycle.samples.push(StoredUsageSample {
             sampled_at,
             remaining_percent: window.remaining_percent,
         });
-        true
+        (true, generation_metadata_updated)
     }
 
     fn prune_before(&mut self, cutoff: DateTime<Utc>) -> usize {
@@ -812,7 +890,12 @@ impl StoredUsageStream {
         }
         let mut previous_cycle_last = None;
         self.cycles.iter().all(|cycle| {
-            if cycle.samples.is_empty() {
+            if cycle.samples.is_empty()
+                || cycle
+                    .generation_id
+                    .as_deref()
+                    .is_some_and(|generation| !valid_generation_id(generation))
+            {
                 return false;
             }
             let begins_after_previous =
@@ -946,6 +1029,17 @@ fn valid_window_input(window: &HistoryWindowInput) -> bool {
         && !window.window_id.trim().is_empty()
         && window.window_id.len() <= MAX_WINDOW_ID_BYTES
         && window.window_seconds > 0
+}
+
+fn valid_generation_input(generation: &HistoryGenerationInput) -> bool {
+    !generation.window_id.trim().is_empty()
+        && generation.window_id.len() <= MAX_WINDOW_ID_BYTES
+        && generation.window_seconds > 0
+        && valid_generation_id(&generation.generation_id)
+}
+
+fn valid_generation_id(generation_id: &str) -> bool {
+    decode_hex_exact(generation_id, GENERATION_ID_BYTES).is_some()
 }
 
 fn valid_stored_window_key(window_id: &str, window_seconds: i64) -> bool {
@@ -1137,6 +1231,31 @@ mod tests {
             .unwrap()
     }
 
+    fn generation(id: &str) -> HistoryGenerationInput {
+        HistoryGenerationInput {
+            window_id: "weekly".to_owned(),
+            window_seconds: 604_800,
+            generation_id: id.to_owned(),
+        }
+    }
+
+    fn record_with_generation(
+        history: &mut UsageHistory,
+        time: DateTime<Utc>,
+        remaining: u8,
+        reset_at: DateTime<Utc>,
+        generation_id: &str,
+    ) -> HistoryMutation {
+        history
+            .record_successful_snapshot_with_generations(
+                identity(),
+                time,
+                &[window("weekly", 604_800, remaining, Some(reset_at))],
+                &[generation(generation_id)],
+            )
+            .unwrap()
+    }
+
     fn temp_path(name: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -1316,6 +1435,89 @@ mod tests {
             .find(|stream| stream.window_id == weekly_key)
             .unwrap();
         assert_eq!(weekly.cycles.len(), 2);
+    }
+
+    #[test]
+    fn generation_change_splits_same_reset_at_recovery_from_98_or_99_to_100() {
+        for (index, previous) in [98, 99].into_iter().enumerate() {
+            let mut value = history();
+            let reset = at(20, 0);
+            let previous_generation = "aa".repeat(GENERATION_ID_BYTES);
+            let next_generation = if index == 0 {
+                "bb".repeat(GENERATION_ID_BYTES)
+            } else {
+                "cc".repeat(GENERATION_ID_BYTES)
+            };
+            record_with_generation(&mut value, at(8, 0), previous, reset, &previous_generation);
+            record_with_generation(&mut value, at(8, 1), 100, reset, &next_generation);
+
+            assert_eq!(value.streams[0].cycles.len(), 2);
+            let query = value.query(UsageHistoryRange::Hours24, at(8, 2));
+            assert_eq!(query.series[0].points.len(), 2);
+            assert!(query.series[0].points[0].break_before);
+            assert!(query.series[0].points[1].break_before);
+        }
+    }
+
+    #[test]
+    fn same_generation_ignores_percent_and_reset_at_noise_for_segmentation() {
+        let mut value = history();
+        let generation_id = "aa".repeat(GENERATION_ID_BYTES);
+        let reset = at(20, 0);
+        record_with_generation(&mut value, at(8, 0), 99, reset, &generation_id);
+
+        // 同代次中的 99→100 抖动与截止时间校正都只能增加采样点，不能伪造新周期。
+        record_with_generation(
+            &mut value,
+            at(8, 1),
+            100,
+            reset + Duration::hours(2),
+            &generation_id,
+        );
+        record_with_generation(&mut value, at(8, 2), 99, reset, &generation_id);
+        assert_eq!(value.streams[0].cycles.len(), 1);
+        assert_eq!(value.streams[0].cycles[0].samples.len(), 3);
+    }
+
+    #[test]
+    fn first_generation_adopts_legacy_cycle_without_an_upgrade_breakpoint() {
+        let mut value = history();
+        let reset = at(20, 0);
+        record(&mut value, at(8, 0), 80, reset);
+        let generation_id = "aa".repeat(GENERATION_ID_BYTES);
+        let mutation = record_with_generation(&mut value, at(8, 1), 80, reset, &generation_id);
+
+        assert_eq!(value.streams[0].cycles.len(), 1);
+        assert_eq!(value.streams[0].cycles[0].samples.len(), 1);
+        assert_eq!(mutation.samples_recorded, 0);
+        assert!(mutation.generation_metadata_updated);
+        assert!(mutation.changed());
+        assert_eq!(
+            value.streams[0].cycles[0].generation_id.as_deref(),
+            Some(generation_id.as_str())
+        );
+    }
+
+    #[test]
+    fn generation_is_persisted_but_never_exposed_by_trend_query() {
+        let mut value = history();
+        let generation_id = "aa".repeat(GENERATION_ID_BYTES);
+        record_with_generation(&mut value, at(8, 0), 99, at(20, 0), &generation_id);
+        let path = temp_path("generation-roundtrip");
+        save_history(&path, &value).unwrap();
+        let stored_json = fs::read_to_string(&path).unwrap();
+        assert!(stored_json.contains("generationId"));
+        assert!(stored_json.contains(&generation_id));
+
+        let loaded = load_history_at(&path, at(9, 0));
+        assert_eq!(loaded.status, HistoryStorageStatus::Ready);
+        assert_eq!(loaded.history, value);
+        let query_json =
+            serde_json::to_string(&loaded.history.query(UsageHistoryRange::Hours24, at(9, 0)))
+                .unwrap();
+        assert!(!query_json.contains("generationId"));
+        assert!(!query_json.contains(&generation_id));
+        let _ = fs::remove_file(path);
     }
 
     #[test]

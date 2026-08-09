@@ -130,6 +130,21 @@ export type QuotaAutoContinueErrorCode =
   | 'persistence'
   | 'busy';
 
+/** 自动排期的触发原因由 Rust 判定；前端只展示固定枚举，不根据百分比自行推断。 */
+export type QuotaAutoContinueTriggerReason = 'quotaRecovered' | 'deadlineReached';
+
+/**
+ * 最近一次自动执行或手动测试的脱敏摘要。
+ * slotIndex 使用后端的 0-based 尝试槽；手动测试没有槽位，因此为 null。
+ */
+export interface QuotaAutoContinueResult {
+  attemptedAt: string | null;
+  successAt: string | null;
+  errorCode: QuotaAutoContinueErrorCode | null;
+  model: string | null;
+  slotIndex: number | null;
+}
+
 /** 自动接续状态严格限制为脱敏排期字段，不向前端暴露账号或请求内容。 */
 export interface QuotaAutoContinueStatus {
   enabled: boolean;
@@ -141,6 +156,11 @@ export interface QuotaAutoContinueStatus {
   lastSuccessAt: string | null;
   lastErrorCode: QuotaAutoContinueErrorCode | null;
   selectedModel: string | null;
+  /** v0.4.1 起分开保存自动执行和手动测试，避免把“立即测试”误认成自动接续。 */
+  lastAutomaticResult?: QuotaAutoContinueResult | null;
+  lastManualResult?: QuotaAutoContinueResult | null;
+  lastTriggerReason?: QuotaAutoContinueTriggerReason | null;
+  lastResetDetectedAt?: string | null;
 }
 
 export type UsageHistoryRange = '24h' | '7d';

@@ -81,6 +81,10 @@ const disabledQuotaAutoContinue: QuotaAutoContinueStatus = {
   lastSuccessAt: null,
   lastErrorCode: null,
   selectedModel: null,
+  lastAutomaticResult: null,
+  lastManualResult: null,
+  lastTriggerReason: null,
+  lastResetDetectedAt: null,
 };
 
 function installMatchMedia(prefersDark = false) {
@@ -143,8 +147,9 @@ function prepareBridge(settings: Settings = zhSettings) {
   clipboardMocks.writeText.mockResolvedValue(undefined);
 }
 
-async function renderLoaded(settings: Settings = zhSettings) {
+async function renderLoaded(settings: Settings = zhSettings, quotaStatus?: QuotaAutoContinueStatus) {
   prepareBridge(settings);
+  if (quotaStatus) bridgeMocks.getQuotaAutoContinueStatus.mockResolvedValue(quotaStatus);
   const result = render(<SettingsWindow />);
   await screen.findByRole('heading', { name: settings.language === 'en' ? 'Display' : '显示' });
   return result;
@@ -250,13 +255,53 @@ describe('SettingsWindow', () => {
   });
 
   it('renders the quota auto-continuation safety boundary in English', async () => {
-    await renderLoaded(enSettings);
+    await renderLoaded(enSettings, {
+      ...disabledQuotaAutoContinue,
+      enabled: true,
+      phase: 'scheduled',
+      lastTriggerReason: 'deadlineReached',
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Quota Auto-Continuation' }));
 
     expect(await screen.findByRole('heading', { name: 'Quota Auto-Continuation' })).toBeTruthy();
     expect(screen.getByRole('switch', { name: 'Enable Quota Auto-Continuation' })).toBeTruthy();
     expect(screen.getByText(/This is not read-only/)).toBeTruthy();
+    expect(screen.getByText('Reset deadline reached')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Test now' })).toBeTruthy();
+  });
+
+  it('separates automatic and manual results and identifies quota recovery triggers', async () => {
+    await renderLoaded(
+      { ...zhSettings, quotaAutoContinueEnabled: true },
+      {
+        ...disabledQuotaAutoContinue,
+        enabled: true,
+        phase: 'scheduled',
+        lastTriggerReason: 'quotaRecovered',
+        lastResetDetectedAt: '2030-01-04T11:59:55Z',
+        lastAutomaticResult: {
+          attemptedAt: '2030-01-04T12:00:00Z',
+          successAt: '2030-01-04T12:00:03Z',
+          errorCode: null,
+          model: 'gpt-5.4',
+          slotIndex: 0,
+        },
+        lastManualResult: {
+          attemptedAt: '2030-01-03T12:00:00Z',
+          successAt: null,
+          errorCode: 'network',
+          model: null,
+          slotIndex: null,
+        },
+      },
+    );
+    fireEvent.click(screen.getByRole('button', { name: '额度自动接续' }));
+
+    expect(await screen.findByText('最近自动结果')).toBeTruthy();
+    expect(screen.getByText('最近手动测试')).toBeTruthy();
+    expect(screen.getByText('额度恢复')).toBeTruthy();
+    expect(screen.getByText(/成功（.*） · 第 1 个尝试槽 · 模型 gpt-5\.4/)).toBeTruthy();
+    expect(screen.getByText(/失败：网络请求失败/)).toBeTruthy();
   });
 
   it('preserves the dedicated quota auto-continuation flag during ordinary settings saves', async () => {

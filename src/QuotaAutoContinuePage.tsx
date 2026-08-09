@@ -19,7 +19,11 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { formatDateTime } from './format';
-import type { Language, QuotaAutoContinueStatus } from './types';
+import type {
+  Language,
+  QuotaAutoContinueResult,
+  QuotaAutoContinueStatus,
+} from './types';
 
 interface QuotaAutoContinuePageProps {
   enabled: boolean;
@@ -50,15 +54,10 @@ export default function QuotaAutoContinuePage({
   const [confirmAction, setConfirmAction] = useState<'enable' | 'test' | null>(null);
   const busy = disabled || isChanging || isTesting;
   const phase = status?.phase ?? (enabled ? 'waitingForWeeklyWindow' : 'disabled');
-  const latestResult = status?.lastErrorCode
-    ? t(`settings.quotaAutoContinue.errors.${status.lastErrorCode}`)
-    : status?.phase === 'sentAwaitingConfirmation'
-      ? t('settings.quotaAutoContinue.sentAwaitingConfirmation')
-      : status?.lastSuccessAt
-        ? t('settings.quotaAutoContinue.successAt', {
-            date: formatDateTime(status.lastSuccessAt, language),
-          })
-        : t('common.unavailable');
+  const automaticResult = automaticResultWithLegacyFallback(status);
+  const triggerReason = status?.lastTriggerReason
+    ? t(`settings.quotaAutoContinue.triggerReasons.${status.lastTriggerReason}`)
+    : t('common.unavailable');
 
   const confirm = async () => {
     const action = confirmAction;
@@ -121,10 +120,19 @@ export default function QuotaAutoContinuePage({
               label={t('settings.quotaAutoContinue.attemptedCount')}
               value={t('settings.quotaAutoContinue.attemptedValue', { count: status?.attemptedCount ?? 0 })}
             />
-            <StatusRow label={t('settings.quotaAutoContinue.latestResult')} value={latestResult} />
-            {status?.selectedModel && (
-              <StatusRow label={t('settings.quotaAutoContinue.selectedModel')} value={status.selectedModel} />
-            )}
+            <StatusRow label={t('settings.quotaAutoContinue.lastTriggerReason')} value={triggerReason} />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.lastResetDetectedAt')}
+              value={formatDateTime(status?.lastResetDetectedAt ?? null, language)}
+            />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.lastAutomaticResult')}
+              value={formatResult(automaticResult, language, t)}
+            />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.lastManualResult')}
+              value={formatResult(status?.lastManualResult ?? null, language, t)}
+            />
           </Stack>
         </Paper>
 
@@ -173,6 +181,43 @@ export default function QuotaAutoContinuePage({
       </Dialog>
     </>
   );
+}
+
+/** v0.4.0 没有分离结果对象；只有存在自动槽位时间时才安全地回退为自动结果。 */
+function automaticResultWithLegacyFallback(status: QuotaAutoContinueStatus | null): QuotaAutoContinueResult | null {
+  if (!status) return null;
+  if (status.lastAutomaticResult !== undefined) return status.lastAutomaticResult;
+  if (!status.lastAttemptAt) return null;
+  return {
+    attemptedAt: status.lastAttemptAt,
+    successAt: status.lastSuccessAt,
+    errorCode: status.lastErrorCode,
+    model: status.selectedModel,
+    slotIndex: null,
+  };
+}
+
+type Translator = ReturnType<typeof useTranslation>['t'];
+
+/** 将固定错误码和脱敏元数据合并为单行结果，不展示请求正文或模型回复。 */
+function formatResult(result: QuotaAutoContinueResult | null, language: Language, t: Translator): string {
+  if (!result) return t('common.unavailable');
+  const occurredAt = result.successAt ?? result.attemptedAt;
+  const date = formatDateTime(occurredAt, language);
+  const outcome = result.errorCode
+    ? t('settings.quotaAutoContinue.resultFailed', {
+        error: t(`settings.quotaAutoContinue.errors.${result.errorCode}`),
+        date,
+      })
+    : result.successAt
+      ? t('settings.quotaAutoContinue.resultSucceeded', { date })
+      : t('settings.quotaAutoContinue.resultAttempted', { date });
+  const details = [outcome];
+  if (result.slotIndex !== null) {
+    details.push(t('settings.quotaAutoContinue.resultSlot', { count: result.slotIndex + 1 }));
+  }
+  if (result.model) details.push(t('settings.quotaAutoContinue.resultModel', { model: result.model }));
+  return details.join(' · ');
 }
 
 function StatusRow({ label, value }: { label: string; value: string }) {
