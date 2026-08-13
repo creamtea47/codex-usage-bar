@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import SettingsWindow from './SettingsWindow';
-import { applyLanguagePreference } from './i18n';
+import i18n from './i18n';
 import {
   defaultSettings,
   type AppUpdateInfo,
@@ -50,6 +50,21 @@ vi.mock('./bridge', () => ({ usageBridge: bridgeMocks }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => windowMocks }));
 vi.mock('@tauri-apps/plugin-opener', () => openerMocks);
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => clipboardMocks);
+vi.mock('./TrendsErrorBoundary', () => ({
+  default: ({
+    active,
+    children,
+    recoveryRevision,
+  }: {
+    active?: boolean;
+    children: React.ReactNode;
+    recoveryRevision: number;
+  }) => (
+    <div data-active={String(active)} data-testid="trends-error-boundary" data-revision={recoveryRevision}>
+      {active ? children : null}
+    </div>
+  ),
+}));
 
 const zhSettings: Settings = { ...defaultSettings, language: 'zh-CN' };
 const enSettings: Settings = { ...defaultSettings, language: 'en' };
@@ -70,6 +85,11 @@ const emptyHistory: UsageHistoryResponse = {
   latestSampleAt: null,
   series: [],
 };
+
+async function resetTestLanguage(language: 'zh-CN' | 'en') {
+  await i18n.changeLanguage(language);
+  document.documentElement.lang = language;
+}
 
 const disabledQuotaAutoContinue: QuotaAutoContinueStatus = {
   enabled: false,
@@ -148,19 +168,41 @@ function prepareBridge(settings: Settings = zhSettings) {
 }
 
 async function renderLoaded(settings: Settings = zhSettings, quotaStatus?: QuotaAutoContinueStatus) {
+  await resetTestLanguage(settings.language === 'en' ? 'en' : 'zh-CN');
   prepareBridge(settings);
   if (quotaStatus) bridgeMocks.getQuotaAutoContinueStatus.mockResolvedValue(quotaStatus);
   const result = render(<SettingsWindow />);
   await screen.findByRole('heading', { name: settings.language === 'en' ? 'Display' : '显示' });
+  await waitFor(() =>
+    expect(
+      (screen.getByRole('switch', {
+        name: settings.language === 'en' ? 'Always on top' : '始终置顶',
+      }) as HTMLInputElement).disabled,
+    ).toBe(false),
+  );
+  await waitFor(() =>
+    expect(document.documentElement.lang).toBe(settings.language === 'en' ? 'en' : 'zh-CN'),
+  );
   return result;
 }
 
-beforeEach(() => installMatchMedia());
+beforeEach(async () => {
+  vi.spyOn(window.navigator, 'language', 'get').mockReturnValue('zh-CN');
+  vi.spyOn(window.navigator, 'languages', 'get').mockReturnValue(['zh-CN']);
+  installMatchMedia();
+  await resetTestLanguage('zh-CN');
+});
 
 afterEach(async () => {
+  cleanup();
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
   vi.clearAllMocks();
   vi.unstubAllGlobals();
-  await applyLanguagePreference('zh-CN');
+  await resetTestLanguage('zh-CN');
+  vi.restoreAllMocks();
 });
 
 describe('SettingsWindow', () => {
@@ -413,7 +455,7 @@ describe('SettingsWindow', () => {
 
     await screen.findByRole('heading', { name: '显示' });
     const alwaysOnTop = screen.getByRole('switch', { name: '始终置顶' });
-    expect((alwaysOnTop as HTMLInputElement).disabled).toBe(false);
+    await waitFor(() => expect((alwaysOnTop as HTMLInputElement).disabled).toBe(false));
     fireEvent.click(alwaysOnTop);
     await waitFor(() => expect(bridgeMocks.saveSettings).toHaveBeenCalledWith({ ...zhSettings, alwaysOnTop: true }));
 
@@ -436,6 +478,10 @@ describe('SettingsWindow', () => {
 
     const alwaysOnTop = screen.getByRole('switch', { name: '始终置顶' });
     const lockPosition = screen.getByRole('switch', { name: '锁定位置与大小' });
+    await waitFor(() => {
+      expect((alwaysOnTop as HTMLInputElement).disabled).toBe(false);
+      expect((lockPosition as HTMLInputElement).disabled).toBe(false);
+    });
     act(() => {
       alwaysOnTop.click();
       lockPosition.click();
@@ -686,6 +732,220 @@ describe('SettingsWindow', () => {
     expect(await screen.findByRole('heading', { name: '用量趋势' }, { timeout: 5_000 })).toBeTruthy();
     await waitFor(() => expect(bridgeMocks.getUsageHistory).toHaveBeenCalledWith('24h'));
     expect(bridgeMocks.getDashboard).not.toHaveBeenCalled();
+  });
+
+  it('applies only matching authoritative false-to-true trend snapshots as successful operations', async () => {
+    let persisted = zhSettings;
+    prepareBridge();
+    bridgeMocks.setHistoryEnabled.mockImplementation(async (enabled: boolean) => {
+      persisted = { ...persisted, historyEnabled: enabled };
+      return persisted;
+    });
+    render(<SettingsWindow />);
+    await screen.findByRole('heading', { name: '显示' });
+    fireEvent.click(screen.getByRole('button', { name: '趋势' }));
+    await screen.findByRole('heading', { name: '用量趋势' });
+    const collectionSwitch = screen.getByRole('switch', { name: '本地历史采集' });
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(false));
+    expect(await screen.findByText('历史采集已暂停。')).toBeTruthy();
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(true));
+    const feedbackClose = await screen.findByRole('button', { name: '关闭' });
+    expect(feedbackClose.closest('[role="alert"]')?.textContent).toContain('历史采集已开启。');
+    expect(screen.queryByText('趋势页面仍无法显示；历史采集设置可能已保存。')).toBeNull();
+    expect(bridgeMocks.setHistoryEnabled.mock.calls).toEqual([[false], [true]]);
+    expect(bridgeMocks.reportSettingsUiFault).not.toHaveBeenCalled();
+  });
+
+  it('holds a matching settings event until the delayed invoke response advances one revision', async () => {
+    const disabledSettings = { ...zhSettings, historyEnabled: false };
+    const eventSnapshot = { ...disabledSettings, historyEnabled: true, theme: 'light' as const };
+    const invokeSnapshot = { ...disabledSettings, historyEnabled: true, theme: 'dark' as const };
+    let settingsListener: ((settings: Settings) => void) | undefined;
+    let finishEnable: ((settings: Settings) => void) | undefined;
+    prepareBridge(disabledSettings);
+    bridgeMocks.listenForSettings.mockImplementation(async (handler: (settings: Settings) => void) => {
+      settingsListener = handler;
+      return () => undefined;
+    });
+    bridgeMocks.setHistoryEnabled.mockImplementation(
+      () =>
+        new Promise<Settings>((resolve) => {
+          finishEnable = resolve;
+        }),
+    );
+    render(<SettingsWindow />);
+    await screen.findByRole('heading', { name: '显示' });
+    await waitFor(() => expect(settingsListener).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: '趋势' }));
+    await screen.findByRole('heading', { name: '用量趋势' });
+    const boundary = screen.getByTestId('trends-error-boundary');
+    const collectionSwitch = screen.getByRole('switch', { name: '本地历史采集' });
+    expect(boundary.getAttribute('data-revision')).toBe('0');
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect(bridgeMocks.setHistoryEnabled).toHaveBeenCalledWith(true));
+    act(() => settingsListener?.(eventSnapshot));
+
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(false);
+    expect(boundary.getAttribute('data-revision')).toBe('0');
+    expect(windowMocks.setTheme).not.toHaveBeenCalledWith('light');
+
+    await act(async () => {
+      finishEnable?.(invokeSnapshot);
+      settingsListener?.(eventSnapshot);
+    });
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(true));
+    expect(boundary.getAttribute('data-revision')).toBe('1');
+    expect(document.querySelector('main')?.getAttribute('data-theme-mode')).toBe('dark');
+    expect(windowMocks.setTheme).toHaveBeenLastCalledWith('dark');
+
+    act(() => settingsListener?.(invokeSnapshot));
+    expect(boundary.getAttribute('data-revision')).toBe('1');
+    expect(document.querySelector('main')?.getAttribute('data-theme-mode')).toBe('dark');
+    expect(screen.queryByText('趋势页面仍无法显示；历史采集设置可能已保存。')).toBeNull();
+  });
+
+  it('recovers a rejected invoke with a matching authoritative readback', async () => {
+    const disabledSettings = { ...zhSettings, historyEnabled: false };
+    const readbackSettings = { ...disabledSettings, historyEnabled: true, theme: 'dark' as const };
+    let settingsListener: ((settings: Settings) => void) | undefined;
+    let failEnable: ((error: Error) => void) | undefined;
+    prepareBridge(disabledSettings);
+    bridgeMocks.listenForSettings.mockImplementation(async (handler: (settings: Settings) => void) => {
+      settingsListener = handler;
+      return () => undefined;
+    });
+    bridgeMocks.setHistoryEnabled.mockImplementation(
+      () =>
+        new Promise<Settings>((_resolve, reject) => {
+          failEnable = reject;
+        }),
+    );
+    bridgeMocks.getSettings
+      .mockResolvedValueOnce(disabledSettings)
+      .mockResolvedValueOnce(readbackSettings);
+    render(<SettingsWindow />);
+    await screen.findByRole('heading', { name: '显示' });
+    await waitFor(() => expect(settingsListener).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: '趋势' }));
+    await screen.findByRole('heading', { name: '用量趋势' });
+    const boundary = screen.getByTestId('trends-error-boundary');
+    const collectionSwitch = screen.getByRole('switch', { name: '本地历史采集' });
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect(bridgeMocks.setHistoryEnabled).toHaveBeenCalledWith(true));
+    act(() => settingsListener?.({ ...disabledSettings, historyEnabled: true }));
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(false);
+    expect(boundary.getAttribute('data-revision')).toBe('0');
+
+    await act(async () => failEnable?.(new Error('invoke response lost')));
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(true));
+    expect(boundary.getAttribute('data-revision')).toBe('1');
+    expect(document.querySelector('main')?.getAttribute('data-theme-mode')).toBe('dark');
+    expect(bridgeMocks.getSettings).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('无法更新历史采集设置。')).toBeNull();
+    expect(bridgeMocks.reportSettingsUiFault).not.toHaveBeenCalled();
+  });
+
+  it('applies a mismatched readback after invoke rejection without advancing revision', async () => {
+    const disabledSettings = { ...zhSettings, historyEnabled: false };
+    let settingsListener: ((settings: Settings) => void) | undefined;
+    let failEnable: ((error: Error) => void) | undefined;
+    prepareBridge(disabledSettings);
+    bridgeMocks.listenForSettings.mockImplementation(async (handler: (settings: Settings) => void) => {
+      settingsListener = handler;
+      return () => undefined;
+    });
+    bridgeMocks.setHistoryEnabled.mockImplementation(
+      () =>
+        new Promise<Settings>((_resolve, reject) => {
+          failEnable = reject;
+        }),
+    );
+    bridgeMocks.getSettings
+      .mockResolvedValueOnce(disabledSettings)
+      .mockResolvedValueOnce({ ...disabledSettings, theme: 'dark' });
+    render(<SettingsWindow />);
+    await screen.findByRole('heading', { name: '显示' });
+    await waitFor(() => expect(settingsListener).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: '趋势' }));
+    await screen.findByRole('heading', { name: '用量趋势' });
+    const boundary = screen.getByTestId('trends-error-boundary');
+    const collectionSwitch = screen.getByRole('switch', { name: '本地历史采集' });
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect(bridgeMocks.setHistoryEnabled).toHaveBeenCalledWith(true));
+    act(() => settingsListener?.({ ...disabledSettings, historyEnabled: true, theme: 'light' }));
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(false);
+    expect(boundary.getAttribute('data-revision')).toBe('0');
+    await act(async () => failEnable?.(new Error('invoke response lost')));
+
+    expect(await screen.findByText('无法更新历史采集设置。')).toBeTruthy();
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(false);
+    expect(boundary.getAttribute('data-revision')).toBe('0');
+    expect(document.querySelector('main')?.getAttribute('data-theme-mode')).toBe('dark');
+  });
+
+  it('retains the last reliable state when invoke and authoritative readback both fail', async () => {
+    const disabledSettings = { ...zhSettings, historyEnabled: false };
+    let settingsListener: ((settings: Settings) => void) | undefined;
+    let failEnable: ((error: Error) => void) | undefined;
+    prepareBridge(disabledSettings);
+    bridgeMocks.listenForSettings.mockImplementation(async (handler: (settings: Settings) => void) => {
+      settingsListener = handler;
+      return () => undefined;
+    });
+    bridgeMocks.setHistoryEnabled.mockImplementation(
+      () =>
+        new Promise<Settings>((_resolve, reject) => {
+          failEnable = reject;
+        }),
+    );
+    bridgeMocks.getSettings
+      .mockResolvedValueOnce(disabledSettings)
+      .mockRejectedValueOnce(new Error('readback unavailable'));
+    render(<SettingsWindow />);
+    await screen.findByRole('heading', { name: '显示' });
+    await waitFor(() => expect(settingsListener).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: '趋势' }));
+    await screen.findByRole('heading', { name: '用量趋势' });
+    const boundary = screen.getByTestId('trends-error-boundary');
+    const collectionSwitch = screen.getByRole('switch', { name: '本地历史采集' });
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect(bridgeMocks.setHistoryEnabled).toHaveBeenCalledWith(true));
+    act(() => settingsListener?.({ ...disabledSettings, historyEnabled: true, theme: 'dark' }));
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(false);
+    expect(boundary.getAttribute('data-revision')).toBe('0');
+    await act(async () => failEnable?.(new Error('invoke response lost')));
+
+    expect(await screen.findByText('无法更新历史采集设置。')).toBeTruthy();
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(false);
+    expect(boundary.getAttribute('data-revision')).toBe('0');
+    expect(bridgeMocks.getSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the authoritative snapshot and treats a mismatched trend response as a save failure', async () => {
+    prepareBridge({ ...zhSettings, historyEnabled: false });
+    bridgeMocks.setHistoryEnabled.mockResolvedValue({ ...zhSettings, historyEnabled: false });
+    render(<SettingsWindow />);
+    await screen.findByRole('heading', { name: '显示' });
+    fireEvent.click(screen.getByRole('button', { name: '趋势' }));
+    await screen.findByRole('heading', { name: '用量趋势' });
+    const collectionSwitch = screen.getByRole('switch', { name: '本地历史采集' });
+
+    fireEvent.click(collectionSwitch);
+
+    expect(
+      await screen.findByText('无法更新历史采集设置。'),
+    ).toBeTruthy();
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(false);
+    expect(bridgeMocks.setHistoryEnabled).toHaveBeenCalledWith(true);
+    expect(bridgeMocks.reportSettingsUiFault).not.toHaveBeenCalled();
   });
 
   it('persists the optional automatic update check preference', async () => {

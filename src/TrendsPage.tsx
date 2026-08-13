@@ -116,6 +116,7 @@ interface PreparedChartData {
 }
 
 interface Feedback {
+  id: number;
   key: TrendsTranslationKey;
   severity: AlertColor;
 }
@@ -407,6 +408,7 @@ export default function TrendsPage({
   const [isMutating, setIsMutating] = useState(false);
   const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
   const [historyListenerState, setHistoryListenerState] = useState<{
     source: TrendsPageProps['listenForUsageHistory'];
     ready: boolean;
@@ -415,6 +417,23 @@ export default function TrendsPage({
     !listenForUsageHistory ||
     (historyListenerState.source === listenForUsageHistory && historyListenerState.ready);
   const requestGenerationRef = useRef(0);
+  const isMutatingRef = useRef(false);
+  const feedbackIdRef = useRef(0);
+  const showFeedback = (key: TrendsTranslationKey, severity: AlertColor) => {
+    feedbackIdRef.current += 1;
+    setFeedback({ id: feedbackIdRef.current, key, severity });
+    setIsFeedbackOpen(true);
+  };
+  const beginMutation = useCallback(() => {
+    if (isMutatingRef.current) return false;
+    isMutatingRef.current = true;
+    setIsMutating(true);
+    return true;
+  }, []);
+  const finishMutation = useCallback(() => {
+    isMutatingRef.current = false;
+    setIsMutating(false);
+  }, []);
   const requestReload = useCallback(() => {
     // 先同步作废所有在途读取，再触发下一次读取，避免旧响应覆盖更新事件后的快照。
     requestGenerationRef.current += 1;
@@ -443,7 +462,7 @@ export default function TrendsPage({
       })
       .catch(() => {
         if (!disposed) {
-          setFeedback({ key: 'trends.events.error', severity: 'error' });
+          showFeedback('trends.events.error', 'error');
           // Event delivery is optional. A failed subscription must not block
           // the settings window from reading the current history snapshot.
           setHistoryListenerState({ source: listenForUsageHistory, ready: true });
@@ -481,24 +500,22 @@ export default function TrendsPage({
   }, [getUsageHistory, isHistoryListenerReady, range, reloadVersion]);
 
   const setCollectionEnabled = async (enabled: boolean) => {
-    if (isMutating) return;
-    setIsMutating(true);
+    if (!beginMutation()) return;
     try {
       await onSetHistoryEnabled(enabled);
-      setFeedback({
-        key: enabled ? 'trends.collection.enableSuccess' : 'trends.collection.disableSuccess',
-        severity: 'success',
-      });
+      showFeedback(
+        enabled ? 'trends.collection.enableSuccess' : 'trends.collection.disableSuccess',
+        'success',
+      );
     } catch {
-      setFeedback({ key: 'trends.collection.error', severity: 'error' });
+      showFeedback('trends.collection.error', 'error');
     } finally {
-      setIsMutating(false);
+      finishMutation();
     }
   };
 
   const clearHistory = async () => {
-    if (isMutating) return;
-    setIsMutating(true);
+    if (!beginMutation()) return;
     try {
       await onClearUsageHistory();
       // 即使历史事件监听失败，也要同步作废清除前的在途读取，避免旧快照让已删除数据重新出现。
@@ -518,11 +535,11 @@ export default function TrendsPage({
           : current,
       );
       setIsClearDialogOpen(false);
-      setFeedback({ key: 'trends.clear.success', severity: 'success' });
+      showFeedback('trends.clear.success', 'success');
     } catch {
-      setFeedback({ key: 'trends.clear.error', severity: 'error' });
+      showFeedback('trends.clear.error', 'error');
     } finally {
-      setIsMutating(false);
+      finishMutation();
     }
   };
 
@@ -707,22 +724,27 @@ export default function TrendsPage({
       </Dialog>
 
       <Snackbar
-        open={feedback !== null}
+        key={feedback?.id ?? 0}
+        open={feedback !== null && isFeedbackOpen}
         autoHideDuration={3_500}
-        onClose={() => setFeedback(null)}
+        onClose={(_event, reason) => {
+          if (reason !== 'clickaway') setIsFeedbackOpen(false);
+        }}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       >
-        {feedback ? (
-          <Alert
-            closeText={translateAny('common.close')}
-            severity={feedback.severity}
-            variant="filled"
-            onClose={() => setFeedback(null)}
-            sx={{ color: theme.palette.getContrastText(theme.palette[feedback.severity].main) }}
-          >
-            {translate(feedback.key)}
-          </Alert>
-        ) : undefined}
+        <Alert
+          closeText={translateAny('common.close')}
+          severity={feedback?.severity ?? 'info'}
+          variant="filled"
+          onClose={() => setIsFeedbackOpen(false)}
+          sx={{
+            color: theme.palette.getContrastText(
+              theme.palette[feedback?.severity ?? 'info'].main,
+            ),
+          }}
+        >
+          {feedback ? translate(feedback.key) : ''}
+        </Alert>
       </Snackbar>
     </Stack>
   );

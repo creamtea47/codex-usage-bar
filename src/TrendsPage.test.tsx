@@ -25,7 +25,7 @@ vi.mock('react-i18next', async (importOriginal) => {
     'trends.collection.disabled': 'Collection is paused. Existing history remains available.',
     'trends.collection.enableSuccess': 'Collection enabled.',
     'trends.collection.disableSuccess': 'Collection paused.',
-    'trends.collection.error': 'Unable to update collection.',
+    'trends.collection.error': 'Unable to update history collection.',
     'trends.clear.button': 'Clear history',
     'trends.clear.dialogTitle': 'Clear local history?',
     'trends.clear.dialogBody': 'This permanently deletes all local usage samples.',
@@ -230,6 +230,101 @@ describe('TrendsPage', () => {
     expect(getUsageHistory).toHaveBeenCalledTimes(1);
   });
 
+  it('re-enables while the previous success message is visible without hiding stored history', async () => {
+    const { getUsageHistory, onSetHistoryEnabled } = renderPage();
+    await screen.findByText('Weekly limit');
+    const collectionSwitch = screen.getByRole('switch', { name: 'Local history collection' });
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(false));
+    expect(await screen.findByText('Collection paused.')).toBeTruthy();
+    expect(screen.getByText('Weekly limit')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(true));
+    expect(await screen.findByText('Collection enabled.')).toBeTruthy();
+    expect(onSetHistoryEnabled.mock.calls).toEqual([[false], [true]]);
+    expect(screen.getByText('Weekly limit')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(screen.getByText(/3 samples/)).toBeTruthy();
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores clickaway from the previous success message while re-enabling is delayed', async () => {
+    let finishEnable: (() => void) | undefined;
+    const onSetHistoryEnabled = vi
+      .fn<(enabled: boolean) => Promise<void>>()
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishEnable = resolve;
+          }),
+      );
+    const { getUsageHistory } = renderPage({ onSetHistoryEnabled });
+    await screen.findByText('Weekly limit');
+    const collectionSwitch = screen.getByRole('switch', { name: 'Local history collection' });
+
+    fireEvent.click(collectionSwitch);
+    expect(await screen.findByText('Collection paused.')).toBeTruthy();
+    fireEvent.click(collectionSwitch);
+    await waitFor(() => expect(onSetHistoryEnabled).toHaveBeenCalledTimes(2));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    fireEvent.mouseDown(document.body);
+    fireEvent.click(document.body);
+
+    expect(screen.getByText('Collection paused.')).toBeTruthy();
+    await act(async () => finishEnable?.());
+    expect(await screen.findByText('Collection enabled.')).toBeTruthy();
+    expect((collectionSwitch as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText('Weekly limit')).toBeTruthy();
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps toggle mutations single-flight under rapid repeated events', async () => {
+    let finishDisable: (() => void) | undefined;
+    let finishEnable: (() => void) | undefined;
+    const onSetHistoryEnabled = vi
+      .fn<(enabled: boolean) => Promise<void>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishDisable = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishEnable = resolve;
+          }),
+      );
+    const { getUsageHistory } = renderPage({ onSetHistoryEnabled });
+    await screen.findByText('Weekly limit');
+    const collectionSwitch = screen.getByRole('switch', { name: 'Local history collection' });
+
+    act(() => {
+      collectionSwitch.click();
+      collectionSwitch.click();
+    });
+    expect(onSetHistoryEnabled.mock.calls).toEqual([[false]]);
+    expect((collectionSwitch as HTMLInputElement).disabled).toBe(true);
+    await act(async () => finishDisable?.());
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(false));
+
+    act(() => {
+      collectionSwitch.click();
+      collectionSwitch.click();
+    });
+    expect(onSetHistoryEnabled.mock.calls).toEqual([[false], [true]]);
+    expect((collectionSwitch as HTMLInputElement).disabled).toBe(true);
+    await act(async () => finishEnable?.());
+    await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(true));
+    expect(screen.getByText('Weekly limit')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps collection state and existing charts when persisting the toggle fails', async () => {
     const onSetHistoryEnabled = vi.fn(async () => {
       throw new Error('private settings failure');
@@ -240,7 +335,7 @@ describe('TrendsPage', () => {
     const collectionSwitch = screen.getByRole('switch', { name: 'Local history collection' });
     fireEvent.click(collectionSwitch);
 
-    expect(await screen.findByText('Unable to update collection.')).toBeTruthy();
+    expect(await screen.findByText('Unable to update history collection.')).toBeTruthy();
     expect((collectionSwitch as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText('Weekly limit')).toBeTruthy();
     expect(screen.queryByText('private settings failure')).toBeNull();

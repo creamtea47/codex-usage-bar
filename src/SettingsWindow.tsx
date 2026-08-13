@@ -55,6 +55,7 @@ import NotificationsPage from './NotificationsPage';
 import QuotaAutoContinuePage from './QuotaAutoContinuePage';
 import { createUsageTheme } from './theme';
 import TrendsErrorBoundary from './TrendsErrorBoundary';
+import { applySettingsViewSnapshot, type SettingsViewState } from './trendsOperationState';
 import {
   defaultSettings,
   type AppUpdateInfo,
@@ -109,6 +110,16 @@ type FeedbackKey =
 interface Feedback {
   key: FeedbackKey;
   severity: AlertColor;
+}
+
+interface SettingsMutationResult<T> {
+  confirmedHistoryEnabled?: boolean;
+  settings: Settings;
+  value: T;
+}
+
+interface PendingHistoryOperation {
+  enabled: boolean;
 }
 
 const drawerWidth = 208;
@@ -174,11 +185,16 @@ function releaseNotesUrl(version: string | null | undefined): string {
 /** Independent settings window; all sensitive operations remain in label-gated Rust commands. */
 export default function SettingsWindow() {
   const { t, i18n } = useTranslation();
-  const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [settingsView, setSettingsView] = useState<SettingsViewState>({
+    settings: defaultSettings,
+    trendsOperationRevision: 0,
+  });
+  const { settings, trendsOperationRevision } = settingsView;
   const settingsRef = useRef<Settings>(defaultSettings);
   const settingsLoadedRef = useRef(false);
   const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const pendingSettingsMutations = useRef(0);
+  const pendingHistoryOperationRef = useRef<PendingHistoryOperation | null>(null);
   const [autostart, setAutostart] = useState(false);
   const [autostartLoaded, setAutostartLoaded] = useState(false);
   const [activeSection, setActiveSection] = useState<SettingsSection>('display');
@@ -199,20 +215,22 @@ export default function SettingsWindow() {
   const prefersDark = useMediaQuery('(prefers-color-scheme: dark)', { noSsr: true });
   const language = resolveSupportedLanguage(i18n.resolvedLanguage ?? i18n.language);
 
-  const applySettingsSnapshot = useCallback((next: Settings) => {
+  const applySettingsSnapshot = useCallback((next: Settings, confirmedHistoryEnabled?: boolean) => {
     settingsRef.current = next;
-    setSettings(next);
+    setSettingsView((current) =>
+      applySettingsViewSnapshot(current, next, confirmedHistoryEnabled),
+    );
   }, []);
 
   const enqueueSettingsMutation = useCallback(
-    <T,>(mutation: (current: Settings) => Promise<{ settings: Settings; value: T }>): Promise<T> => {
+    <T,>(mutation: (current: Settings) => Promise<SettingsMutationResult<T>>): Promise<T> => {
       pendingSettingsMutations.current += 1;
       setIsSaving(true);
 
       const result = settingsMutationTail.current.then(async () => {
         if (!settingsLoadedRef.current) throw new Error('settings-not-loaded');
         const completed = await mutation(settingsRef.current);
-        applySettingsSnapshot(completed.settings);
+        applySettingsSnapshot(completed.settings, completed.confirmedHistoryEnabled);
         return completed.value;
       });
 
@@ -255,7 +273,16 @@ export default function SettingsWindow() {
         registerListener(
           usageBridge.listenForSettings((next) => {
             settingsEventReceived = true;
-            if (!disposed) applySettingsSnapshot(next);
+            const pendingHistoryOperation = pendingHistoryOperationRef.current;
+            if (disposed) return;
+            if (pendingHistoryOperation && next.historyEnabled === pendingHistoryOperation.enabled) {
+              // Rust emits the authoritative snapshot before the invoke response resolves.
+              // Commit only the command response (or an explicit readback) so settings and
+              // the recovery revision change atomically and unrelated same-value events
+              // cannot confirm this operation.
+              return;
+            }
+            applySettingsSnapshot(next);
           }),
         ),
         registerListener(
@@ -390,10 +417,35 @@ export default function SettingsWindow() {
 
   const updateHistoryEnabled = useCallback(
     async (enabled: boolean) => {
-      await enqueueSettingsMutation(async () => ({
-        settings: await usageBridge.setHistoryEnabled(enabled),
-        value: undefined,
-      }));
+      const operation: PendingHistoryOperation = { enabled };
+      pendingHistoryOperationRef.current = operation;
+      try {
+        const matched = await enqueueSettingsMutation(async () => {
+          let next: Settings;
+          try {
+            next = await usageBridge.setHistoryEnabled(enabled);
+          } catch (operationError) {
+            try {
+              next = await usageBridge.getSettings();
+            } catch {
+              // Neither the command nor an explicit readback produced an authoritative
+              // snapshot, so retain the last reliable UI state.
+              throw operationError;
+            }
+          }
+          const matchesRequest = next.historyEnabled === enabled;
+          return {
+            confirmedHistoryEnabled: matchesRequest ? enabled : undefined,
+            settings: next,
+            value: matchesRequest,
+          };
+        });
+        if (!matched) throw new Error('history-setting-mismatch');
+      } finally {
+        if (pendingHistoryOperationRef.current === operation) {
+          pendingHistoryOperationRef.current = null;
+        }
+      }
     },
     [enqueueSettingsMutation],
   );
@@ -729,8 +781,11 @@ export default function SettingsWindow() {
               />
             )}
 
-            {activeSection === 'trends' && settingsLoadState === 'ready' && (
-              <TrendsErrorBoundary>
+            {settingsLoadState === 'ready' && (
+              <TrendsErrorBoundary
+                active={activeSection === 'trends'}
+                recoveryRevision={trendsOperationRevision}
+              >
                 <Suspense fallback={<LinearProgress aria-label={t('trends.loading')} />}>
                   <TrendsPage
                     historyEnabled={settings.historyEnabled}

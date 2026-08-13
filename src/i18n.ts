@@ -287,8 +287,10 @@ export const resources = {
         events: { error: '无法监听历史更新。' },
         loading: '正在加载历史',
         loadError: '无法加载用量历史。',
-        renderError: '趋势页面暂时不可用。请重试，或先切换到其他设置页面。',
+        recovering: '正在自动恢复趋势页面',
+        renderError: '趋势页面仍无法显示；历史采集设置可能已保存。',
         retry: '重试',
+        retryDisplay: '重试显示',
         empty: {
           title: '还没有历史数据',
           enabledDescription: '成功刷新后会逐步出现样本。',
@@ -624,8 +626,10 @@ export const resources = {
         events: { error: 'Unable to follow history updates.' },
         loading: 'Loading history',
         loadError: 'Unable to load usage history.',
-        renderError: 'The Trends page is temporarily unavailable. Retry or switch to another settings page.',
+        recovering: 'Recovering the Trends page',
+        renderError: 'The Trends page still cannot be displayed; the collection setting may already be saved.',
         retry: 'Retry',
+        retryDisplay: 'Retry display',
         empty: {
           title: 'No history yet',
           enabledDescription: 'Samples will appear after successful refreshes.',
