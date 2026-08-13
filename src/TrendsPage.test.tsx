@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TrendsPage from './TrendsPage';
-import type { UsageHistoryResponse, UsageHistoryRange } from './types';
+import type { UsageHistoryRequest, UsageHistoryResponse } from './types';
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
@@ -18,6 +18,23 @@ vi.mock('react-i18next', async (importOriginal) => {
     'trends.range.aria': 'History range',
     'trends.range.hours24': '24 hours',
     'trends.range.days7': '7 days',
+    'trends.range.days30': '30 days',
+    'trends.range.custom': 'Custom',
+    'trends.range.customApplied': 'Custom range',
+    'trends.custom.dialogTitle': 'Custom date range',
+    'trends.custom.dialogDescription': 'Choose up to 30 local calendar days.',
+    'trends.custom.startLabel': 'Start date',
+    'trends.custom.endLabel': 'End date',
+    'trends.custom.cancel': 'Cancel',
+    'trends.custom.apply': 'Apply',
+    'trends.custom.error.required': 'Choose both dates.',
+    'trends.custom.error.invalid': 'Enter a valid date.',
+    'trends.custom.error.future': 'Future dates are not available.',
+    'trends.custom.error.reversed': 'End date must be on or after start date.',
+    'trends.custom.error.tooLong': 'Choose no more than 30 calendar days.',
+    'trends.custom.error.emptyToday': 'No time has elapsed today yet.',
+    'trends.partialCoverage': 'Only part of this range is available in local history.',
+    'trends.partialCoverageFrom': 'Only part is available. Data starts {{date}}.',
     'trends.localOnly.title': 'Stored only on this device',
     'trends.localOnly.description': 'History is never uploaded.',
     'trends.collection.label': 'Local history collection',
@@ -98,7 +115,13 @@ vi.mock('recharts', () => ({
 }));
 
 const populatedHistory: UsageHistoryResponse = {
-  range: '24h',
+  request: { kind: 'preset', preset: '24h' },
+  appliedStartAt: '2029-12-31T02:00:00Z',
+  appliedEndAtExclusive: '2030-01-01T02:00:00Z',
+  availableStartAt: '2030-01-01T00:00:00Z',
+  availableEndAt: '2030-01-01T02:00:00Z',
+  truncatedByRetention: false,
+  bucketSeconds: 60,
   historyEnabled: true,
   storageStatus: 'ready',
   sampleCount: 3,
@@ -128,9 +151,15 @@ const populatedHistory: UsageHistoryResponse = {
   ],
 };
 
-function emptyHistory(range: UsageHistoryRange): UsageHistoryResponse {
+function emptyHistory(request: UsageHistoryRequest): UsageHistoryResponse {
   return {
-    range,
+    request,
+    appliedStartAt: '2030-01-01T00:00:00Z',
+    appliedEndAtExclusive: '2030-01-02T00:00:00Z',
+    availableStartAt: null,
+    availableEndAt: null,
+    truncatedByRetention: false,
+    bucketSeconds: 60,
     historyEnabled: true,
     storageStatus: 'empty',
     sampleCount: 0,
@@ -141,10 +170,11 @@ function emptyHistory(range: UsageHistoryRange): UsageHistoryResponse {
 }
 
 interface RenderOptions {
-  getUsageHistory?: (range: UsageHistoryRange) => Promise<UsageHistoryResponse>;
+  getUsageHistory?: (request: UsageHistoryRequest) => Promise<UsageHistoryResponse>;
   onSetHistoryEnabled?: (enabled: boolean) => Promise<void>;
   onClearUsageHistory?: () => Promise<void>;
   listenForUsageHistory?: (handler: () => void) => Promise<() => void>;
+  now?: () => Date;
 }
 
 function renderPage(options: RenderOptions = {}) {
@@ -166,12 +196,13 @@ function renderPage(options: RenderOptions = {}) {
         }}
         onClearUsageHistory={onClearUsageHistory}
         listenForUsageHistory={options.listenForUsageHistory}
+        now={options.now}
       />
     );
   }
 
-  render(<StatefulTrendsPage />);
-  return { getUsageHistory, onSetHistoryEnabled, onClearUsageHistory };
+  const view = render(<StatefulTrendsPage />);
+  return { getUsageHistory, onSetHistoryEnabled, onClearUsageHistory, unmount: view.unmount };
 }
 
 describe('TrendsPage', () => {
@@ -183,7 +214,7 @@ describe('TrendsPage', () => {
     const { getUsageHistory } = renderPage();
 
     expect(await screen.findByText('Weekly limit')).toBeTruthy();
-    expect(getUsageHistory).toHaveBeenCalledWith('24h');
+    expect(getUsageHistory).toHaveBeenCalledWith({ kind: 'preset', preset: '24h' });
     expect(screen.getByText('72% remaining')).toBeTruthy();
     expect(screen.getByText('8% consumed')).toBeTruthy();
     expect(screen.getByText('Expected to last until reset')).toBeTruthy();
@@ -196,13 +227,168 @@ describe('TrendsPage', () => {
   });
 
   it('switches between the fixed 24-hour and 7-day ranges', async () => {
-    const getUsageHistory = vi.fn(async (range: UsageHistoryRange) => emptyHistory(range));
+    const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
     renderPage({ getUsageHistory });
     await screen.findByText('No history yet');
 
     fireEvent.click(screen.getByRole('button', { name: '7 days' }));
-    await waitFor(() => expect(getUsageHistory).toHaveBeenLastCalledWith('7d'));
+    await waitFor(() =>
+      expect(getUsageHistory).toHaveBeenLastCalledWith({ kind: 'preset', preset: '7d' }),
+    );
     expect(screen.getByRole('button', { name: '7 days' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('requests the fixed 30-day preset and keeps 24 hours as a fresh-mount default', async () => {
+    const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
+    const firstView = renderPage({ getUsageHistory });
+    await screen.findByText('No history yet');
+
+    fireEvent.click(screen.getByRole('button', { name: '30 days' }));
+    await waitFor(() =>
+      expect(getUsageHistory).toHaveBeenLastCalledWith({ kind: 'preset', preset: '30d' }),
+    );
+    expect(screen.getByRole('button', { name: '30 days' }).getAttribute('aria-pressed')).toBe('true');
+
+    firstView.unmount();
+    renderPage({ getUsageHistory });
+    await waitFor(() =>
+      expect(getUsageHistory).toHaveBeenLastCalledWith({ kind: 'preset', preset: '24h' }),
+    );
+    expect(screen.getByRole('button', { name: '24 hours' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('keeps custom dates as a draft until Apply and sends a half-open UTC request', async () => {
+    const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
+    renderPage({ getUsageHistory, now: () => new Date(2030, 0, 20, 15, 30) });
+    await screen.findByText('No history yet');
+
+    const trigger = screen.getByRole('button', { name: 'Custom' });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog', { name: 'Custom date range' });
+    expect(dialog.getAttribute('aria-describedby')).toBeTruthy();
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+
+    const start = document.getElementById('custom-history-start-date') as HTMLInputElement;
+    const end = document.getElementById('custom-history-end-date') as HTMLInputElement;
+    fireEvent.change(start, { target: { value: '01/10/2030' } });
+    fireEvent.change(end, { target: { value: '01/12/2030' } });
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => {
+      const request = getUsageHistory.mock.calls.at(-1)?.[0];
+      expect(request).toMatchObject({ kind: 'custom' });
+      if (!request || request.kind !== 'custom') throw new Error('expected custom request');
+      expect(request.startAt).toBe(new Date(2030, 0, 10).toISOString());
+      expect(request.endAtExclusive).toBe(new Date(2030, 0, 13).toISOString());
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Custom date range' })).toBeNull(),
+    );
+    expect(trigger.getAttribute('aria-pressed')).toBe('true');
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Custom range' }));
+    expect(await screen.findByRole('dialog', { name: 'Custom date range' })).toBeTruthy();
+    expect(getUsageHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps a custom range ending today at the instant Apply is clicked', async () => {
+    const applyInstant = new Date(2030, 0, 20, 15, 30);
+    const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
+    renderPage({ getUsageHistory, now: () => applyInstant });
+    await screen.findByText('No history yet');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Custom' }));
+    await screen.findByRole('dialog', { name: 'Custom date range' });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => {
+      const request = getUsageHistory.mock.calls.at(-1)?.[0];
+      expect(request).toMatchObject({ kind: 'custom' });
+      if (!request || request.kind !== 'custom') throw new Error('expected custom request');
+      expect(request.endAtExclusive).toBe(applyInstant.toISOString());
+    });
+  });
+
+  it('disables Apply for a today-only custom range at exact local midnight', async () => {
+    const localMidnight = new Date(2030, 0, 20, 0, 0, 0, 0);
+    const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
+    renderPage({ getUsageHistory, now: () => localMidnight });
+    await screen.findByText('No history yet');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Custom' }));
+    const start = document.getElementById('custom-history-start-date') as HTMLInputElement;
+    fireEvent.change(start, { target: { value: '01/20/2030' } });
+
+    expect(await screen.findByText('No time has elapsed today yet.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels custom draft changes without querying and validates future/reversed/overlong dates', async () => {
+    const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
+    renderPage({ getUsageHistory, now: () => new Date(2030, 0, 31, 12, 0) });
+    await screen.findByText('No history yet');
+    fireEvent.click(screen.getByRole('button', { name: 'Custom' }));
+
+    const start = document.getElementById('custom-history-start-date') as HTMLInputElement;
+    const end = document.getElementById('custom-history-end-date') as HTMLInputElement;
+    fireEvent.change(start, { target: { value: '01/01/2030' } });
+    fireEvent.change(end, { target: { value: '02/01/2030' } });
+    expect(await screen.findByText('Future dates are not available.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(start, { target: { value: '01/20/2030' } });
+    fireEvent.change(end, { target: { value: '01/10/2030' } });
+    expect(await screen.findByText('End date must be on or after start date.')).toBeTruthy();
+    fireEvent.change(start, { target: { value: '01/01/2030' } });
+    fireEvent.change(end, { target: { value: '01/31/2030' } });
+    expect(await screen.findByText('Choose no more than 30 calendar days.')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(getUsageHistory).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Custom date range' })).toBeNull(),
+    );
+    expect(screen.getByRole('button', { name: '24 hours' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('announces partial local coverage returned by the backend', async () => {
+    const response = emptyHistory({ kind: 'preset', preset: '30d' });
+    response.truncatedByRetention = true;
+    const getUsageHistory = vi.fn(async () => response);
+    renderPage({ getUsageHistory });
+    await screen.findByText('No history yet');
+
+    fireEvent.click(screen.getByRole('button', { name: '30 days' }));
+    expect(await screen.findByText('Only part of this range is available in local history.')).toBeTruthy();
+  });
+
+  it('shows the actual available start for a leading coverage gap', async () => {
+    const response = emptyHistory({ kind: 'preset', preset: '30d' });
+    response.appliedStartAt = '2030-01-01T00:00:00Z';
+    response.availableStartAt = '2030-01-03T12:30:00Z';
+    const getUsageHistory = vi.fn(async () => response);
+
+    renderPage({ getUsageHistory });
+
+    expect(await screen.findByText(/Only part is available\. Data starts/)).toBeTruthy();
+    expect(screen.getByText(/01\/03.*20:30/)).toBeTruthy();
+  });
+
+  it('does not report partial coverage only because the latest sample predates query now', async () => {
+    const response = emptyHistory({ kind: 'preset', preset: '24h' });
+    response.appliedStartAt = '2030-01-01T00:00:00Z';
+    response.appliedEndAtExclusive = '2030-01-02T00:00:00Z';
+    response.availableStartAt = '2030-01-01T00:00:00Z';
+    response.availableEndAt = '2030-01-01T23:59:00Z';
+    const getUsageHistory = vi.fn(async () => response);
+
+    renderPage({ getUsageHistory });
+    await screen.findByText('No history yet');
+
+    expect(screen.queryByText(/Only part/)).toBeNull();
   });
 
   it('pauses collection without rereading or hiding existing history, and clears only after confirmation', async () => {
@@ -344,9 +530,9 @@ describe('TrendsPage', () => {
 
   it('shows a safe load error and lets the user retry', async () => {
     const getUsageHistory = vi
-      .fn<(range: UsageHistoryRange) => Promise<UsageHistoryResponse>>()
+      .fn<(request: UsageHistoryRequest) => Promise<UsageHistoryResponse>>()
       .mockRejectedValueOnce(new Error('secret raw error'))
-      .mockResolvedValueOnce(emptyHistory('24h'));
+      .mockResolvedValueOnce(emptyHistory({ kind: 'preset', preset: '24h' }));
     renderPage({ getUsageHistory });
 
     expect(await screen.findByText('Unable to load usage history.')).toBeTruthy();
@@ -363,9 +549,9 @@ describe('TrendsPage', () => {
       return () => undefined;
     });
     const getUsageHistory = vi
-      .fn<(range: UsageHistoryRange) => Promise<UsageHistoryResponse>>()
+      .fn<(request: UsageHistoryRequest) => Promise<UsageHistoryResponse>>()
       .mockResolvedValueOnce(populatedHistory)
-      .mockResolvedValueOnce(emptyHistory('24h'));
+      .mockResolvedValueOnce(emptyHistory({ kind: 'preset', preset: '24h' }));
     const onClearUsageHistory = vi.fn(async () => {
       historyHandler?.();
     });
@@ -381,21 +567,30 @@ describe('TrendsPage', () => {
 
   it('does not let an in-flight read restore data after history is cleared without an event listener', async () => {
     let finishInitialRead: ((history: UsageHistoryResponse) => void) | undefined;
-    const getUsageHistory = vi.fn(
-      () =>
-        new Promise<UsageHistoryResponse>((resolve) => {
-          finishInitialRead = resolve;
-        }),
-    );
+    const responseWithPartialCoverage = {
+      ...populatedHistory,
+      appliedStartAt: '2029-12-01T00:00:00Z',
+      availableStartAt: '2030-01-01T00:00:00Z',
+    };
+    const getUsageHistory = vi
+      .fn<() => Promise<UsageHistoryResponse>>()
+      .mockResolvedValueOnce(responseWithPartialCoverage)
+      .mockImplementationOnce(
+        () =>
+          new Promise<UsageHistoryResponse>((resolve) => {
+            finishInitialRead = resolve;
+          }),
+      );
     const { onClearUsageHistory } = renderPage({ getUsageHistory });
-    await waitFor(() => expect(getUsageHistory).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/Only part is available/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear history' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(onClearUsageHistory).toHaveBeenCalledTimes(1));
     expect(await screen.findByText('No history yet')).toBeTruthy();
+    expect(screen.queryByText(/Only part/)).toBeNull();
 
-    await act(async () => finishInitialRead?.(populatedHistory));
+    await act(async () => finishInitialRead?.(responseWithPartialCoverage));
     expect(screen.queryByText('Weekly limit')).toBeNull();
     expect(screen.getByText('No history yet')).toBeTruthy();
   });
@@ -408,7 +603,7 @@ describe('TrendsPage', () => {
       return () => undefined;
     });
     const getUsageHistory = vi
-      .fn<(range: UsageHistoryRange) => Promise<UsageHistoryResponse>>()
+      .fn<(request: UsageHistoryRequest) => Promise<UsageHistoryResponse>>()
       .mockImplementationOnce(
         () =>
           new Promise<UsageHistoryResponse>((resolve) => {
@@ -427,7 +622,9 @@ describe('TrendsPage', () => {
     expect(await screen.findByText('Weekly limit')).toBeTruthy();
     expect(getUsageHistory).toHaveBeenCalledTimes(2);
 
-    await act(async () => finishInitialRead?.(emptyHistory('24h')));
+    await act(async () =>
+      finishInitialRead?.(emptyHistory({ kind: 'preset', preset: '24h' })),
+    );
     expect(screen.getByText('Weekly limit')).toBeTruthy();
     expect(screen.queryByText('No history yet')).toBeNull();
   });
@@ -440,7 +637,7 @@ describe('TrendsPage', () => {
       return () => undefined;
     });
     const getUsageHistory = vi
-      .fn<(range: UsageHistoryRange) => Promise<UsageHistoryResponse>>()
+      .fn<(request: UsageHistoryRequest) => Promise<UsageHistoryResponse>>()
       .mockImplementationOnce(
         () =>
           new Promise<UsageHistoryResponse>((_resolve, reject) => {

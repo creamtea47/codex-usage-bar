@@ -21,6 +21,25 @@ describe('usageBridge', () => {
     });
   });
 
+  it('passes preset and custom history requests through the structured IPC argument', async () => {
+    const presetRequest = { kind: 'preset', preset: '30d' } as const;
+    const customRequest = {
+      kind: 'custom',
+      startAt: '2030-03-09T08:00:00.000Z',
+      endAtExclusive: '2030-03-11T07:00:00.000Z',
+    } as const;
+
+    await usageBridge.getUsageHistory(presetRequest);
+    await usageBridge.getUsageHistory(customRequest);
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'get_usage_history', {
+      request: presetRequest,
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'get_usage_history', {
+      request: customRequest,
+    });
+  });
+
   it('maps the default and about settings destinations to the constrained command', async () => {
     await usageBridge.openSettingsWindow();
     await usageBridge.openSettingsWindow('about');

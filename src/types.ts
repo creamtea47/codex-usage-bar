@@ -163,7 +163,15 @@ export interface QuotaAutoContinueStatus {
   lastResetDetectedAt?: string | null;
 }
 
-export type UsageHistoryRange = '24h' | '7d';
+export type UsageHistoryPreset = '24h' | '7d' | '30d';
+
+/**
+ * History IPC always uses an explicit tagged request. Custom dates are converted
+ * from local calendar days to UTC instants before they cross the Tauri boundary.
+ */
+export type UsageHistoryRequest =
+  | { kind: 'preset'; preset: UsageHistoryPreset }
+  | { kind: 'custom'; startAt: string; endAtExclusive: string };
 
 export interface UsageHistoryPoint {
   sampledAt: string;
@@ -183,7 +191,13 @@ export interface UsageHistorySeries {
 }
 
 export interface UsageHistoryResponse {
-  range: UsageHistoryRange;
+  request: UsageHistoryRequest;
+  appliedStartAt: string;
+  appliedEndAtExclusive: string;
+  availableStartAt: string | null;
+  availableEndAt: string | null;
+  truncatedByRetention: boolean;
+  bucketSeconds: number | null;
   historyEnabled: boolean;
   storageStatus: 'ready' | 'empty' | 'recovered' | 'unavailable';
   sampleCount: number;

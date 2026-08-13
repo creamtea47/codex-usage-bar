@@ -9,7 +9,7 @@ import type {
   QuotaAutoContinueStatus,
   Settings,
   SettingsUiFaultCode,
-  UsageHistoryRange,
+  UsageHistoryRequest,
   UsageHistoryResponse,
 } from './types';
 
@@ -22,8 +22,8 @@ export const usageBridge = {
   setNotificationsEnabled: (enabled: boolean) =>
     invoke<NotificationEnableResult>('set_notifications_enabled', { enabled }),
   sendTestNotification: () => invoke<void>('send_test_notification'),
-  getUsageHistory: (range: UsageHistoryRange) =>
-    invoke<UsageHistoryResponse>('get_usage_history', { range }),
+  getUsageHistory: (request: UsageHistoryRequest) =>
+    invoke<UsageHistoryResponse>('get_usage_history', { request }),
   setHistoryEnabled: (enabled: boolean) => invoke<Settings>('set_history_enabled', { enabled }),
   getQuotaAutoContinueStatus: () =>
     invoke<QuotaAutoContinueStatus>('get_quota_auto_continue_status'),

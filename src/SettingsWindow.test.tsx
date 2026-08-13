@@ -77,7 +77,13 @@ const availableUpdate: AppUpdateInfo = {
 };
 
 const emptyHistory: UsageHistoryResponse = {
-  range: '24h',
+  request: { kind: 'preset', preset: '24h' },
+  appliedStartAt: '2030-01-03T12:00:00Z',
+  appliedEndAtExclusive: '2030-01-04T12:00:00Z',
+  availableStartAt: null,
+  availableEndAt: null,
+  truncatedByRetention: false,
+  bucketSeconds: null,
   historyEnabled: true,
   storageStatus: 'empty',
   sampleCount: 0,
@@ -730,7 +736,9 @@ describe('SettingsWindow', () => {
     fireEvent.click(screen.getByRole('button', { name: '趋势' }));
 
     expect(await screen.findByRole('heading', { name: '用量趋势' }, { timeout: 5_000 })).toBeTruthy();
-    await waitFor(() => expect(bridgeMocks.getUsageHistory).toHaveBeenCalledWith('24h'));
+    await waitFor(() =>
+      expect(bridgeMocks.getUsageHistory).toHaveBeenCalledWith({ kind: 'preset', preset: '24h' }),
+    );
     expect(bridgeMocks.getDashboard).not.toHaveBeenCalled();
   });
 

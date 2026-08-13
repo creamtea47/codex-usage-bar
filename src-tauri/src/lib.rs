@@ -41,7 +41,7 @@ use crate::{
         clear_history_storage, load_history, save_history, AccountIdentity, AccountSelection,
         Forecast as HistoryForecast, ForecastStatus as HistoryForecastStatus,
         HistoryGenerationInput, HistoryStorageStatus, HistoryWindowInput, UsageHistory,
-        UsageHistoryRange, USAGE_HISTORY_FILE_NAME,
+        UsageHistoryQueryError, UsageHistoryRequest, USAGE_HISTORY_FILE_NAME,
     },
 };
 use chrono::{DateTime, Duration as ChronoDuration, Local, Timelike, Utc};
@@ -908,7 +908,13 @@ struct UsageHistorySeriesResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageHistoryResponse {
-    range: UsageHistoryRange,
+    request: UsageHistoryRequest,
+    applied_start_at: DateTime<Utc>,
+    applied_end_at_exclusive: DateTime<Utc>,
+    available_start_at: Option<DateTime<Utc>>,
+    available_end_at: Option<DateTime<Utc>>,
+    truncated_by_retention: bool,
+    bucket_seconds: Option<i64>,
     history_enabled: bool,
     storage_status: HistoryResponseStorageStatus,
     sample_count: usize,
@@ -1259,27 +1265,32 @@ fn send_test_notification(
 
 #[tauri::command]
 async fn get_usage_history(
-    range: UsageHistoryRange,
+    request: UsageHistoryRequest,
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<UsageHistoryResponse, String> {
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
-    let runtime = state.usage_history.lock().await;
     let now = Utc::now();
-    let storage_summary = runtime.history.summary();
-    let range_summary = runtime.history.summary_for_range(range, now);
-    let query = runtime.history.query(range, now);
-    let storage_status = match runtime.storage_status {
-        HistoryStorageStatus::Ready if storage_summary.sample_count > 0 => {
-            HistoryResponseStorageStatus::Ready
-        }
-        HistoryStorageStatus::Missing | HistoryStorageStatus::Ready => {
-            HistoryResponseStorageStatus::Empty
-        }
-        HistoryStorageStatus::RecoveredCorrupt | HistoryStorageStatus::RecoveredUnsupported => {
-            HistoryResponseStorageStatus::Recovered
-        }
-        HistoryStorageStatus::Unavailable => HistoryResponseStorageStatus::Unavailable,
+    let (query, storage_status) = {
+        let runtime = state.usage_history.lock().await;
+        let storage_summary = runtime.history.summary();
+        let query = runtime
+            .history
+            .query_request(request, now)
+            .map_err(history_query_error_code)?;
+        let storage_status = match runtime.storage_status {
+            HistoryStorageStatus::Ready if storage_summary.sample_count > 0 => {
+                HistoryResponseStorageStatus::Ready
+            }
+            HistoryStorageStatus::Missing | HistoryStorageStatus::Ready => {
+                HistoryResponseStorageStatus::Empty
+            }
+            HistoryStorageStatus::RecoveredCorrupt | HistoryStorageStatus::RecoveredUnsupported => {
+                HistoryResponseStorageStatus::Recovered
+            }
+            HistoryStorageStatus::Unavailable => HistoryResponseStorageStatus::Unavailable,
+        };
+        (query, storage_status)
     };
     let series = query
         .series
@@ -1298,14 +1309,29 @@ async fn get_usage_history(
         })
         .collect();
     Ok(UsageHistoryResponse {
-        range,
+        request: query.request,
+        applied_start_at: query.applied_start_at,
+        applied_end_at_exclusive: query.applied_end_at_exclusive,
+        available_start_at: query.available_start_at,
+        available_end_at: query.available_end_at,
+        truncated_by_retention: query.truncated_by_retention,
+        bucket_seconds: query.bucket_seconds,
         history_enabled: state.current_settings().history_enabled,
         storage_status,
-        sample_count: range_summary.sample_count as usize,
-        earliest_sample_at: range_summary.oldest_sample_at,
-        latest_sample_at: range_summary.latest_sample_at,
+        sample_count: query.sample_count as usize,
+        earliest_sample_at: query.earliest_sample_at,
+        latest_sample_at: query.latest_sample_at,
         series,
     })
+}
+
+fn history_query_error_code(error: UsageHistoryQueryError) -> String {
+    match error {
+        UsageHistoryQueryError::EmptyOrReversedRange => "historyRangeInvalid",
+        UsageHistoryQueryError::FutureEnd => "historyRangeFuture",
+        UsageHistoryQueryError::SpanTooLarge => "historyRangeTooLarge",
+    }
+    .to_owned()
 }
 
 #[tauri::command]
@@ -2456,6 +2482,68 @@ mod tests {
             serde_json::to_string(&DashboardErrorCode::InvalidResponse).unwrap(),
             r#""invalidResponse""#
         );
+    }
+
+    #[test]
+    fn history_response_serializes_structured_request_and_coverage_within_ipc_budget() {
+        let now = Utc::now();
+        let request = UsageHistoryRequest::Preset {
+            preset: crate::usage_history::UsageHistoryPreset::Days30,
+        };
+        // Mirror the production structural caps so the size assertion measures
+        // UTF-8 bytes for the largest response shape that can cross Tauri IPC.
+        let series = (0..16)
+            .map(|series_index| UsageHistorySeriesResponse {
+                window_id: format!("{series_index:064x}"),
+                window_seconds: 7 * 24 * 60 * 60,
+                fallback_label: QuotaFallbackLabel::Weekly,
+                current_remaining_percent: Some(75),
+                consumed_percent: 25.0,
+                points: (0..1_000)
+                    .map(|point_index| crate::usage_history::UsageHistoryPoint {
+                        sampled_at: now
+                            - ChronoDuration::seconds(i64::from(
+                                series_index * 1_000 + point_index,
+                            )),
+                        remaining_percent: 75,
+                        break_before: point_index == 0,
+                    })
+                    .collect(),
+                forecast: QuotaForecast {
+                    status: ModelForecastStatus::Collecting,
+                    exhausts_at: None,
+                    sample_count: 1,
+                    observed_span_seconds: 0,
+                    consumed_percent: 0.0,
+                },
+            })
+            .collect();
+        let response = UsageHistoryResponse {
+            request,
+            applied_start_at: now - ChronoDuration::days(30),
+            applied_end_at_exclusive: now,
+            available_start_at: Some(now - ChronoDuration::days(7)),
+            available_end_at: Some(now - ChronoDuration::minutes(1)),
+            truncated_by_retention: false,
+            bucket_seconds: Some(60 * 60),
+            history_enabled: true,
+            storage_status: HistoryResponseStorageStatus::Ready,
+            sample_count: 16_000,
+            earliest_sample_at: Some(now - ChronoDuration::days(7)),
+            latest_sample_at: Some(now - ChronoDuration::minutes(1)),
+            series,
+        };
+
+        let bytes = serde_json::to_vec(&response).unwrap();
+        assert!(bytes.len() <= 2 * 1024 * 1024);
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["request"],
+            serde_json::json!({"kind": "preset", "preset": "30d"})
+        );
+        assert_eq!(json["bucketSeconds"], 3_600);
+        assert_eq!(json["truncatedByRetention"], false);
+        assert!(json.get("range").is_none());
     }
 
     #[test]
