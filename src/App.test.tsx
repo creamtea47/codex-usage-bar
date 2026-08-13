@@ -434,11 +434,16 @@ describe('App', () => {
     await waitFor(() => expect(refreshButton.disabled).toBe(false));
   });
 
-  it('opens the independent settings window through the constrained IPC', async () => {
+  it('requests settings activation for every settings button click', async () => {
     await renderLoaded();
 
-    fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
-    await waitFor(() => expect(bridgeMocks.openSettingsWindow).toHaveBeenCalledTimes(1));
+    const settingsButton = screen.getByRole('button', { name: '打开设置' });
+    fireEvent.click(settingsButton);
+    fireEvent.click(settingsButton);
+
+    await waitFor(() => expect(bridgeMocks.openSettingsWindow).toHaveBeenCalledTimes(2));
+    expect(bridgeMocks.openSettingsWindow).toHaveBeenNthCalledWith(1, undefined);
+    expect(bridgeMocks.openSettingsWindow).toHaveBeenNthCalledWith(2, undefined);
   });
 
   it('marks the size as manual only when the user starts a resize drag', async () => {

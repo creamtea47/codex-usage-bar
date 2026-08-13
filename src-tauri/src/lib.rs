@@ -10,6 +10,7 @@ mod settings;
 mod tray;
 mod usage;
 mod usage_history;
+mod window_activation;
 
 use crate::{
     app_update::{check_for_update, install_pending_update, AppUpdateState},
@@ -1639,13 +1640,14 @@ fn open_settings_window(
     if section.as_deref().is_some_and(|value| value != "about") {
         return Err("无法打开指定的设置页面。".to_owned());
     }
-    let window = app
-        .get_webview_window(SETTINGS_WINDOW_LABEL)
-        .ok_or_else(|| "无法创建设置窗口。".to_owned())?;
-    window.show().map_err(|_| "无法显示设置窗口。".to_owned())?;
-    window
-        .set_focus()
-        .map_err(|_| "无法聚焦设置窗口。".to_owned())?;
+    window_activation::activate_window(&app, SETTINGS_WINDOW_LABEL).map_err(|error| match error
+        .stage()
+    {
+        window_activation::WindowActivationStage::Locate => "无法定位设置窗口。".to_owned(),
+        window_activation::WindowActivationStage::Restore => "无法恢复设置窗口。".to_owned(),
+        window_activation::WindowActivationStage::Show => "无法显示设置窗口。".to_owned(),
+        window_activation::WindowActivationStage::Focus => "无法聚焦设置窗口。".to_owned(),
+    })?;
     if section.as_deref() == Some("about")
         && app
             .emit_to(SETTINGS_WINDOW_LABEL, "settings-navigate", "about")

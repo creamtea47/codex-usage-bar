@@ -1,4 +1,4 @@
-use crate::models::Language;
+use crate::{models::Language, window_activation};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -85,27 +85,35 @@ pub fn update_menu(app: &AppHandle, language: Language) {
 }
 
 pub fn show_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
-        log::warn!("无法从托盘定位主窗口。");
-        return;
+    let window = match window_activation::existing_window(app, "main") {
+        Ok(window) => window,
+        Err(error) => {
+            log::warn!("无法从托盘显示主窗口：阶段={}。", error.stage().code());
+            return;
+        }
     };
     #[cfg(target_os = "windows")]
-    let _ = window.set_skip_taskbar(false);
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
-    apply_macos_visibility_policy(app, true);
+    if window.set_skip_taskbar(false).is_err() {
+        log::warn!("无法从托盘恢复主窗口任务栏入口。");
+    }
+    prepare_macos_application_for_window_activation(app);
+    if let Err(error) = window_activation::activate_existing_window(&window) {
+        log::warn!("无法从托盘显示主窗口：阶段={}。", error.stage().code());
+    }
 }
 
 fn show_settings_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window("settings") else {
-        log::warn!("无法从托盘定位设置窗口。");
-        return;
+    let window = match window_activation::existing_window(app, "settings") {
+        Ok(window) => window,
+        Err(error) => {
+            log::warn!("无法从托盘显示设置窗口：阶段={}。", error.stage().code());
+            return;
+        }
     };
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
-    apply_macos_visibility_policy(app, true);
+    prepare_macos_application_for_window_activation(app);
+    if let Err(error) = window_activation::activate_existing_window(&window) {
+        log::warn!("无法从托盘显示设置窗口：阶段={}。", error.stage().code());
+    }
 }
 
 pub fn hide_main_window(app: &AppHandle) {
@@ -137,6 +145,17 @@ pub fn sync_platform_visibility(app: &AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
+fn prepare_macos_application_for_window_activation(app: &AppHandle) {
+    if app.show().is_err() {
+        log::warn!("无法从托盘恢复应用可见性。");
+    }
+    apply_macos_visibility_policy(app, true);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prepare_macos_application_for_window_activation(_app: &AppHandle) {}
+
+#[cfg(target_os = "macos")]
 fn apply_macos_visibility_policy(app: &AppHandle, visible: bool) {
     use tauri::ActivationPolicy;
     let _ = app.set_dock_visibility(visible);
@@ -147,9 +166,6 @@ fn apply_macos_visibility_policy(app: &AppHandle, visible: bool) {
     };
     let _ = app.set_activation_policy(policy);
 }
-
-#[cfg(not(target_os = "macos"))]
-fn apply_macos_visibility_policy(_app: &AppHandle, _visible: bool) {}
 
 #[cfg(test)]
 mod tests {

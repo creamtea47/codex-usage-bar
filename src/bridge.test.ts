@@ -21,6 +21,14 @@ describe('usageBridge', () => {
     });
   });
 
+  it('maps the default and about settings destinations to the constrained command', async () => {
+    await usageBridge.openSettingsWindow();
+    await usageBridge.openSettingsWindow('about');
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'open_settings_window', { section: undefined });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'open_settings_window', { section: 'about' });
+  });
+
   it('routes quota auto-continuation through dedicated commands and its status event', async () => {
     const handler = vi.fn();
     tauriMocks.listen.mockResolvedValue(() => undefined);
