@@ -1,7 +1,7 @@
 use crate::{models::Language, window_activation};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
 
@@ -49,13 +49,31 @@ fn create_menu(app: &AppHandle, language: Language) -> tauri::Result<Menu<tauri:
     Menu::with_items(app, &[&show_main, &open_settings, &separator, &quit])
 }
 
+fn should_show_main_window(event: &TrayIconEvent) -> bool {
+    // Tauri 2.11.5 的 Up/Down 文案注释相反；官方示例与锁定的 tray-icon 0.24.2
+    // 原生映射均以 Up 表示按钮释放。
+    matches!(
+        event,
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        }
+    )
+}
+
 /// 创建始终可用的托盘入口。显式“退出”是隐藏主窗口后关闭后台进程的唯一菜单动作。
 pub fn create(app: &AppHandle, language: Language) -> tauri::Result<()> {
     let menu = create_menu(app, language)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("CodexUsageBar")
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if should_show_main_window(&event) {
+                show_main_window(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
             SHOW_MAIN_ID => show_main_window(app),
             OPEN_SETTINGS_ID => show_settings_window(app),
@@ -170,6 +188,38 @@ fn apply_macos_visibility_policy(app: &AppHandle, visible: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tauri::{tray::TrayIconId, PhysicalPosition, Rect};
+
+    fn click_event(button: MouseButton, button_state: MouseButtonState) -> TrayIconEvent {
+        TrayIconEvent::Click {
+            id: TrayIconId::new(TRAY_ID),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect::default(),
+            button,
+            button_state,
+        }
+    }
+
+    fn double_click_event(button: MouseButton) -> TrayIconEvent {
+        TrayIconEvent::DoubleClick {
+            id: TrayIconId::new(TRAY_ID),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect::default(),
+            button,
+        }
+    }
+
+    fn pointer_event(kind: &str) -> TrayIconEvent {
+        let id = TrayIconId::new(TRAY_ID);
+        let position = PhysicalPosition::new(0.0, 0.0);
+        let rect = Rect::default();
+        match kind {
+            "enter" => TrayIconEvent::Enter { id, position, rect },
+            "move" => TrayIconEvent::Move { id, position, rect },
+            "leave" => TrayIconEvent::Leave { id, position, rect },
+            _ => unreachable!("unsupported pointer event"),
+        }
+    }
 
     #[test]
     fn tray_menu_copy_is_complete_in_both_supported_languages() {
@@ -189,5 +239,63 @@ mod tests {
                 quit: "Quit",
             }
         );
+    }
+
+    #[test]
+    fn only_left_button_release_routes_to_main_window_activation() {
+        let cases = [
+            (
+                "left release",
+                click_event(MouseButton::Left, MouseButtonState::Up),
+                true,
+            ),
+            (
+                "left press",
+                click_event(MouseButton::Left, MouseButtonState::Down),
+                false,
+            ),
+            (
+                "right release",
+                click_event(MouseButton::Right, MouseButtonState::Up),
+                false,
+            ),
+            (
+                "right press",
+                click_event(MouseButton::Right, MouseButtonState::Down),
+                false,
+            ),
+            (
+                "middle release",
+                click_event(MouseButton::Middle, MouseButtonState::Up),
+                false,
+            ),
+            (
+                "middle press",
+                click_event(MouseButton::Middle, MouseButtonState::Down),
+                false,
+            ),
+            (
+                "left double click",
+                double_click_event(MouseButton::Left),
+                false,
+            ),
+            (
+                "right double click",
+                double_click_event(MouseButton::Right),
+                false,
+            ),
+            (
+                "middle double click",
+                double_click_event(MouseButton::Middle),
+                false,
+            ),
+            ("pointer enter", pointer_event("enter"), false),
+            ("pointer move", pointer_event("move"), false),
+            ("pointer leave", pointer_event("leave"), false),
+        ];
+
+        for (case, event, expected) in cases {
+            assert_eq!(should_show_main_window(&event), expected, "{case}");
+        }
     }
 }
