@@ -368,7 +368,7 @@ describe('TrendsPage', () => {
   it('shows the actual available start for a leading coverage gap', async () => {
     const response = emptyHistory({ kind: 'preset', preset: '30d' });
     response.appliedStartAt = '2030-01-01T00:00:00Z';
-    response.availableStartAt = '2030-01-03T12:30:00Z';
+    response.availableStartAt = new Date(2030, 0, 3, 20, 30).toISOString();
     const getUsageHistory = vi.fn(async () => response);
 
     renderPage({ getUsageHistory });
