@@ -142,6 +142,20 @@ export default function NotificationsPage({
             {t('settings.notifications.resetDescription')}
           </Typography>
 
+          <FormControlLabel
+            control={
+              <Switch
+                checked={notifications.resetCreditEnabled}
+                disabled={disabled}
+                onChange={(event) => void onUpdate({ resetCreditEnabled: event.target.checked })}
+              />
+            }
+            label={t('settings.notifications.resetCredit')}
+          />
+          <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+            {t('settings.notifications.resetCreditDescription')}
+          </Typography>
+
           <Divider />
           <FormControlLabel
             control={

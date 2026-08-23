@@ -496,6 +496,10 @@ describe('SettingsWindow', () => {
     expect(screen.getByRole('button', { name: 'About & updates' })).toBeTruthy();
     expect(document.documentElement.lang).toBe('en');
 
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications' }));
+    expect(await screen.findByRole('switch', { name: 'Reset-credit arrival alert' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }));
+
     const languageSelect = screen.getByRole('combobox', { name: 'Language' });
     fireEvent.mouseDown(languageSelect);
     expect(await screen.findByRole('option', { name: 'Use system language' })).toBeTruthy();
@@ -538,6 +542,7 @@ describe('SettingsWindow', () => {
 
     expect((screen.getByRole('spinbutton', { name: '低额度阈值 (%)' }) as HTMLInputElement).value).toBe('20');
     expect((screen.getByRole('spinbutton', { name: '落后建议进度（百分点）' }) as HTMLInputElement).value).toBe('10');
+    expect((screen.getByRole('switch', { name: '重置卡到账提醒' }) as HTMLInputElement).checked).toBe(false);
     const quietSwitch = screen.getByRole('switch', { name: '静默时段' });
     fireEvent.click(quietSwitch);
     await waitFor(() =>
@@ -588,6 +593,21 @@ describe('SettingsWindow', () => {
       }),
     );
 
+    fireEvent.click(screen.getByRole('switch', { name: '重置卡到账提醒' }));
+    await waitFor(() =>
+      expect(bridgeMocks.saveSettings).toHaveBeenLastCalledWith({
+        ...zhSettings,
+        notifications: {
+          ...zhSettings.notifications,
+          quietHoursEnabled: true,
+          lowQuotaThresholdPercent: 100,
+          paceEnabled: false,
+          resetEnabled: false,
+          resetCreditEnabled: true,
+        },
+      }),
+    );
+
     const paceThreshold = screen.getByRole('spinbutton', { name: '落后建议进度（百分点）' });
     fireEvent.change(paceThreshold, { target: { value: '-5' } });
     fireEvent.blur(paceThreshold);
@@ -600,6 +620,7 @@ describe('SettingsWindow', () => {
           lowQuotaThresholdPercent: 100,
           paceEnabled: false,
           resetEnabled: false,
+          resetCreditEnabled: true,
           paceDeficitThresholdPercent: 0,
         },
       }),
@@ -617,6 +638,7 @@ describe('SettingsWindow', () => {
           lowQuotaThresholdPercent: 100,
           paceEnabled: false,
           resetEnabled: false,
+          resetCreditEnabled: true,
           paceDeficitThresholdPercent: 0,
           quietHoursStart: '23:30',
         },
@@ -635,6 +657,7 @@ describe('SettingsWindow', () => {
           lowQuotaThresholdPercent: 100,
           paceEnabled: false,
           resetEnabled: false,
+          resetCreditEnabled: true,
           paceDeficitThresholdPercent: 0,
           quietHoursStart: '23:30',
           quietHoursEnd: '07:15',

@@ -225,9 +225,24 @@ mod tests {
             settings.preferences.notifications,
             NotificationSettings::default()
         );
+        assert!(!settings.preferences.notifications.reset_credit_enabled);
         assert!(settings.preferences.history_enabled);
         assert!(settings.preferences.minimize_to_tray_on_close);
         assert!(!settings.preferences.quota_auto_continue_enabled);
+    }
+
+    #[test]
+    fn legacy_notification_object_defaults_reset_credit_alert_to_off() {
+        let mut legacy = serde_json::to_value(StoredSettings::default()).unwrap();
+        legacy["preferences"]["notifications"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resetCreditEnabled");
+
+        let loaded: StoredSettings = serde_json::from_value(legacy).unwrap();
+        assert!(!loaded.preferences.notifications.reset_credit_enabled);
+        assert!(loaded.preferences.notifications.reset_enabled);
+        assert!(loaded.preferences.notifications.low_quota_enabled);
     }
 
     #[test]
