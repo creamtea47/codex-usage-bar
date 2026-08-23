@@ -266,6 +266,8 @@ pub struct UsageHistorySeries {
     pub window_id: String,
     pub window_seconds: i64,
     pub current_remaining_percent: u8,
+    /// 按调用方提供的用户本地自然日边界累计；跨额度周期时分别计算后相加。
+    pub today_consumed_percent: u32,
     pub points: Vec<UsageHistoryPoint>,
     pub forecast: Forecast,
 }
@@ -455,7 +457,12 @@ impl UsageHistory {
         removed
     }
 
-    pub fn query(&self, range: UsageHistoryRange, now: DateTime<Utc>) -> UsageHistoryQuery {
+    pub fn query(
+        &self,
+        range: UsageHistoryRange,
+        now: DateTime<Utc>,
+        today_started_at: DateTime<Utc>,
+    ) -> UsageHistoryQuery {
         let cutoff = safe_subtract(now, range.duration());
         let downsample = range == UsageHistoryRange::Days7;
         let mut series = self
@@ -468,6 +475,7 @@ impl UsageHistory {
                     window_id: stream.window_id.clone(),
                     window_seconds: stream.window_seconds,
                     current_remaining_percent,
+                    today_consumed_percent: stream.consumed_between(today_started_at, now),
                     points,
                     forecast: stream.forecast(now),
                 })
@@ -808,6 +816,42 @@ impl StoredUsageStream {
             }
         }
         points
+    }
+
+    /// 以自然日边界附近最后一个已知额度作为基线。每个额度周期单独计算，避免重置
+    /// 造成剩余百分比回升时把当天已经发生的消耗抵消掉。
+    fn consumed_between(&self, started_at: DateTime<Utc>, now: DateTime<Utc>) -> u32 {
+        if started_at > now {
+            return 0;
+        }
+
+        self.cycles.iter().fold(0_u32, |total, cycle| {
+            let Some(latest) = cycle
+                .samples
+                .iter()
+                .rev()
+                .find(|sample| sample.sampled_at >= started_at && sample.sampled_at <= now)
+            else {
+                return total;
+            };
+            let baseline = cycle
+                .samples
+                .iter()
+                .rev()
+                .find(|sample| sample.sampled_at <= started_at)
+                .or_else(|| {
+                    cycle
+                        .samples
+                        .iter()
+                        .find(|sample| sample.sampled_at >= started_at && sample.sampled_at <= now)
+                })
+                .expect("a cycle with a latest in-range sample must have a baseline");
+            total.saturating_add(u32::from(
+                baseline
+                    .remaining_percent
+                    .saturating_sub(latest.remaining_percent),
+            ))
+        })
     }
 
     fn forecast(&self, now: DateTime<Utc>) -> Forecast {
@@ -1452,7 +1496,7 @@ mod tests {
             record_with_generation(&mut value, at(8, 1), 100, reset, &next_generation);
 
             assert_eq!(value.streams[0].cycles.len(), 2);
-            let query = value.query(UsageHistoryRange::Hours24, at(8, 2));
+            let query = value.query(UsageHistoryRange::Hours24, at(8, 2), at(0, 0));
             assert_eq!(query.series[0].points.len(), 2);
             assert!(query.series[0].points[0].break_before);
             assert!(query.series[0].points[1].break_before);
@@ -1512,9 +1556,12 @@ mod tests {
         let loaded = load_history_at(&path, at(9, 0));
         assert_eq!(loaded.status, HistoryStorageStatus::Ready);
         assert_eq!(loaded.history, value);
-        let query_json =
-            serde_json::to_string(&loaded.history.query(UsageHistoryRange::Hours24, at(9, 0)))
-                .unwrap();
+        let query_json = serde_json::to_string(&loaded.history.query(
+            UsageHistoryRange::Hours24,
+            at(9, 0),
+            at(0, 0),
+        ))
+        .unwrap();
         assert!(!query_json.contains("generationId"));
         assert!(!query_json.contains(&generation_id));
         let _ = fs::remove_file(path);
@@ -1559,7 +1606,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(value.streams[0].cycles.len(), 2);
-        let query = value.query(UsageHistoryRange::Hours24, at(8, 2));
+        let query = value.query(UsageHistoryRange::Hours24, at(8, 2), at(0, 0));
         assert!(query.series[0].points[0].break_before);
         assert!(query.series[0].points[1].break_before);
     }
@@ -1651,8 +1698,8 @@ mod tests {
                 reset,
             );
         }
-        let full = value.query(UsageHistoryRange::Hours24, at(11, 0));
-        let sampled = value.query(UsageHistoryRange::Days7, at(11, 0));
+        let full = value.query(UsageHistoryRange::Hours24, at(11, 0), at(0, 0));
+        let sampled = value.query(UsageHistoryRange::Days7, at(11, 0), at(0, 0));
         assert!(sampled.series[0].points.len() < full.series[0].points.len());
         assert!(sampled.series[0].points[0].break_before);
         let json = serde_json::to_string(&sampled).unwrap();
@@ -1686,6 +1733,47 @@ mod tests {
         assert_eq!(days_7.sample_count, 3);
         assert_eq!(days_7.oldest_sample_at, Some(older));
         assert_eq!(days_7.latest_sample_at, Some(recent));
+    }
+
+    #[test]
+    fn today_consumption_uses_day_boundary_and_sums_across_resets_for_every_range() {
+        let mut value = history();
+        let today_started_at = at(0, 0);
+        let first_reset = at(2, 0);
+        record(
+            &mut value,
+            today_started_at - Duration::minutes(5),
+            90,
+            first_reset,
+        );
+        record(&mut value, at(1, 0), 70, first_reset);
+
+        let next_reset = first_reset + Duration::hours(5);
+        record(&mut value, first_reset, 100, next_reset);
+        record(&mut value, at(4, 0), 80, next_reset);
+        record(&mut value, at(6, 0), 40, next_reset);
+
+        for range in [UsageHistoryRange::Hours24, UsageHistoryRange::Days7] {
+            let query = value.query(range, at(6, 0), today_started_at);
+            assert_eq!(query.series[0].today_consumed_percent, 80);
+        }
+    }
+
+    #[test]
+    fn today_consumption_ignores_samples_outside_the_natural_day_and_future() {
+        let mut value = history();
+        let today_started_at = at(0, 0);
+        let reset = at(20, 0);
+        record(&mut value, today_started_at - Duration::hours(2), 90, reset);
+        record(&mut value, at(1, 0), 80, reset);
+        record(&mut value, at(6, 0), 70, reset);
+        record(&mut value, at(7, 0), 60, reset);
+
+        let query = value.query(UsageHistoryRange::Hours24, at(6, 0), today_started_at);
+        assert_eq!(query.series[0].today_consumed_percent, 20);
+
+        let invalid_boundary = value.query(UsageHistoryRange::Hours24, at(6, 0), at(7, 0));
+        assert_eq!(invalid_boundary.series[0].today_consumed_percent, 0);
     }
 
     #[test]

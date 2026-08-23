@@ -899,7 +899,7 @@ struct UsageHistorySeriesResponse {
     window_seconds: i64,
     fallback_label: QuotaFallbackLabel,
     current_remaining_percent: Option<u8>,
-    consumed_percent: f64,
+    today_consumed_percent: u32,
     points: Vec<crate::usage_history::UsageHistoryPoint>,
     forecast: QuotaForecast,
 }
@@ -1264,10 +1264,12 @@ async fn get_usage_history(
 ) -> Result<UsageHistoryResponse, String> {
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
     let runtime = state.usage_history.lock().await;
-    let now = Utc::now();
+    let now_local = Local::now();
+    let now = now_local.with_timezone(&Utc);
+    let today_started_at = local_day_start_utc(now_local);
     let storage_summary = runtime.history.summary();
     let range_summary = runtime.history.summary_for_range(range, now);
-    let query = runtime.history.query(range, now);
+    let query = runtime.history.query(range, now, today_started_at);
     let storage_status = match runtime.storage_status {
         HistoryStorageStatus::Ready if storage_summary.sample_count > 0 => {
             HistoryResponseStorageStatus::Ready
@@ -1290,7 +1292,7 @@ async fn get_usage_history(
                 window_seconds: series.window_seconds,
                 fallback_label: fallback_label_for_duration(series.window_seconds),
                 current_remaining_percent: Some(series.current_remaining_percent),
-                consumed_percent: forecast.consumed_percent,
+                today_consumed_percent: series.today_consumed_percent,
                 points: series.points,
                 forecast,
             }
@@ -1305,6 +1307,25 @@ async fn get_usage_history(
         latest_sample_at: range_summary.latest_sample_at,
         series,
     })
+}
+
+/// 将系统本地日期的第一个有效墙上时刻转换为 UTC。极少数时区会在午夜切换
+/// 夏令时，因此逐分钟寻找可表示的当天起点，避免错误退化成滚动 24 小时。
+fn local_day_start_utc(now: DateTime<Local>) -> DateTime<Utc> {
+    let date = now.date_naive();
+    for minute in 0..24 * 60 {
+        let Some(local_time) = date
+            .and_hms_opt(0, 0, 0)
+            .map(|midnight| midnight + ChronoDuration::minutes(minute))
+        else {
+            break;
+        };
+        if let Some(start) = local_time.and_local_timezone(Local).earliest() {
+            return start.with_timezone(&Utc);
+        }
+    }
+    // 理论上仅当系统时区数据库异常才会到达；保持边界不晚于当前时刻更安全。
+    now.with_timezone(&Utc)
 }
 
 #[tauri::command]

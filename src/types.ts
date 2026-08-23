@@ -177,7 +177,8 @@ export interface UsageHistorySeries {
   windowSeconds: number;
   fallbackLabel: QuotaFallbackLabel;
   currentRemainingPercent: number | null;
-  consumedPercent: number;
+  /** 用户本地自然日从 00:00 到当前时间的累计消耗；跨额度周期时可超过 100%。 */
+  todayConsumedPercent: number;
   points: UsageHistoryPoint[];
   forecast: QuotaForecast;
 }

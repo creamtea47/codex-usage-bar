@@ -301,7 +301,7 @@ export const resources = {
         summary: '{{count}} 个样本 · 最近 {{date}}',
         windowAria: '{{label}}趋势',
         current: { label: '当前剩余', value: '剩余 {{percent}}%' },
-        consumed: { label: '近段消耗', value: '已消耗 {{percent}}%' },
+        consumed: { label: '今日消耗', value: '已消耗 {{percent}}%' },
         chart: {
           aria: '{{label}}历史图表',
           remaining: '剩余',
@@ -638,7 +638,7 @@ export const resources = {
         summary: '{{count}} samples · latest {{date}}',
         windowAria: '{{label}} trend',
         current: { label: 'Current remaining', value: '{{percent}}% remaining' },
-        consumed: { label: 'Recent consumption', value: '{{percent}}% consumed' },
+        consumed: { label: "Today's consumption", value: '{{percent}}% consumed' },
         chart: {
           aria: '{{label}} history chart',
           remaining: 'Remaining',
