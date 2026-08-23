@@ -162,6 +162,9 @@ pub struct NotificationSettings {
     pub pace_enabled: bool,
     pub pace_deficit_threshold_percent: u8,
     pub reset_enabled: bool,
+    /// 新通知类别必须显式开启；旧设置缺少字段时保持关闭，避免升级后意外弹窗。
+    #[serde(default)]
+    pub reset_credit_enabled: bool,
     pub quiet_hours_enabled: bool,
     pub quiet_hours_start: String,
     pub quiet_hours_end: String,
@@ -176,6 +179,7 @@ impl Default for NotificationSettings {
             pace_enabled: true,
             pace_deficit_threshold_percent: 10,
             reset_enabled: true,
+            reset_credit_enabled: false,
             quiet_hours_enabled: false,
             quiet_hours_start: "22:00".to_owned(),
             quiet_hours_end: "08:00".to_owned(),

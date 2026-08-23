@@ -6,6 +6,7 @@ mod quota_audit;
 mod quota_auto_continue;
 mod quota_reset;
 mod refresh_scheduler;
+mod reset_credit_notification;
 mod settings;
 mod tray;
 mod usage;
@@ -31,12 +32,16 @@ use crate::{
     },
     quota_reset::NotificationDisposition,
     refresh_scheduler::failure_retry_seconds,
+    reset_credit_notification::{
+        ResetCreditIncrease, ResetCreditNotificationRuntime,
+        STATE_FILE_NAME as RESET_CREDIT_NOTIFICATION_STATE_FILE_NAME,
+    },
     settings::{
         apply_compact_layout_migration, cleanup_logs, load_settings,
         save_settings as persist_settings, update_main_window_placement, update_preferences,
         update_settings_window_placement,
     },
-    usage::{UsageAccountIdentity, UsageClient},
+    usage::{ResetCreditAvailability, UsageAccountIdentity, UsageClient},
     usage_history::{
         clear_history_storage, load_history, save_history, AccountIdentity, AccountSelection,
         Forecast as HistoryForecast, ForecastStatus as HistoryForecastStatus,
@@ -114,6 +119,7 @@ struct AppState {
     history_path: PathBuf,
     usage_history: AsyncMutex<HistoryRuntime>,
     quota_auto_continue: QuotaAutoContinueRuntime,
+    reset_credit_notifications: ResetCreditNotificationRuntime,
     /// 让通知设置发布与 baseline 重建相对通知评估保持原子。
     notification_evaluation_guard: StdMutex<()>,
     notification_tracker: StdMutex<NotificationTracker>,
@@ -131,6 +137,12 @@ struct HistoryRuntime {
     storage_status: HistoryStorageStatus,
 }
 
+/// 刷新提交前短暂保留的 Rust 内部观察；账号材料不会进入快照、IPC、日志或状态文件。
+struct ResetCreditObservation {
+    account_identity: UsageAccountIdentity,
+    availability: Option<ResetCreditAvailability>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct HistoryRefreshEffect {
     changed: bool,
@@ -143,6 +155,7 @@ struct RefreshResult {
     should_emit: bool,
     history_effect: HistoryRefreshEffect,
     quota_auto_continue_changed: bool,
+    reset_credit_observation: Option<ResetCreditObservation>,
 }
 
 impl AppState {
@@ -157,6 +170,8 @@ impl AppState {
         let history_path = settings_path.with_file_name(USAGE_HISTORY_FILE_NAME);
         let quota_auto_continue_path =
             settings_path.with_file_name(QUOTA_AUTO_CONTINUE_STATE_FILE_NAME);
+        let reset_credit_notification_path =
+            settings_path.with_file_name(RESET_CREDIT_NOTIFICATION_STATE_FILE_NAME);
         let loaded_history = load_history(&history_path);
         let mut history_status = loaded_history.status;
         if loaded_history.needs_rewrite {
@@ -190,6 +205,9 @@ impl AppState {
                 storage_status: history_status,
             }),
             quota_auto_continue: QuotaAutoContinueRuntime::new(quota_auto_continue_path)?,
+            reset_credit_notifications: ResetCreditNotificationRuntime::new(
+                reset_credit_notification_path,
+            ),
             notification_evaluation_guard: StdMutex::new(()),
             notification_tracker: StdMutex::new(NotificationTracker::new()),
             schedule_sender,
@@ -392,6 +410,7 @@ impl AppState {
                         should_emit: false,
                         history_effect: HistoryRefreshEffect::default(),
                         quota_auto_continue_changed: false,
+                        reset_credit_observation: None,
                     };
                 }
                 // 锁若只由历史开关/清除操作占用，不得吞掉用户或定时刷新。
@@ -432,6 +451,10 @@ impl AppState {
                     should_emit: true,
                     history_effect,
                     quota_auto_continue_changed,
+                    reset_credit_observation: Some(ResetCreditObservation {
+                        account_identity: fetched.account_identity,
+                        availability: fetched.reset_credit_availability,
+                    }),
                 }
             }
             Err(error) => {
@@ -465,6 +488,7 @@ impl AppState {
                     should_emit: true,
                     history_effect: HistoryRefreshEffect::default(),
                     quota_auto_continue_changed: false,
+                    reset_credit_observation: None,
                 }
             }
         };
@@ -660,6 +684,13 @@ fn notification_policy(settings: &Settings) -> NotificationPolicy {
     }
 }
 
+fn reset_credit_notification_allowed(settings: &Settings, local_minute_of_day: u16) -> bool {
+    let policy = notification_policy(settings);
+    policy.enabled
+        && settings.notifications.reset_credit_enabled
+        && !policy.quiet_hours.contains(local_minute_of_day)
+}
+
 /// 统一识别器只暴露脱敏窗口范围；调用层在同一成功快照中选择相同范围、
 /// 最早重置的窗口，从而关联通知和趋势，同时不把上游窗口 ID 写入状态文件。
 fn quota_window_index(snapshot: &DashboardSnapshot, window_seconds: i64) -> Option<usize> {
@@ -684,13 +715,35 @@ fn localized_quota_label(window: &crate::models::QuotaWindow, language: Language
 }
 
 fn notification_body(
-    batch: &NotificationBatch,
+    batch: Option<&NotificationBatch>,
     snapshot: &DashboardSnapshot,
+    reset_credit_increase: Option<&ResetCreditIncrease>,
     language: Language,
 ) -> String {
     let language = resolved_language(language);
     let mut lines = Vec::new();
-    for item in &batch.items {
+    if let Some(increase) = reset_credit_increase {
+        let line = match (language, increase.applicable_available_count) {
+            (Language::ZhCn, Some(applicable)) => format!(
+                "重置卡：新获得 {} 张，当前共 {} 张（可使用 {} 张）",
+                increase.gained_count, increase.available_count, applicable
+            ),
+            (Language::ZhCn, None) => format!(
+                "重置卡：新获得 {} 张，当前共 {} 张",
+                increase.gained_count, increase.available_count
+            ),
+            (_, Some(applicable)) => format!(
+                "Reset credits: received {}, {} total ({} currently usable)",
+                increase.gained_count, increase.available_count, applicable
+            ),
+            (_, None) => format!(
+                "Reset credits: received {}, {} total",
+                increase.gained_count, increase.available_count
+            ),
+        };
+        lines.push(line);
+    }
+    for item in batch.into_iter().flat_map(|value| &value.items) {
         let Some(window) = snapshot.quota_windows.get(item.window_index) else {
             continue;
         };
@@ -730,6 +783,7 @@ fn send_usage_notifications(
     state: &AppState,
     snapshot: &DashboardSnapshot,
     account_changed: bool,
+    reset_credit_increase: Option<ResetCreditIncrease>,
 ) {
     // 与设置发布/baseline 重建互斥，避免用新阈值评估旧 tracker 后补发历史事件。
     let _notification_evaluation = state.notification_evaluation();
@@ -801,27 +855,35 @@ fn send_usage_notifications(
         }
     }
 
-    let Some(batch) = batch else {
+    let reset_credit_increase = reset_credit_increase
+        .filter(|_| reset_credit_notification_allowed(&settings, local_minute_of_day));
+    if batch.is_none() && reset_credit_increase.is_none() {
         return;
-    };
+    }
     let language = resolved_language(settings.language);
     let title = if language == Language::ZhCn {
         "Codex 额度提醒"
     } else {
         "Codex quota alert"
     };
-    let body = notification_body(&batch, snapshot, language);
+    let body = notification_body(
+        batch.as_ref(),
+        snapshot,
+        reset_credit_increase.as_ref(),
+        language,
+    );
     if body.is_empty() {
         return;
     }
     let reset_event_id = pending_event.as_ref().and_then(|event| {
         let window_index = matched_window_index?;
         batch
-            .items
-            .iter()
-            .any(|item| {
-                item.window_index == window_index
-                    && item.reasons.contains(&NotificationReason::Reset)
+            .as_ref()
+            .is_some_and(|batch| {
+                batch.items.iter().any(|item| {
+                    item.window_index == window_index
+                        && item.reasons.contains(&NotificationReason::Reset)
+                })
             })
             .then_some(event.event_id.as_str())
     });
@@ -1985,11 +2047,21 @@ async fn finalize_refresh_result(
         return current;
     }
     if result.should_emit && result.was_successful {
+        let reset_credit_increase =
+            result
+                .reset_credit_observation
+                .as_ref()
+                .and_then(|observation| {
+                    state
+                        .reset_credit_notifications
+                        .observe(&observation.account_identity, observation.availability)
+                });
         send_usage_notifications(
             app,
             state,
             &result.snapshot,
             result.history_effect.account_changed,
+            reset_credit_increase,
         );
     }
     if result.should_emit && result.history_effect.changed {
@@ -2338,6 +2410,7 @@ mod tests {
             should_emit: true,
             history_effect: HistoryRefreshEffect::default(),
             quota_auto_continue_changed: false,
+            reset_credit_observation: None,
         };
         assert!(refresh_result_is_current(&current_result, &snapshot));
 
@@ -2723,7 +2796,7 @@ mod tests {
             }],
         };
         let body = notification_body(
-            &NotificationBatch {
+            Some(&NotificationBatch {
                 items: vec![crate::notification_rules::NotificationItem {
                     window_index: 0,
                     reasons: vec![NotificationReason::LowRemaining {
@@ -2731,8 +2804,9 @@ mod tests {
                     }],
                 }],
                 omitted_window_count: 0,
-            },
+            }),
             &snapshot,
+            None,
             Language::En,
         );
 
@@ -2740,6 +2814,76 @@ mod tests {
         assert!(!body.contains("private.example"));
         assert!(!body.contains("Sensitive"));
         assert!(!body.contains("internal-stream"));
+    }
+
+    #[test]
+    fn reset_credit_line_merges_with_quota_reasons_in_both_languages() {
+        let snapshot = DashboardSnapshot {
+            status: DashboardStatus::Ready,
+            account_email_masked: None,
+            plan_label: None,
+            refreshed_at: None,
+            next_refresh_at: None,
+            message: None,
+            quota_windows: vec![crate::models::QuotaWindow {
+                id: "weekly".to_owned(),
+                label: None,
+                fallback_label: QuotaFallbackLabel::Weekly,
+                remaining_percent: 20,
+                used_percent: 80,
+                window_seconds: 7 * 24 * 60 * 60,
+                reset_at: None,
+                reset_after_seconds: 60,
+                start_at: None,
+                show_pace_marker: true,
+                forecast: None,
+            }],
+        };
+        let batch = NotificationBatch {
+            items: vec![crate::notification_rules::NotificationItem {
+                window_index: 0,
+                reasons: vec![NotificationReason::LowRemaining {
+                    remaining_percent: 20,
+                }],
+            }],
+            omitted_window_count: 0,
+        };
+        let increase = ResetCreditIncrease {
+            gained_count: 1,
+            available_count: 2,
+            applicable_available_count: Some(0),
+        };
+
+        assert_eq!(
+            notification_body(Some(&batch), &snapshot, Some(&increase), Language::ZhCn),
+            "重置卡：新获得 1 张，当前共 2 张（可使用 0 张）\n周限额: 剩余 20%"
+        );
+        assert_eq!(
+            notification_body(Some(&batch), &snapshot, Some(&increase), Language::En),
+            "Reset credits: received 1, 2 total (0 currently usable)\nWeekly limit: 20% remaining"
+        );
+        assert_eq!(
+            notification_body(None, &snapshot, Some(&increase), Language::ZhCn),
+            "重置卡：新获得 1 张，当前共 2 张（可使用 0 张）"
+        );
+    }
+
+    #[test]
+    fn reset_credit_alert_requires_both_switches_and_is_suppressed_during_quiet_hours() {
+        let mut settings = Settings::default();
+        assert!(!reset_credit_notification_allowed(&settings, 12 * 60));
+
+        settings.notifications.enabled = true;
+        assert!(!reset_credit_notification_allowed(&settings, 12 * 60));
+
+        settings.notifications.reset_credit_enabled = true;
+        assert!(reset_credit_notification_allowed(&settings, 12 * 60));
+
+        settings.notifications.quiet_hours_enabled = true;
+        settings.notifications.quiet_hours_start = "22:00".to_owned();
+        settings.notifications.quiet_hours_end = "08:00".to_owned();
+        assert!(!reset_credit_notification_allowed(&settings, 23 * 60));
+        assert!(reset_credit_notification_allowed(&settings, 12 * 60));
     }
 
     #[test]

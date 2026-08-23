@@ -47,11 +47,19 @@ impl UsageError {
 pub struct FetchedDashboard {
     pub snapshot: DashboardSnapshot,
     pub account_identity: UsageAccountIdentity,
+    pub reset_credit_availability: Option<ResetCreditAvailability>,
 }
 
 pub enum UsageAccountIdentity {
     AccountId(String),
     Token(String),
+}
+
+/// 内部用量响应中的重置卡摘要。该类型只在 Rust 刷新与通知链路中流转。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetCreditAvailability {
+    pub available_count: u64,
+    pub applicable_available_count: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -72,7 +80,7 @@ impl UsageClient {
         Ok(Self { client })
     }
 
-    /// 仅使用 access_token 查询额度。这里没有 OAuth、重置卡或任何写入路径。
+    /// 仅使用 access_token 查询额度与重置卡计数；不会调用重置卡消耗或其他写入路径。
     pub async fn fetch_dashboard(&self) -> Result<FetchedDashboard, UsageError> {
         let credentials = read_auth_credentials()?;
         let account_identity = credentials
@@ -116,6 +124,7 @@ impl UsageClient {
         Ok(FetchedDashboard {
             snapshot: parse_usage_payload(&payload)?,
             account_identity,
+            reset_credit_availability: parse_reset_credit_availability(&payload),
         })
     }
 }
@@ -193,6 +202,21 @@ fn parse_account_email_masked(payload: &Value) -> Option<String> {
         .into_iter()
         .filter_map(|pointer| payload.pointer(pointer).and_then(Value::as_str))
         .find_map(mask_email)
+}
+
+/// `available_count` 是检测到账的唯一触发源；可用数量只用于补充通知文案。
+/// 缺失的可用数量可以安全省略，但显式的非法值会让本次摘要整体失效。
+pub fn parse_reset_credit_availability(payload: &Value) -> Option<ResetCreditAvailability> {
+    let object = payload.get("rate_limit_reset_credits")?.as_object()?;
+    let available_count = object.get("available_count")?.as_u64()?;
+    let applicable_available_count = match object.get("applicable_available_count") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_u64()?),
+    };
+    Some(ResetCreditAvailability {
+        available_count,
+        applicable_available_count,
+    })
 }
 
 /// 仅保留本地部分首字符和完整域名，例如 `jane@example.com` 显示为
@@ -424,5 +448,73 @@ mod tests {
             parse_usage_payload(&payload),
             Err(UsageError::InvalidPayload)
         ));
+    }
+
+    #[test]
+    fn parses_reset_credit_counts_without_exposing_them_in_dashboard_json() {
+        let payload = serde_json::json!({
+            "rate_limit": {
+                "primary_window": {"used_percent": 30, "limit_window_seconds": 18000, "reset_after_seconds": 3600}
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 2,
+                "applicable_available_count": 1
+            }
+        });
+
+        assert_eq!(
+            parse_reset_credit_availability(&payload),
+            Some(ResetCreditAvailability {
+                available_count: 2,
+                applicable_available_count: Some(1),
+            })
+        );
+        let rendered = serde_json::to_string(&parse_usage_payload(&payload).unwrap()).unwrap();
+        assert!(!rendered.contains("availableCount"));
+        assert!(!rendered.contains("resetCredit"));
+    }
+
+    #[test]
+    fn ignores_missing_null_negative_or_mistyped_reset_credit_counts() {
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"available_count": null}),
+            serde_json::json!({"available_count": -1, "applicable_available_count": 0}),
+            serde_json::json!({"available_count": "1", "applicable_available_count": 0}),
+            serde_json::json!({"available_count": 1, "applicable_available_count": -1}),
+            serde_json::json!({"available_count": 1, "applicable_available_count": "0"}),
+        ] {
+            let payload = serde_json::json!({"rate_limit_reset_credits": invalid});
+            assert_eq!(parse_reset_credit_availability(&payload), None);
+        }
+    }
+
+    #[test]
+    fn accepts_missing_applicable_count_and_u64_max_without_overflow() {
+        let without_applicable = serde_json::json!({
+            "rate_limit_reset_credits": {"available_count": 1}
+        });
+        assert_eq!(
+            parse_reset_credit_availability(&without_applicable),
+            Some(ResetCreditAvailability {
+                available_count: 1,
+                applicable_available_count: None,
+            })
+        );
+
+        let maximum = serde_json::json!({
+            "rate_limit_reset_credits": {
+                "available_count": u64::MAX,
+                "applicable_available_count": u64::MAX
+            }
+        });
+        assert_eq!(
+            parse_reset_credit_availability(&maximum),
+            Some(ResetCreditAvailability {
+                available_count: u64::MAX,
+                applicable_available_count: Some(u64::MAX),
+            })
+        );
     }
 }

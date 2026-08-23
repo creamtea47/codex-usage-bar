@@ -93,6 +93,7 @@ export interface NotificationSettings {
   paceEnabled: boolean;
   paceDeficitThresholdPercent: number;
   resetEnabled: boolean;
+  resetCreditEnabled: boolean;
   quietHoursEnabled: boolean;
   quietHoursStart: string;
   quietHoursEnd: string;
@@ -220,6 +221,7 @@ export const defaultSettings: Settings = {
     paceEnabled: true,
     paceDeficitThresholdPercent: 10,
     resetEnabled: true,
+    resetCreditEnabled: false,
     quietHoursEnabled: false,
     quietHoursStart: '22:00',
     quietHoursEnd: '08:00',
