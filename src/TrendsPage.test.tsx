@@ -63,7 +63,7 @@ vi.mock('react-i18next', async (importOriginal) => {
     'trends.windowAria': '{{label}} trend',
     'trends.current.label': 'Current remaining',
     'trends.current.value': '{{percent}}% remaining',
-    'trends.consumed.label': 'Recent consumption',
+    'trends.consumed.label': "Today's consumption",
     'trends.consumed.value': '{{percent}}% consumed',
     'trends.chart.aria': '{{label}} history chart',
     'trends.chart.remaining': 'Remaining',
@@ -134,7 +134,7 @@ const populatedHistory: UsageHistoryResponse = {
       windowSeconds: 604_800,
       fallbackLabel: 'weekly',
       currentRemainingPercent: 72,
-      consumedPercent: 8,
+      todayConsumedPercent: 28,
       points: [
         { sampledAt: '2030-01-01T00:00:00Z', remainingPercent: 90, breakBefore: false },
         { sampledAt: '2030-01-01T01:00:00Z', remainingPercent: 100, breakBefore: true },
@@ -216,7 +216,9 @@ describe('TrendsPage', () => {
     expect(await screen.findByText('Weekly limit')).toBeTruthy();
     expect(getUsageHistory).toHaveBeenCalledWith({ kind: 'preset', preset: '24h' });
     expect(screen.getByText('72% remaining')).toBeTruthy();
-    expect(screen.getByText('8% consumed')).toBeTruthy();
+    expect(screen.getByText("Today's consumption")).toBeTruthy();
+    expect(screen.getByText('28% consumed')).toBeTruthy();
+    expect(screen.getByText((content) => content.endsWith('· 8% consumed'))).toBeTruthy();
     expect(screen.getByText('Expected to last until reset')).toBeTruthy();
     expect(screen.queryByText('private-account@example.com')).toBeNull();
     expect(screen.getByRole('article', { name: 'Weekly limit trend' })).toBeTruthy();

@@ -962,7 +962,7 @@ struct UsageHistorySeriesResponse {
     window_seconds: i64,
     fallback_label: QuotaFallbackLabel,
     current_remaining_percent: Option<u8>,
-    consumed_percent: f64,
+    today_consumed_percent: u32,
     points: Vec<crate::usage_history::UsageHistoryPoint>,
     forecast: QuotaForecast,
 }
@@ -1332,13 +1332,15 @@ async fn get_usage_history(
     state: State<'_, Arc<AppState>>,
 ) -> Result<UsageHistoryResponse, String> {
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
-    let now = Utc::now();
+    let now_local = Local::now();
+    let now = now_local.with_timezone(&Utc);
+    let today_started_at = local_day_start_utc(now_local);
     let (query, storage_status) = {
         let runtime = state.usage_history.lock().await;
         let storage_summary = runtime.history.summary();
         let query = runtime
             .history
-            .query_request(request, now)
+            .query_request_with_day_start(request, now, today_started_at)
             .map_err(history_query_error_code)?;
         let storage_status = match runtime.storage_status {
             HistoryStorageStatus::Ready if storage_summary.sample_count > 0 => {
@@ -1364,7 +1366,7 @@ async fn get_usage_history(
                 window_seconds: series.window_seconds,
                 fallback_label: fallback_label_for_duration(series.window_seconds),
                 current_remaining_percent: Some(series.current_remaining_percent),
-                consumed_percent: forecast.consumed_percent,
+                today_consumed_percent: series.today_consumed_percent,
                 points: series.points,
                 forecast,
             }
@@ -1394,6 +1396,25 @@ fn history_query_error_code(error: UsageHistoryQueryError) -> String {
         UsageHistoryQueryError::SpanTooLarge => "historyRangeTooLarge",
     }
     .to_owned()
+}
+
+/// 将系统本地日期的第一个有效墙上时刻转换为 UTC。极少数时区会在午夜切换
+/// 夏令时，因此逐分钟寻找可表示的当天起点，避免错误退化成滚动 24 小时。
+fn local_day_start_utc(now: DateTime<Local>) -> DateTime<Utc> {
+    let date = now.date_naive();
+    for minute in 0..24 * 60 {
+        let Some(local_time) = date
+            .and_hms_opt(0, 0, 0)
+            .map(|midnight| midnight + ChronoDuration::minutes(minute))
+        else {
+            break;
+        };
+        if let Some(start) = local_time.and_local_timezone(Local).earliest() {
+            return start.with_timezone(&Utc);
+        }
+    }
+    // 理论上仅当系统时区数据库异常才会到达；保持边界不晚于当前时刻更安全。
+    now.with_timezone(&Utc)
 }
 
 #[tauri::command]
@@ -2571,7 +2592,7 @@ mod tests {
                 window_seconds: 7 * 24 * 60 * 60,
                 fallback_label: QuotaFallbackLabel::Weekly,
                 current_remaining_percent: Some(75),
-                consumed_percent: 25.0,
+                today_consumed_percent: 25,
                 points: (0..1_000)
                     .map(|point_index| crate::usage_history::UsageHistoryPoint {
                         sampled_at: now

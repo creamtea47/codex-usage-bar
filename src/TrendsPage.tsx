@@ -177,6 +177,11 @@ function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
 }
 
+function safeConsumptionPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, value);
+}
+
 function languageForFormatting(language?: string): 'zh-CN' | 'en' {
   return language && /^zh(?:-|$)/i.test(language) ? 'zh-CN' : 'en';
 }
@@ -286,7 +291,7 @@ function SeriesCard({ request, series, language, translate, translateAny }: Seri
           percent: Math.round(clampPercent(series.currentRemainingPercent)),
         });
   const consumed = translate('trends.consumed.value', {
-    percent: Math.round(clampPercent(series.consumedPercent)),
+    percent: Math.round(safeConsumptionPercent(series.todayConsumedPercent)),
   });
   const forecast = forecastMessage(series.forecast.status, series.forecast.exhaustsAt, language, translate);
   const basis = translate('trends.forecast.basis', {
