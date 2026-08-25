@@ -196,9 +196,9 @@ pnpm tauri build --bundles dmg --no-sign --config src-tauri/tauri.unsigned.conf.
 维护者发布示例：
 
 ```powershell
-git tag -a v0.6.0 -m "v0.6.0 今日消耗与重置卡到账提醒"
+git tag -a v0.6.1 -m "v0.6.1 修复额度自动接续立即调度"
 git push origin master
-git push origin v0.6.0
+git push origin v0.6.1
 ```
 
 ## 不包含的能力

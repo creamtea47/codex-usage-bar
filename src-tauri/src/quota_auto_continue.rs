@@ -2243,6 +2243,10 @@ mod tests {
         let runtime = QuotaAutoContinueRuntime::new(path.clone()).unwrap();
         let event = establish_recovered_reset(&runtime, true, at(1_000), at(1_000));
         assert_eq!(event.reason, QuotaResetReason::QuotaRecovered);
+        assert_eq!(
+            runtime.status(true, at(1_000)).next_attempt_at,
+            Some(at(1_000))
+        );
 
         let immediate = runtime.claim_due_attempt(true, at(1_000)).unwrap().unwrap();
         assert_eq!(immediate.slot_index, 0);

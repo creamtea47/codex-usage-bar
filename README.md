@@ -196,9 +196,9 @@ The current signing key has no password. If a future encrypted key is used, conf
 Example maintainer release:
 
 ```powershell
-git tag -a v0.6.0 -m "v0.6.0 today's consumption and reset-credit arrival alerts"
+git tag -a v0.6.1 -m "v0.6.1 fix immediate quota auto-continuation scheduling"
 git push origin master
-git push origin v0.6.0
+git push origin v0.6.1
 ```
 
 ## Intentionally excluded

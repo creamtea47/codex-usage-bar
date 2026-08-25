@@ -77,6 +77,7 @@ const LOG_RETENTION: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 // 自动检查只读取公开 HTTPS 更新清单；不下载、不安装，更新包签名会在用户确认下载后验证。
 const AUTO_UPDATE_CHECK_START_DELAY: Duration = Duration::from_secs(8);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const QUOTA_AUTO_CONTINUE_IDLE_WAIT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 // 悬浮卡的一张额度窗口尺寸。260px 恰好容纳成功态的一张额度卡，避免底部无效留白；
 // 窗口数量或可靠建议增加时只扩展高度，最高后由前端分别滚动额度与建议区域。
@@ -102,6 +103,20 @@ fn scheduled_deadline_is_current(
     current_deadline: Option<DateTime<Utc>>,
 ) -> bool {
     expected_revision == current_revision && expected_deadline == current_deadline
+}
+
+/// 将自动接续的绝对执行时间转换为 Tokio 等待时长。
+///
+/// `None` 才表示当前没有任务；已到期或因取时差产生轻微负值的任务必须返回零，
+/// 否则会误用空闲等待并跳过本应立即占用的尝试槽。
+fn quota_auto_continue_wait_duration(
+    next_attempt_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Duration {
+    match next_attempt_at {
+        Some(deadline) => (deadline - now).to_std().unwrap_or(Duration::ZERO),
+        None => QUOTA_AUTO_CONTINUE_IDLE_WAIT,
+    }
 }
 
 struct AppState {
@@ -1874,12 +1889,10 @@ fn start_quota_auto_continue_loop(app: AppHandle, state: Arc<AppState>) {
         let mut receiver = state.quota_auto_continue.subscribe();
         loop {
             let enabled = state.current_settings().quota_auto_continue_enabled;
-            let status = state.quota_auto_continue.status(enabled, Utc::now());
-            let wait = status
-                .next_attempt_at
-                .and_then(|deadline| (deadline - Utc::now()).to_std().ok())
-                // 没有任务时由 watch 变更提前唤醒；长等待不产生轮询和网络请求。
-                .unwrap_or(Duration::from_secs(365 * 24 * 60 * 60));
+            let now = Utc::now();
+            let status = state.quota_auto_continue.status(enabled, now);
+            // 没有任务时由 watch 变更提前唤醒；已到期任务则以零等待立即执行。
+            let wait = quota_auto_continue_wait_duration(status.next_attempt_at, now);
             tokio::select! {
                 changed = receiver.changed() => {
                     if changed.is_err() {
@@ -2947,6 +2960,28 @@ mod tests {
 
         assert!(!refresh_completed_since(9, 9));
         assert!(refresh_completed_since(9, 10));
+    }
+
+    #[test]
+    fn quota_auto_continue_wait_distinguishes_idle_future_and_due_tasks() {
+        let now = DateTime::from_timestamp(1_000, 500_000_000).unwrap();
+
+        assert_eq!(
+            quota_auto_continue_wait_duration(None, now),
+            QUOTA_AUTO_CONTINUE_IDLE_WAIT
+        );
+        assert_eq!(
+            quota_auto_continue_wait_duration(Some(now + ChronoDuration::seconds(30)), now),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            quota_auto_continue_wait_duration(Some(now), now),
+            Duration::ZERO
+        );
+        assert_eq!(
+            quota_auto_continue_wait_duration(Some(now - ChronoDuration::nanoseconds(1)), now),
+            Duration::ZERO
+        );
     }
 
     #[tokio::test]
