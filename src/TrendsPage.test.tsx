@@ -19,10 +19,11 @@ vi.mock('react-i18next', async (importOriginal) => {
     'trends.range.hours24': '24 hours',
     'trends.range.days7': '7 days',
     'trends.range.days30': '30 days',
+    'trends.range.all': 'All history',
     'trends.range.custom': 'Custom',
     'trends.range.customApplied': 'Custom range',
     'trends.custom.dialogTitle': 'Custom date range',
-    'trends.custom.dialogDescription': 'Choose up to 30 local calendar days.',
+    'trends.custom.dialogDescription': 'Choose any past local calendar dates.',
     'trends.custom.startLabel': 'Start date',
     'trends.custom.endLabel': 'End date',
     'trends.custom.cancel': 'Cancel',
@@ -31,7 +32,6 @@ vi.mock('react-i18next', async (importOriginal) => {
     'trends.custom.error.invalid': 'Enter a valid date.',
     'trends.custom.error.future': 'Future dates are not available.',
     'trends.custom.error.reversed': 'End date must be on or after start date.',
-    'trends.custom.error.tooLong': 'Choose no more than 30 calendar days.',
     'trends.custom.error.emptyToday': 'No time has elapsed today yet.',
     'trends.partialCoverage': 'Only part of this range is available in local history.',
     'trends.partialCoverageFrom': 'Only part is available. Data starts {{date}}.',
@@ -44,8 +44,8 @@ vi.mock('react-i18next', async (importOriginal) => {
     'trends.collection.disableSuccess': 'Collection paused.',
     'trends.collection.error': 'Unable to update history collection.',
     'trends.clear.button': 'Clear history',
-    'trends.clear.dialogTitle': 'Clear local history?',
-    'trends.clear.dialogBody': 'This permanently deletes all local usage samples.',
+    'trends.clear.dialogTitle': 'Clear current account history?',
+    'trends.clear.dialogBody': 'This permanently deletes current account samples only.',
     'trends.clear.cancel': 'Cancel',
     'trends.clear.confirm': 'Delete',
     'trends.clear.success': 'History cleared.',
@@ -240,7 +240,7 @@ describe('TrendsPage', () => {
     expect(screen.getByRole('button', { name: '7 days' }).getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('requests the fixed 30-day preset and keeps 24 hours as a fresh-mount default', async () => {
+  it('requests 30-day and all-history presets and keeps 24 hours as a fresh-mount default', async () => {
     const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
     const firstView = renderPage({ getUsageHistory });
     await screen.findByText('No history yet');
@@ -250,6 +250,12 @@ describe('TrendsPage', () => {
       expect(getUsageHistory).toHaveBeenLastCalledWith({ kind: 'preset', preset: '30d' }),
     );
     expect(screen.getByRole('button', { name: '30 days' }).getAttribute('aria-pressed')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'All history' }));
+    await waitFor(() =>
+      expect(getUsageHistory).toHaveBeenLastCalledWith({ kind: 'preset', preset: 'all' }),
+    );
+    expect(screen.getByRole('button', { name: 'All history' }).getAttribute('aria-pressed')).toBe('true');
 
     firstView.unmount();
     renderPage({ getUsageHistory });
@@ -328,7 +334,7 @@ describe('TrendsPage', () => {
     expect(getUsageHistory).toHaveBeenCalledTimes(1);
   });
 
-  it('cancels custom draft changes without querying and validates future/reversed/overlong dates', async () => {
+  it('cancels custom draft changes without querying and accepts ranges longer than 30 days', async () => {
     const getUsageHistory = vi.fn(async (request: UsageHistoryRequest) => emptyHistory(request));
     renderPage({ getUsageHistory, now: () => new Date(2030, 0, 31, 12, 0) });
     await screen.findByText('No history yet');
@@ -346,7 +352,9 @@ describe('TrendsPage', () => {
     expect(await screen.findByText('End date must be on or after start date.')).toBeTruthy();
     fireEvent.change(start, { target: { value: '01/01/2030' } });
     fireEvent.change(end, { target: { value: '01/31/2030' } });
-    expect(await screen.findByText('Choose no more than 30 calendar days.')).toBeTruthy();
+    await waitFor(() =>
+      expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(false),
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(getUsageHistory).toHaveBeenCalledTimes(1);
@@ -410,7 +418,7 @@ describe('TrendsPage', () => {
     expect(await screen.findByRole('button', { name: 'Close' })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear history' }));
-    expect(await screen.findByRole('dialog', { name: 'Clear local history?' })).toBeTruthy();
+    expect(await screen.findByRole('dialog', { name: 'Clear current account history?' })).toBeTruthy();
     expect(onClearUsageHistory).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(onClearUsageHistory).toHaveBeenCalledTimes(1));

@@ -8,12 +8,11 @@ use std::{
 };
 
 pub const USAGE_HISTORY_FILE_NAME: &str = "usage-history.json";
-pub const USAGE_HISTORY_SCHEMA_VERSION: u32 = 1;
+pub const USAGE_HISTORY_SCHEMA_VERSION: u32 = 2;
 
 const SALT_BYTES: usize = 32;
 const FINGERPRINT_BYTES: usize = 32;
 const STREAM_KEY_BYTES: usize = 32;
-const RETENTION_DAYS: i64 = 32;
 const SAMPLE_INTERVAL_MINUTES: i64 = 5;
 const FORECAST_LOOKBACK_HOURS: i64 = 6;
 const FORECAST_MIN_SAMPLES: usize = 4;
@@ -22,10 +21,8 @@ const FORECAST_MIN_CONSUMPTION_PERCENT: u8 = 2;
 const FORECAST_ROUND_SECONDS: i64 = 15 * 60;
 const SEVEN_DAY_BUCKET_SECONDS: i64 = 15 * 60;
 const MONTH_BUCKET_SECONDS: i64 = 60 * 60;
-const CUSTOM_RANGE_MAX_SECONDS: i64 = 30 * 24 * 60 * 60 + 60 * 60;
-const MAX_POINTS_PER_STREAM: usize = 4_000;
+const DAILY_BUCKET_SECONDS: i64 = 24 * 60 * 60;
 const MAX_QUERY_POINTS_PER_SERIES: usize = 1_000;
-const MAX_STREAMS: usize = 16;
 const MAX_WINDOW_ID_BYTES: usize = 256;
 const GENERATION_ID_BYTES: usize = 32;
 
@@ -107,6 +104,26 @@ pub struct UsageHistory {
     salt: String,
     account_fingerprint: Option<String>,
     streams: Vec<StoredUsageStream>,
+    /// 非当前账号的匿名历史分区。当前账号仍保留在根字段，避免查询、预测和采样链路
+    /// 为多账号存储承担不必要的间接层。
+    accounts: Vec<StoredAccountHistory>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredAccountHistory {
+    account_fingerprint: String,
+    streams: Vec<StoredUsageStream>,
+}
+
+/// schema v1 只保存当前账号；显式旧结构确保升级不会把未知或损坏内容当成空历史。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UsageHistoryV1 {
+    schema_version: u32,
+    salt: String,
+    account_fingerprint: Option<String>,
+    streams: Vec<StoredUsageStream>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -156,7 +173,7 @@ pub struct HistoryGenerationInput {
 pub enum AccountSelection {
     Initialized,
     Unchanged,
-    ChangedAndCleared { cleared_samples: usize },
+    Switched { created: bool },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -166,8 +183,6 @@ pub struct HistoryMutation {
     pub generation_metadata_updated: bool,
     pub samples_recorded: usize,
     pub samples_pruned: usize,
-    pub samples_cleared: usize,
-    pub streams_evicted: usize,
     pub ignored_windows: usize,
 }
 
@@ -177,8 +192,6 @@ impl HistoryMutation {
             || self.generation_metadata_updated
             || self.samples_recorded > 0
             || self.samples_pruned > 0
-            || self.samples_cleared > 0
-            || self.streams_evicted > 0
     }
 }
 
@@ -190,20 +203,23 @@ pub enum UsageHistoryPreset {
     Days7,
     #[serde(rename = "30d")]
     Days30,
+    #[serde(rename = "all")]
+    All,
 }
 
 impl UsageHistoryPreset {
-    fn duration(self) -> Duration {
+    fn duration(self) -> Option<Duration> {
         match self {
-            Self::Hours24 => Duration::hours(24),
-            Self::Days7 => Duration::days(7),
-            Self::Days30 => Duration::days(30),
+            Self::Hours24 => Some(Duration::hours(24)),
+            Self::Days7 => Some(Duration::days(7)),
+            Self::Days30 => Some(Duration::days(30)),
+            Self::All => None,
         }
     }
 }
 
 /// 设置页历史查询的唯一结构化契约。前端负责把本地日历边界转换成 UTC instant；
-/// Rust 只接受明确的半开区间，并再次限制跨度与未来端点。
+/// Rust 只接受明确的半开区间，并再次限制顺序与未来端点。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum UsageHistoryRequest {
@@ -232,17 +248,23 @@ pub enum UsageHistoryQueryError {
     EmptyOrReversedRange,
     #[error("history range cannot end in the future")]
     FutureEnd,
-    #[error("history range is too large")]
-    SpanTooLarge,
 }
 
 impl UsageHistoryRequest {
     pub fn resolve(
         self,
         now: DateTime<Utc>,
+        available_start_at: Option<DateTime<Utc>>,
     ) -> Result<ResolvedUsageHistoryRange, UsageHistoryQueryError> {
         let (requested_start_at, end_at_exclusive) = match self {
-            Self::Preset { preset } => (safe_subtract(now, preset.duration()), now),
+            Self::Preset { preset } => (
+                preset
+                    .duration()
+                    .map(|duration| safe_subtract(now, duration))
+                    .or(available_start_at)
+                    .unwrap_or(now),
+                now,
+            ),
             Self::Custom {
                 start_at,
                 end_at_exclusive,
@@ -253,29 +275,24 @@ impl UsageHistoryRequest {
                 if end_at_exclusive > now {
                     return Err(UsageHistoryQueryError::FutureEnd);
                 }
-                if end_at_exclusive - start_at > Duration::seconds(CUSTOM_RANGE_MAX_SECONDS) {
-                    return Err(UsageHistoryQueryError::SpanTooLarge);
-                }
                 (start_at, end_at_exclusive)
             }
         };
-        let retention_start_at = safe_subtract(now, Duration::days(RETENTION_DAYS));
-        let start_at = requested_start_at
-            .max(retention_start_at)
-            .min(end_at_exclusive);
-        let span = end_at_exclusive - start_at;
+        let span = end_at_exclusive - requested_start_at;
         let bucket_seconds = if span <= Duration::hours(24) {
             None
         } else if span <= Duration::days(7) {
             Some(SEVEN_DAY_BUCKET_SECONDS)
-        } else {
+        } else if span <= Duration::days(32) {
             Some(MONTH_BUCKET_SECONDS)
+        } else {
+            Some(DAILY_BUCKET_SECONDS)
         };
         Ok(ResolvedUsageHistoryRange {
-            start_at,
+            start_at: requested_start_at,
             end_at_exclusive,
             bucket_seconds,
-            truncated_by_retention: start_at != requested_start_at,
+            truncated_by_retention: false,
         })
     }
 }
@@ -389,6 +406,7 @@ impl UsageHistory {
             salt: generate_local_salt(),
             account_fingerprint: None,
             streams: Vec::new(),
+            accounts: Vec::new(),
         }
     }
 
@@ -401,6 +419,7 @@ impl UsageHistory {
             salt,
             account_fingerprint: None,
             streams: Vec::new(),
+            accounts: Vec::new(),
         })
     }
 
@@ -412,14 +431,36 @@ impl UsageHistory {
         match self.account_fingerprint.as_deref() {
             None => {
                 self.account_fingerprint = Some(fingerprint);
+                log::info!("本地趋势账号分区已初始化：accounts=1。");
                 Ok(AccountSelection::Initialized)
             }
             Some(current) if current == fingerprint => Ok(AccountSelection::Unchanged),
             Some(_) => {
-                let cleared_samples = self.sample_count();
-                self.streams.clear();
-                self.account_fingerprint = Some(fingerprint);
-                Ok(AccountSelection::ChangedAndCleared { cleared_samples })
+                let previous = StoredAccountHistory {
+                    account_fingerprint: self
+                        .account_fingerprint
+                        .take()
+                        .expect("selected account must have a fingerprint"),
+                    streams: std::mem::take(&mut self.streams),
+                };
+                let target = self
+                    .accounts
+                    .iter()
+                    .position(|account| account.account_fingerprint == fingerprint)
+                    .map(|index| self.accounts.remove(index));
+                let created = target.is_none();
+                if let Some(target) = target {
+                    self.account_fingerprint = Some(target.account_fingerprint);
+                    self.streams = target.streams;
+                } else {
+                    self.account_fingerprint = Some(fingerprint);
+                }
+                self.accounts.push(previous);
+                log::info!(
+                    "本地趋势账号分区已切换：created={created}，accounts={}。",
+                    self.accounts.len() + 1
+                );
+                Ok(AccountSelection::Switched { created })
             }
         }
     }
@@ -451,13 +492,10 @@ impl UsageHistory {
         match self.select_account(identity)? {
             AccountSelection::Initialized => mutation.account_changed = true,
             AccountSelection::Unchanged => {}
-            AccountSelection::ChangedAndCleared { cleared_samples } => {
-                mutation.account_changed = true;
-                mutation.samples_cleared = cleared_samples;
-            }
+            AccountSelection::Switched { .. } => mutation.account_changed = true,
         }
 
-        mutation.samples_pruned = self.prune_at(sampled_at);
+        mutation.samples_pruned = self.compact_at(sampled_at);
         let generation_by_window = generations
             .iter()
             .filter(|generation| valid_generation_input(generation))
@@ -502,10 +540,6 @@ impl UsageHistory {
             let (recorded, generation_metadata_updated) = if let Some(index) = stream_index {
                 self.streams[index].record(sampled_at, &stored_window, generation_id)
             } else {
-                if self.streams.len() >= MAX_STREAMS {
-                    mutation.samples_pruned += self.evict_oldest_stream();
-                    mutation.streams_evicted += 1;
-                }
                 self.streams.push(StoredUsageStream::from_first_sample(
                     sampled_at,
                     &stored_window,
@@ -517,36 +551,27 @@ impl UsageHistory {
 
             if recorded {
                 mutation.samples_recorded += 1;
-                let index = self
-                    .streams
-                    .iter()
-                    .position(|stream| stream.matches(&stored_window))
-                    .expect("recorded stream must remain present");
-                mutation.samples_pruned += self.streams[index].trim_to_point_limit(sampled_at);
             }
         }
         Ok(mutation)
     }
 
-    /// 用户清除历史时保留随机盐和当前账号指纹，避免清除后产生可关联的新指纹。
-    #[cfg(test)]
+    /// 用户清除历史时只清当前账号，并保留随机盐和账号指纹，避免影响其他分区。
     pub fn clear_samples(&mut self) -> usize {
         let removed = self.sample_count();
         self.streams.clear();
         removed
     }
 
-    pub fn prune_at(&mut self, now: DateTime<Utc>) -> usize {
-        let cutoff = safe_subtract(now, Duration::days(RETENTION_DAYS));
+    pub fn compact_at(&mut self, now: DateTime<Utc>) -> usize {
         let mut removed = 0;
         for stream in &mut self.streams {
-            removed += stream.prune_before(cutoff);
-            removed += stream.compact_for_retention(now);
-            removed += stream.trim_to_point_limit(now);
+            removed += stream.compact_for_age(now);
         }
-        self.streams.retain(|stream| !stream.cycles.is_empty());
-        while self.streams.len() > MAX_STREAMS {
-            removed += self.evict_oldest_stream();
+        for account in &mut self.accounts {
+            for stream in &mut account.streams {
+                removed += stream.compact_for_age(now);
+            }
         }
         removed
     }
@@ -567,16 +592,16 @@ impl UsageHistory {
     }
 
     /// 查询指定图表范围，同时用调用方解析好的本地自然日边界独立计算今日消耗。
-    /// 图表范围可以是预设、30 天或自定义范围，不得影响今日统计口径。
+    /// 图表范围可以是预设、全部历史或自定义范围，不得影响今日统计口径。
     pub fn query_request_with_day_start(
         &self,
         request: UsageHistoryRequest,
         now: DateTime<Utc>,
         today_started_at: DateTime<Utc>,
     ) -> Result<UsageHistoryQuery, UsageHistoryQueryError> {
-        let resolved = request.resolve(now)?;
-        let range_summary = self.summary_between(resolved.start_at, resolved.end_at_exclusive);
         let available_summary = self.summary_available_at(now);
+        let resolved = request.resolve(now, available_summary.oldest_sample_at)?;
+        let range_summary = self.summary_between(resolved.start_at, resolved.end_at_exclusive);
         let mut series = self
             .streams
             .iter()
@@ -706,7 +731,6 @@ impl UsageHistory {
     }
 
     fn summary_available_at(&self, now: DateTime<Utc>) -> UsageHistorySummary {
-        let retention_start_at = safe_subtract(now, Duration::days(RETENTION_DAYS));
         let mut stream_count = 0_u32;
         let mut sample_count = 0_u32;
         let mut oldest_sample_at = None;
@@ -717,9 +741,7 @@ impl UsageHistory {
                 .cycles
                 .iter()
                 .flat_map(|cycle| &cycle.samples)
-                .filter(|sample| {
-                    sample.sampled_at >= retention_start_at && sample.sampled_at <= now
-                })
+                .filter(|sample| sample.sampled_at <= now)
             {
                 stream_has_samples = true;
                 sample_count = sample_count.saturating_add(1);
@@ -771,18 +793,6 @@ impl UsageHistory {
             .flat_map(|cycle| &cycle.samples)
     }
 
-    fn evict_oldest_stream(&mut self) -> usize {
-        let Some((index, _)) = self
-            .streams
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, stream)| stream.latest_sample_at())
-        else {
-            return 0;
-        };
-        self.streams.remove(index).sample_count()
-    }
-
     fn validate(&self) -> bool {
         if self.schema_version != USAGE_HISTORY_SCHEMA_VERSION
             || decode_hex_exact(&self.salt, SALT_BYTES).is_none()
@@ -790,18 +800,32 @@ impl UsageHistory {
                 .account_fingerprint
                 .as_deref()
                 .is_some_and(|value| decode_hex_exact(value, FINGERPRINT_BYTES).is_none())
-            || (self.account_fingerprint.is_none() && !self.streams.is_empty())
+            || (self.account_fingerprint.is_none()
+                && (!self.streams.is_empty() || !self.accounts.is_empty()))
         {
             return false;
         }
 
-        let mut keys = HashSet::new();
-        self.streams.iter().all(|stream| {
-            valid_stored_window_key(&stream.window_id, stream.window_seconds)
-                && keys.insert((stream.window_id.as_str(), stream.window_seconds))
-                && stream.validate()
-        })
+        let mut fingerprints = HashSet::new();
+        if let Some(current) = self.account_fingerprint.as_deref() {
+            fingerprints.insert(current);
+        }
+        validate_streams(&self.streams)
+            && self.accounts.iter().all(|account| {
+                decode_hex_exact(&account.account_fingerprint, FINGERPRINT_BYTES).is_some()
+                    && fingerprints.insert(account.account_fingerprint.as_str())
+                    && validate_streams(&account.streams)
+            })
     }
+}
+
+fn validate_streams(streams: &[StoredUsageStream]) -> bool {
+    let mut keys = HashSet::new();
+    streams.iter().all(|stream| {
+        valid_stored_window_key(&stream.window_id, stream.window_seconds)
+            && keys.insert((stream.window_id.as_str(), stream.window_seconds))
+            && stream.validate()
+    })
 }
 
 impl StoredUsageStream {
@@ -922,64 +946,18 @@ impl StoredUsageStream {
         (true, generation_metadata_updated)
     }
 
-    fn prune_before(&mut self, cutoff: DateTime<Utc>) -> usize {
-        let mut removed = 0;
-        for cycle in &mut self.cycles {
-            let before = cycle.samples.len();
-            cycle.samples.retain(|sample| sample.sampled_at >= cutoff);
-            removed += before - cycle.samples.len();
-        }
-        self.cycles.retain(|cycle| !cycle.samples.is_empty());
-        removed
-    }
-
-    fn compact_for_retention(&mut self, now: DateTime<Utc>) -> usize {
+    fn compact_for_age(&mut self, now: DateTime<Utc>) -> usize {
         let recent_cutoff = safe_subtract(now, Duration::hours(24));
         let medium_cutoff = safe_subtract(now, Duration::days(7));
+        let daily_cutoff = safe_subtract(now, Duration::days(32));
         let mut removed = 0;
         for cycle in &mut self.cycles {
             let compacted =
-                compact_cycle_for_retention(&cycle.samples, medium_cutoff, recent_cutoff);
+                compact_cycle_for_age(&cycle.samples, daily_cutoff, medium_cutoff, recent_cutoff);
             removed += cycle.samples.len().saturating_sub(compacted.len());
             cycle.samples = compacted;
         }
         removed
-    }
-
-    fn trim_to_point_limit(&mut self, now: DateTime<Utc>) -> usize {
-        let original_count = self.sample_count();
-        let mut excess = original_count.saturating_sub(MAX_POINTS_PER_STREAM);
-        let older_cycle_count = self.cycles.len().saturating_sub(1);
-        for cycle in self.cycles.iter_mut().take(older_cycle_count) {
-            if excess == 0 {
-                break;
-            }
-            // 先删旧 cycle 的内部点，首尾始终成对保留；最新 cycle 的观测留给
-            // current/forecast，除非它自身单独就超过安全上限。
-            let removable = cycle.samples.len().saturating_sub(2);
-            let remove = excess.min(removable);
-            if remove > 0 {
-                cycle.samples.drain(1..1 + remove);
-            }
-            excess -= remove;
-        }
-        while self.sample_count() > MAX_POINTS_PER_STREAM && self.cycles.len() > 1 {
-            self.cycles.remove(0);
-        }
-        if let Some(latest_cycle) = self.cycles.last_mut() {
-            if latest_cycle.samples.len() > MAX_POINTS_PER_STREAM {
-                // 单一最新 cycle 自身超过上限时，固定保留 cycle 首点、最新点和
-                // 最近六小时预测样本；只有预测窗口自身超限时才做安全均匀采样。
-                latest_cycle.samples =
-                    bound_latest_cycle_samples(&latest_cycle.samples, MAX_POINTS_PER_STREAM, now);
-            }
-        }
-        self.cycles.retain(|cycle| !cycle.samples.is_empty());
-        original_count.saturating_sub(self.sample_count())
-    }
-
-    fn sample_count(&self) -> usize {
-        self.cycles.iter().map(|cycle| cycle.samples.len()).sum()
     }
 
     fn latest_sample_at(&self) -> Option<DateTime<Utc>> {
@@ -1219,18 +1197,42 @@ pub fn load_history_at(path: &Path, now: DateTime<Utc>) -> LoadedUsageHistory {
     else {
         return recovered_history(HistoryStorageStatus::RecoveredCorrupt);
     };
-    if version != USAGE_HISTORY_SCHEMA_VERSION as u64 {
-        return recovered_history(HistoryStorageStatus::RecoveredUnsupported);
-    }
-    let mut history: UsageHistory = match serde_json::from_value::<UsageHistory>(value) {
-        Ok(history) if history.validate() => history,
-        _ => return recovered_history(HistoryStorageStatus::RecoveredCorrupt),
+    let (mut history, migrated) = match version {
+        1 => {
+            let legacy = match serde_json::from_value::<UsageHistoryV1>(value) {
+                Ok(legacy) if legacy.schema_version == 1 => legacy,
+                _ => return recovered_history(HistoryStorageStatus::RecoveredCorrupt),
+            };
+            let history = UsageHistory {
+                schema_version: USAGE_HISTORY_SCHEMA_VERSION,
+                salt: legacy.salt,
+                account_fingerprint: legacy.account_fingerprint,
+                streams: legacy.streams,
+                accounts: Vec::new(),
+            };
+            if !history.validate() {
+                return recovered_history(HistoryStorageStatus::RecoveredCorrupt);
+            }
+            log::info!(
+                "本地趋势历史已加载旧版待迁移数据：from_schema=1，to_schema=2，samples={}。",
+                history.sample_count()
+            );
+            (history, true)
+        }
+        version if version == USAGE_HISTORY_SCHEMA_VERSION as u64 => {
+            let history = match serde_json::from_value::<UsageHistory>(value) {
+                Ok(history) if history.validate() => history,
+                _ => return recovered_history(HistoryStorageStatus::RecoveredCorrupt),
+            };
+            (history, false)
+        }
+        _ => return recovered_history(HistoryStorageStatus::RecoveredUnsupported),
     };
-    let removed = history.prune_at(now);
+    let removed = history.compact_at(now);
     LoadedUsageHistory {
         history,
         status: HistoryStorageStatus::Ready,
-        needs_rewrite: removed > 0,
+        needs_rewrite: migrated || removed > 0,
     }
 }
 
@@ -1241,19 +1243,24 @@ pub fn save_history(path: &Path, history: &UsageHistory) -> Result<(), HistoryPe
     let content =
         serde_json::to_vec_pretty(history).map_err(|_| HistoryPersistenceError::Serialize)?;
     let temporary_path = path.with_extension("json.tmp");
+    let legacy_backup = legacy_backup_for(path)?;
     fs::write(&temporary_path, content).map_err(|_| HistoryPersistenceError::Storage)?;
     if path.exists() {
         fs::remove_file(path).map_err(|_| HistoryPersistenceError::Storage)?;
     }
     if fs::rename(&temporary_path, path).is_err() {
         let _ = fs::remove_file(&temporary_path);
+        if !path.exists() {
+            if let Some(backup) = legacy_backup {
+                let _ = fs::copy(backup, path);
+            }
+        }
         return Err(HistoryPersistenceError::Storage);
     }
     Ok(())
 }
 
-/// 账号切换、用户清除和损坏恢复必须先丢弃旧目标，避免安全新文件写入失败时
-/// 旧账号样本或未知内容仍留在磁盘。删除失败只返回稳定存储类别，不暴露路径。
+/// 损坏恢复必须先丢弃未知目标；删除失败只返回稳定存储类别，不暴露路径。
 pub fn clear_history_storage(path: &Path) -> Result<(), HistoryPersistenceError> {
     let temporary_path = path.with_extension("json.tmp");
     let mut failed = false;
@@ -1269,6 +1276,52 @@ pub fn clear_history_storage(path: &Path) -> Result<(), HistoryPersistenceError>
     } else {
         Ok(())
     }
+}
+
+/// 清除当前账号时同步移除同账号的 v1 迁移备份，避免“永久删除”后仍可恢复旧样本。
+pub fn clear_legacy_backup_for_current_account(
+    path: &Path,
+    history: &UsageHistory,
+) -> Result<(), HistoryPersistenceError> {
+    let Some(current) = history.account_fingerprint.as_deref() else {
+        return Ok(());
+    };
+    let backup = path.with_extension("v1.backup.json");
+    let contents = match fs::read(&backup) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(HistoryPersistenceError::Storage),
+    };
+    let legacy = serde_json::from_slice::<UsageHistoryV1>(&contents)
+        .map_err(|_| HistoryPersistenceError::Storage)?;
+    if legacy.account_fingerprint.as_deref() == Some(current) {
+        fs::remove_file(backup).map_err(|_| HistoryPersistenceError::Storage)?;
+    }
+    Ok(())
+}
+
+/// schema v1 首次改写前保留一次原文件；后续保存失败时可恢复旧目标。
+fn legacy_backup_for(path: &Path) -> Result<Option<std::path::PathBuf>, HistoryPersistenceError> {
+    let Ok(contents) = fs::read(path) else {
+        return Ok(None);
+    };
+    let is_v1 = serde_json::from_slice::<serde_json::Value>(&contents)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_u64)
+        })
+        == Some(1);
+    if !is_v1 {
+        return Ok(None);
+    }
+    let backup = path.with_extension("v1.backup.json");
+    if !backup.exists() {
+        fs::write(&backup, contents).map_err(|_| HistoryPersistenceError::Storage)?;
+        log::info!("本地趋势历史迁移备份已创建：schema=1。");
+    }
+    Ok(Some(backup))
 }
 
 fn recovered_history(status: HistoryStorageStatus) -> LoadedUsageHistory {
@@ -1393,8 +1446,9 @@ fn downsample_cycle<'a>(
     selected
 }
 
-fn compact_cycle_for_retention(
+fn compact_cycle_for_age(
     samples: &[StoredUsageSample],
+    daily_cutoff: DateTime<Utc>,
     medium_cutoff: DateTime<Utc>,
     recent_cutoff: DateTime<Utc>,
 ) -> Vec<StoredUsageSample> {
@@ -1408,7 +1462,14 @@ fn compact_cycle_for_retention(
     let mut tier_start = 0;
     while tier_start < samples.len() {
         let sampled_at = samples[tier_start].sampled_at;
-        let (tier_end, bucket_seconds) = if sampled_at < medium_cutoff {
+        let (tier_end, bucket_seconds) = if sampled_at < daily_cutoff {
+            let tier_end = samples[tier_start..]
+                .iter()
+                .position(|sample| sample.sampled_at >= daily_cutoff)
+                .map(|offset| tier_start + offset)
+                .unwrap_or(samples.len());
+            (tier_end, Some(DAILY_BUCKET_SECONDS))
+        } else if sampled_at < medium_cutoff {
             let tier_end = samples[tier_start..]
                 .iter()
                 .position(|sample| sample.sampled_at >= medium_cutoff)
@@ -1455,68 +1516,6 @@ fn compact_cycle_for_retention(
         .is_none_or(|sample| sample.sampled_at != last_at)
     {
         selected.push(samples[samples.len() - 1].clone());
-    }
-    selected
-}
-
-fn bound_latest_cycle_samples(
-    samples: &[StoredUsageSample],
-    maximum: usize,
-    now: DateTime<Utc>,
-) -> Vec<StoredUsageSample> {
-    if maximum == 0 || samples.is_empty() {
-        return Vec::new();
-    }
-    if samples.len() <= maximum {
-        return samples.to_vec();
-    }
-
-    let forecast_cutoff = safe_subtract(now, Duration::hours(FORECAST_LOOKBACK_HOURS));
-    let mut required = samples
-        .iter()
-        .map(|sample| sample.sampled_at >= forecast_cutoff && sample.sampled_at <= now)
-        .collect::<Vec<_>>();
-    required[0] = true;
-    required[samples.len() - 1] = true;
-    if let Some(current_index) = samples.iter().rposition(|sample| sample.sampled_at <= now) {
-        required[current_index] = true;
-    }
-    let required_count = required.iter().filter(|required| **required).count();
-
-    if required_count >= maximum {
-        let required_samples = samples
-            .iter()
-            .zip(&required)
-            .filter_map(|(sample, required)| required.then_some(sample))
-            .collect::<Vec<_>>();
-        if maximum == 1 {
-            return vec![required_samples[required_samples.len() - 1].clone()];
-        }
-        let last_index = required_samples.len() - 1;
-        return (0..maximum)
-            .map(|output_index| {
-                let source_index = output_index.saturating_mul(last_index) / (maximum - 1);
-                required_samples[source_index].clone()
-            })
-            .collect();
-    }
-
-    let optional_budget = maximum - required_count;
-    let optional_count = samples.len() - required_count;
-    let mut selected = Vec::with_capacity(maximum);
-    let mut optional_seen = 0_usize;
-    let mut optional_kept = 0_usize;
-    for (sample, required) in samples.iter().zip(required) {
-        if required {
-            selected.push(sample.clone());
-            continue;
-        }
-        optional_seen += 1;
-        let target_kept = optional_seen.saturating_mul(optional_budget) / optional_count;
-        if target_kept > optional_kept {
-            selected.push(sample.clone());
-            optional_kept += 1;
-        }
     }
     selected
 }
@@ -1859,18 +1858,38 @@ mod tests {
     }
 
     #[test]
-    fn account_switch_clears_every_old_stream_immediately() {
+    fn account_switch_restores_each_anonymous_partition() {
         let mut value = history();
         record(&mut value, at(8, 0), 80, at(20, 0));
         assert_eq!(value.sample_count(), 1);
         let selection = value
             .select_account(AccountIdentity::AccountId("another-account"))
             .unwrap();
-        assert_eq!(
-            selection,
-            AccountSelection::ChangedAndCleared { cleared_samples: 1 }
-        );
+        assert_eq!(selection, AccountSelection::Switched { created: true });
         assert!(value.is_empty());
+        value
+            .record_successful_snapshot(
+                AccountIdentity::AccountId("another-account"),
+                at(9, 0),
+                &[window("weekly", 604_800, 60, Some(at(20, 0)))],
+            )
+            .unwrap();
+
+        assert_eq!(
+            value.select_account(identity()).unwrap(),
+            AccountSelection::Switched { created: false }
+        );
+        assert_eq!(value.sample_count(), 1);
+        assert_eq!(value.summary().latest_sample_at, Some(at(8, 0)));
+
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(!serialized.contains("account-private"));
+        assert!(!serialized.contains("another-account"));
+        let mut restored: UsageHistory = serde_json::from_str(&serialized).unwrap();
+        restored
+            .select_account(AccountIdentity::AccountId("another-account"))
+            .unwrap();
+        assert_eq!(restored.summary().latest_sample_at, Some(at(9, 0)));
     }
 
     #[test]
@@ -2076,261 +2095,44 @@ mod tests {
         assert_eq!(mutation.ignored_windows, 2);
         assert_eq!(record(&mut value, at(7, 59), 70, reset).samples_recorded, 0);
     }
-
     #[test]
-    fn prunes_thirty_two_days_and_point_cap_preserves_surviving_cycle_boundaries() {
+    fn permanent_history_keeps_old_samples_and_unbounded_streams() {
         let now = at(8, 0);
-        let reset = now + Duration::days(7);
-        let mut retained = history();
-        record(&mut retained, now - Duration::days(31), 80, reset);
-        assert_eq!(retained.prune_at(now), 0);
-        assert_eq!(retained.sample_count(), 1);
-
-        let mut stale = history();
-        record(
-            &mut stale,
-            now - Duration::days(32) - Duration::nanoseconds(1),
-            80,
-            reset,
-        );
-        assert_eq!(stale.prune_at(now), 1);
-        assert!(stale.is_empty());
-
-        let first_at = now - Duration::hours(23);
-        let last_at = first_at + Duration::seconds((MAX_POINTS_PER_STREAM + 99) as i64);
-        let next_first_at = last_at + Duration::seconds(1);
-        let next_last_at = next_first_at + Duration::seconds(1);
-        let first_cycle_samples = (0..MAX_POINTS_PER_STREAM + 100)
-            .map(|index| StoredUsageSample {
-                sampled_at: first_at + Duration::seconds(index as i64),
-                remaining_percent: (index % 101) as u8,
-            })
-            .collect::<Vec<_>>();
-        let original_first_at = first_cycle_samples.first().unwrap().sampled_at;
-        let original_last_at = first_cycle_samples.last().unwrap().sampled_at;
-        let mut stream = StoredUsageStream {
-            window_id: "bounded".to_owned(),
-            window_seconds: 604_800,
-            cycles: vec![
-                StoredUsageCycle {
-                    generation_id: None,
-                    reset_at: None,
-                    samples: first_cycle_samples,
-                },
-                StoredUsageCycle {
-                    generation_id: None,
-                    reset_at: None,
-                    samples: vec![
-                        StoredUsageSample {
-                            sampled_at: next_first_at,
-                            remaining_percent: 100,
-                        },
-                        StoredUsageSample {
-                            sampled_at: next_last_at,
-                            remaining_percent: 99,
-                        },
-                    ],
-                },
-            ],
-        };
-        assert!(stream.trim_to_point_limit(now) > 0);
-        assert!(stream.sample_count() <= MAX_POINTS_PER_STREAM);
-        assert_eq!(stream.cycles.len(), 2);
-        assert_eq!(
-            stream.cycles[0].samples.first().unwrap().sampled_at,
-            original_first_at
-        );
-        assert_eq!(
-            stream.cycles[0].samples.last().unwrap().sampled_at,
-            original_last_at
-        );
-        assert_eq!(
-            stream.cycles[1].samples.first().unwrap().sampled_at,
-            next_first_at
-        );
-        assert_eq!(
-            stream.cycles[1].samples.last().unwrap().sampled_at,
-            next_last_at
-        );
-    }
-
-    #[test]
-    fn multi_cycle_point_cap_preserves_the_latest_forecast_cycle() {
-        let now = at(12, 0);
-        let old_start = now - Duration::hours(2);
-        let mut cycles = (0..1_999)
-            .map(|cycle_index| {
-                let first_at = old_start + Duration::seconds((cycle_index * 2) as i64);
-                StoredUsageCycle {
-                    generation_id: None,
-                    reset_at: None,
-                    samples: vec![
-                        StoredUsageSample {
-                            sampled_at: first_at,
-                            remaining_percent: 1,
-                        },
-                        StoredUsageSample {
-                            sampled_at: first_at + Duration::seconds(1),
-                            remaining_percent: 0,
-                        },
-                    ],
-                }
-            })
-            .collect::<Vec<_>>();
-        let latest_samples = [(30, 80), (20, 70), (10, 60), (0, 50)]
-            .into_iter()
-            .map(|(minutes_ago, remaining_percent)| StoredUsageSample {
-                sampled_at: now - Duration::minutes(minutes_ago),
-                remaining_percent,
-            })
-            .collect::<Vec<_>>();
-        cycles.push(StoredUsageCycle {
-            generation_id: None,
-            reset_at: Some(now + Duration::hours(12)),
-            samples: latest_samples.clone(),
-        });
-        let mut stream = StoredUsageStream {
-            window_id: "bounded".to_owned(),
-            window_seconds: 604_800,
-            cycles,
-        };
-        let forecast_before = stream.forecast(now);
-        let current_before = stream.current_remaining_percent(now);
-
-        assert_eq!(stream.sample_count(), MAX_POINTS_PER_STREAM + 2);
-        assert_eq!(stream.trim_to_point_limit(now), 2);
-
-        assert_eq!(stream.sample_count(), MAX_POINTS_PER_STREAM);
-        assert_eq!(stream.cycles.last().unwrap().samples, latest_samples);
-        assert_eq!(stream.current_remaining_percent(now), current_before);
-        assert_eq!(stream.forecast(now), forecast_before);
-        assert_eq!(forecast_before.status, ForecastStatus::ExhaustsBeforeReset);
-        assert!(stream.cycles.iter().all(|cycle| {
-            cycle.samples.len() >= 2
-                && cycle.samples.first().unwrap().sampled_at
-                    < cycle.samples.last().unwrap().sampled_at
-        }));
-    }
-
-    #[test]
-    fn single_latest_cycle_point_cap_preserves_current_and_forecast_samples() {
-        let now = at(12, 0);
-        let first_at = now - Duration::hours(8);
-        let mut samples = vec![StoredUsageSample {
-            sampled_at: first_at,
-            remaining_percent: 100,
-        }];
-        samples.extend((1..=4_096).map(|offset| StoredUsageSample {
-            sampled_at: first_at + Duration::seconds(offset),
-            remaining_percent: 90,
-        }));
-        samples.extend([(30, 80), (20, 70), (10, 60), (0, 50)].into_iter().map(
-            |(minutes_ago, remaining_percent)| StoredUsageSample {
-                sampled_at: now - Duration::minutes(minutes_ago),
-                remaining_percent,
-            },
-        ));
-        let latest_at = samples.last().unwrap().sampled_at;
-        let mut stream = StoredUsageStream {
-            window_id: "bounded".to_owned(),
-            window_seconds: 604_800,
-            cycles: vec![StoredUsageCycle {
-                generation_id: None,
-                reset_at: Some(now + Duration::hours(12)),
-                samples,
-            }],
-        };
-        let forecast_before = stream.forecast(now);
-        let current_before = stream.current_remaining_percent(now);
-
-        assert!(stream.trim_to_point_limit(now) > 0);
-
-        let retained = &stream.cycles[0].samples;
-        assert_eq!(retained.len(), MAX_POINTS_PER_STREAM);
-        assert_eq!(retained.first().unwrap().sampled_at, first_at);
-        assert_eq!(retained.last().unwrap().sampled_at, latest_at);
-        assert_eq!(stream.current_remaining_percent(now), current_before);
-        assert_eq!(stream.forecast(now), forecast_before);
-        assert_eq!(forecast_before.status, ForecastStatus::ExhaustsBeforeReset);
-    }
-
-    #[test]
-    fn latest_cycle_cap_keeps_current_when_future_samples_fill_the_budget() {
-        let now = at(12, 0);
-        let mut samples = (0..4_100)
-            .map(|index| StoredUsageSample {
-                sampled_at: now - Duration::hours(7) + Duration::seconds(index as i64),
-                remaining_percent: 80,
-            })
-            .collect::<Vec<_>>();
-        samples.extend((0..4_100).map(|index| StoredUsageSample {
-            sampled_at: now + Duration::seconds((index + 1) as i64),
-            remaining_percent: 70,
-        }));
-        let current_at = samples
-            .iter()
-            .rposition(|sample| sample.sampled_at <= now)
-            .unwrap();
-        let current_sample = samples[current_at].clone();
-        let mut stream = StoredUsageStream {
-            window_id: "bounded".to_owned(),
-            window_seconds: 604_800,
-            cycles: vec![StoredUsageCycle {
-                generation_id: None,
-                reset_at: Some(now + Duration::days(1)),
-                samples,
-            }],
-        };
-
-        stream.trim_to_point_limit(now);
-
-        assert_eq!(stream.current_remaining_percent(now), Some(80));
-        assert!(stream.cycles[0]
-            .samples
-            .iter()
-            .any(|sample| sample == &current_sample));
-        assert_eq!(stream.cycles[0].samples.len(), MAX_POINTS_PER_STREAM);
-    }
-
-    #[test]
-    fn evicts_oldest_stream_at_sixteen_stream_limit() {
         let mut value = history();
-        let reset = at(20, 0);
-        for index in 0..MAX_STREAMS {
+        let reset = now + Duration::days(7);
+        record(&mut value, now - Duration::days(400), 80, reset);
+        for index in 0..20 {
             value
                 .record_successful_snapshot(
                     identity(),
-                    at(8, 0) + Duration::minutes(index as i64),
+                    now + Duration::minutes(index),
                     &[window(
                         &format!("window-{index}"),
-                        60 + index as i64,
+                        60 + index,
                         90,
                         Some(reset),
                     )],
                 )
                 .unwrap();
         }
-        let mutation = value
-            .record_successful_snapshot(
-                identity(),
-                at(9, 0),
-                &[window("newest", 999, 90, Some(reset))],
+
+        value.compact_at(now);
+
+        assert_eq!(value.stream_count(), 21);
+        assert!(value
+            .all_samples()
+            .any(|sample| sample.sampled_at == now - Duration::days(400)));
+        let all = value
+            .query_request(
+                UsageHistoryRequest::Preset {
+                    preset: UsageHistoryPreset::All,
+                },
+                now,
             )
             .unwrap();
-        assert_eq!(mutation.streams_evicted, 1);
-        assert_eq!(value.stream_count(), MAX_STREAMS);
-        let oldest_key = window_stream_key(&value.salt, "window-0", 60).unwrap();
-        let newest_key = window_stream_key(&value.salt, "newest", 999).unwrap();
-        assert!(!value
-            .streams
-            .iter()
-            .any(|stream| stream.window_id == oldest_key));
-        assert!(value
-            .streams
-            .iter()
-            .any(|stream| stream.window_id == newest_key));
+        assert_eq!(all.applied_start_at, now - Duration::days(400));
+        assert_eq!(all.bucket_seconds, Some(DAILY_BUCKET_SECONDS));
     }
-
     #[test]
     fn seven_day_query_downsamples_and_never_exposes_internal_metadata() {
         let mut value = history();
@@ -2521,11 +2323,19 @@ mod tests {
                 preset: UsageHistoryPreset::Days30,
             }
         );
-        let resolved = preset.resolve(now).unwrap();
+        let resolved = preset.resolve(now, None).unwrap();
         assert_eq!(resolved.start_at, now - Duration::days(30));
         assert_eq!(resolved.end_at_exclusive, now);
         assert_eq!(resolved.bucket_seconds, Some(60 * 60));
         assert!(!resolved.truncated_by_retention);
+
+        let all: UsageHistoryRequest =
+            serde_json::from_str(r#"{"kind":"preset","preset":"all"}"#).unwrap();
+        let earliest = now - Duration::days(400);
+        let resolved_all = all.resolve(now, Some(earliest)).unwrap();
+        assert_eq!(resolved_all.start_at, earliest);
+        assert_eq!(resolved_all.end_at_exclusive, now);
+        assert_eq!(resolved_all.bucket_seconds, Some(DAILY_BUCKET_SECONDS));
 
         let custom: UsageHistoryRequest = serde_json::from_str(
             r#"{"kind":"custom","startAt":"2026-08-06T08:00:00Z","endAtExclusive":"2026-08-06T09:00:00Z"}"#,
@@ -2568,7 +2378,7 @@ mod tests {
                 start_at: now - span,
                 end_at_exclusive: now,
             }
-            .resolve(now)
+            .resolve(now, None)
             .unwrap()
             .bucket_seconds
         };
@@ -2586,6 +2396,10 @@ mod tests {
             bucket_for(Duration::days(7) + Duration::nanoseconds(1)),
             Some(MONTH_BUCKET_SECONDS)
         );
+        assert_eq!(
+            bucket_for(Duration::days(32) + Duration::nanoseconds(1)),
+            Some(DAILY_BUCKET_SECONDS)
+        );
     }
 
     #[test]
@@ -2596,7 +2410,7 @@ mod tests {
                 start_at,
                 end_at_exclusive,
             }
-            .resolve(now)
+            .resolve(now, None)
         };
 
         assert_eq!(
@@ -2611,34 +2425,28 @@ mod tests {
             resolve(now - Duration::hours(1), now + Duration::nanoseconds(1)),
             Err(UsageHistoryQueryError::FutureEnd)
         );
-        assert_eq!(
-            resolve(
-                now - Duration::days(30) - Duration::hours(1) - Duration::nanoseconds(1),
-                now,
-            ),
-            Err(UsageHistoryQueryError::SpanTooLarge)
-        );
-        assert!(resolve(now - Duration::days(30) - Duration::hours(1), now).is_ok());
+        assert!(resolve(now - Duration::days(400), now).is_ok());
     }
 
     #[test]
-    fn fully_expired_custom_range_resolves_to_a_legal_empty_interval() {
+    fn old_custom_range_is_not_truncated_by_retention() {
         let now = at(12, 0);
         let end_at_exclusive = now - Duration::days(32) - Duration::hours(1);
         let request = UsageHistoryRequest::Custom {
             start_at: end_at_exclusive - Duration::days(1),
             end_at_exclusive,
         };
-        let resolved = request.resolve(now).unwrap();
-        assert_eq!(resolved.start_at, end_at_exclusive);
+        let requested_start = end_at_exclusive - Duration::days(1);
+        let resolved = request.resolve(now, None).unwrap();
+        assert_eq!(resolved.start_at, requested_start);
         assert_eq!(resolved.end_at_exclusive, end_at_exclusive);
-        assert!(resolved.truncated_by_retention);
+        assert!(!resolved.truncated_by_retention);
 
         let query = history().query_request(request, now).unwrap();
-        assert_eq!(query.applied_start_at, query.applied_end_at_exclusive);
+        assert_eq!(query.applied_start_at, requested_start);
         assert_eq!(query.sample_count, 0);
         assert!(query.series.is_empty());
-        assert!(query.truncated_by_retention);
+        assert!(!query.truncated_by_retention);
     }
 
     #[test]
@@ -2701,7 +2509,7 @@ mod tests {
     }
 
     #[test]
-    fn available_summary_excludes_unpruned_samples_outside_retention() {
+    fn available_summary_includes_samples_older_than_thirty_two_days() {
         let sampled_at = at(12, 0);
         let now = sampled_at + Duration::days(33);
         let mut value = history();
@@ -2718,8 +2526,8 @@ mod tests {
 
         assert_eq!(query.sample_count, 0);
         assert!(query.series.is_empty());
-        assert_eq!(query.available_start_at, None);
-        assert_eq!(query.available_end_at, None);
+        assert_eq!(query.available_start_at, Some(sampled_at));
+        assert_eq!(query.available_end_at, Some(sampled_at));
     }
 
     #[test]
@@ -2765,18 +2573,28 @@ mod tests {
     }
 
     #[test]
-    fn retention_compacts_three_age_tiers_and_preserves_each_cycle_boundary() {
+    fn compacts_four_age_tiers_without_deleting_old_cycle_boundaries() {
         let now = at(12, 0);
-        let old_first = now - Duration::days(10) + Duration::minutes(1);
-        let old_middle = old_first + Duration::minutes(10);
-        let old_last = old_first + Duration::minutes(20);
+        let daily_first = now - Duration::days(400) + Duration::hours(1);
+        let hourly_first = now - Duration::days(10) + Duration::minutes(1);
         let medium_first = now - Duration::days(2) + Duration::minutes(1);
-        let medium_middle = medium_first + Duration::minutes(3);
-        let medium_last = medium_first + Duration::minutes(7);
         let recent_first = now - Duration::hours(2);
-        let recent_middle = recent_first + Duration::minutes(1);
-        let recent_last = recent_first + Duration::minutes(2);
-        let stale = now - Duration::days(32) - Duration::nanoseconds(1);
+        let samples = |first: DateTime<Utc>, step: Duration| {
+            vec![
+                StoredUsageSample {
+                    sampled_at: first,
+                    remaining_percent: 100,
+                },
+                StoredUsageSample {
+                    sampled_at: first + step,
+                    remaining_percent: 99,
+                },
+                StoredUsageSample {
+                    sampled_at: first + step + step,
+                    remaining_percent: 98,
+                },
+            ]
+        };
 
         let mut value = history();
         value.select_account(identity()).unwrap();
@@ -2787,88 +2605,43 @@ mod tests {
                 StoredUsageCycle {
                     generation_id: None,
                     reset_at: None,
-                    samples: vec![
-                        StoredUsageSample {
-                            sampled_at: stale,
-                            remaining_percent: 100,
-                        },
-                        StoredUsageSample {
-                            sampled_at: old_first,
-                            remaining_percent: 99,
-                        },
-                        StoredUsageSample {
-                            sampled_at: old_middle,
-                            remaining_percent: 98,
-                        },
-                        StoredUsageSample {
-                            sampled_at: old_last,
-                            remaining_percent: 97,
-                        },
-                    ],
+                    samples: samples(daily_first, Duration::hours(1)),
                 },
                 StoredUsageCycle {
                     generation_id: None,
                     reset_at: None,
-                    samples: vec![
-                        StoredUsageSample {
-                            sampled_at: medium_first,
-                            remaining_percent: 100,
-                        },
-                        StoredUsageSample {
-                            sampled_at: medium_middle,
-                            remaining_percent: 99,
-                        },
-                        StoredUsageSample {
-                            sampled_at: medium_last,
-                            remaining_percent: 98,
-                        },
-                    ],
+                    samples: samples(hourly_first, Duration::minutes(10)),
                 },
                 StoredUsageCycle {
                     generation_id: None,
                     reset_at: None,
-                    samples: vec![
-                        StoredUsageSample {
-                            sampled_at: recent_first,
-                            remaining_percent: 100,
-                        },
-                        StoredUsageSample {
-                            sampled_at: recent_middle,
-                            remaining_percent: 99,
-                        },
-                        StoredUsageSample {
-                            sampled_at: recent_last,
-                            remaining_percent: 98,
-                        },
-                    ],
+                    samples: samples(medium_first, Duration::minutes(3)),
+                },
+                StoredUsageCycle {
+                    generation_id: None,
+                    reset_at: None,
+                    samples: samples(recent_first, Duration::minutes(1)),
                 },
             ],
         });
 
-        assert_eq!(value.prune_at(now), 3);
+        assert_eq!(value.compact_at(now), 3);
         let cycles = &value.streams[0].cycles;
+        assert_eq!(cycles[0].samples.len(), 2);
+        assert_eq!(cycles[0].samples[0].sampled_at, daily_first);
         assert_eq!(
-            cycles[0]
-                .samples
-                .iter()
-                .map(|sample| sample.sampled_at)
-                .collect::<Vec<_>>(),
-            vec![old_first, old_last]
+            cycles[0].samples[1].sampled_at,
+            daily_first + Duration::hours(2)
         );
-        assert_eq!(
-            cycles[1]
-                .samples
-                .iter()
-                .map(|sample| sample.sampled_at)
-                .collect::<Vec<_>>(),
-            vec![medium_first, medium_last]
-        );
-        assert_eq!(cycles[2].samples.len(), 3);
+        assert_eq!(cycles[1].samples.len(), 2);
+        assert_eq!(cycles[2].samples.len(), 2);
+        assert_eq!(cycles[3].samples.len(), 3);
     }
 
     #[test]
-    fn retention_compaction_is_idempotent_at_exact_tier_boundaries() {
+    fn age_compaction_is_idempotent_at_exact_tier_boundaries() {
         let now = at(12, 0);
+        let daily_cutoff = now - Duration::days(32);
         let medium_cutoff = now - Duration::days(7);
         let recent_cutoff = now - Duration::hours(24);
         let sample_at = |sampled_at, remaining_percent| StoredUsageSample {
@@ -2890,8 +2663,8 @@ mod tests {
             sample_at(recent_cutoff + Duration::minutes(2), 89),
         ];
 
-        let once = compact_cycle_for_retention(&samples, medium_cutoff, recent_cutoff);
-        let twice = compact_cycle_for_retention(&once, medium_cutoff, recent_cutoff);
+        let once = compact_cycle_for_age(&samples, daily_cutoff, medium_cutoff, recent_cutoff);
+        let twice = compact_cycle_for_age(&once, daily_cutoff, medium_cutoff, recent_cutoff);
 
         assert!(once.len() < samples.len());
         assert_eq!(once, twice);
@@ -2900,7 +2673,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_compaction_keeps_reset_cycles_separate_inside_one_bucket() {
+    fn age_compaction_keeps_reset_cycles_separate_inside_one_bucket() {
         let now = at(12, 0);
         let first_start = now - Duration::days(10) + Duration::minutes(1);
         let second_start = first_start + Duration::minutes(5);
@@ -2947,7 +2720,7 @@ mod tests {
             ],
         };
 
-        stream.compact_for_retention(now);
+        stream.compact_for_age(now);
         let points = stream.query_points(now - Duration::days(30), now, Some(MONTH_BUCKET_SECONDS));
 
         assert_eq!(stream.cycles.len(), 2);
@@ -2977,27 +2750,42 @@ mod tests {
             },
         ];
 
-        let compacted =
-            compact_cycle_for_retention(&samples, now - Duration::days(7), recent_cutoff);
+        let compacted = compact_cycle_for_age(
+            &samples,
+            now - Duration::days(32),
+            now - Duration::days(7),
+            recent_cutoff,
+        );
 
         assert_eq!(compacted, samples);
     }
 
     #[test]
-    fn schema_v1_history_from_the_previous_seven_day_policy_loads_without_reset() {
+    fn schema_v1_migrates_without_data_loss_and_keeps_a_backup() {
         let now = at(12, 0);
         let mut value = history();
         let reset = now + Duration::days(7);
         record(&mut value, now - Duration::days(6), 90, reset);
         record(&mut value, now - Duration::days(1), 80, reset);
-        let path = temp_path("schema-v1-retention-upgrade");
-        save_history(&path, &value).unwrap();
+        let path = temp_path("schema-v1-upgrade");
+        let mut legacy = serde_json::to_value(&value).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.insert("schemaVersion".to_owned(), serde_json::Value::from(1));
+        object.remove("accounts");
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
 
         let loaded = load_history_at(&path, now);
         assert_eq!(loaded.status, HistoryStorageStatus::Ready);
-        assert_eq!(loaded.history.schema_version, 1);
+        assert_eq!(loaded.history.schema_version, USAGE_HISTORY_SCHEMA_VERSION);
         assert_eq!(loaded.history.sample_count(), 2);
-        assert!(!loaded.needs_rewrite);
+        assert!(loaded.needs_rewrite);
+
+        save_history(&path, &loaded.history).unwrap();
+        let backup = path.with_extension("v1.backup.json");
+        assert!(backup.exists());
+        assert_eq!(load_history_at(&path, now).history.sample_count(), 2);
+        clear_legacy_backup_for_current_account(&path, &loaded.history).unwrap();
+        assert!(!backup.exists());
         let _ = fs::remove_file(path);
     }
 
@@ -3261,9 +3049,21 @@ mod tests {
         let mut value = history();
         record(&mut value, at(8, 0), 80, at(20, 0));
         let fingerprint = value.account_fingerprint.clone();
+        value
+            .select_account(AccountIdentity::AccountId("another-account"))
+            .unwrap();
+        value
+            .record_successful_snapshot(
+                AccountIdentity::AccountId("another-account"),
+                at(9, 0),
+                &[window("weekly", 604_800, 60, Some(at(20, 0)))],
+            )
+            .unwrap();
         assert_eq!(value.clear_samples(), 1);
-        assert_eq!(value.account_fingerprint, fingerprint);
         assert!(value.is_empty());
         assert_eq!(value.clear_samples(), 0);
+        value.select_account(identity()).unwrap();
+        assert_eq!(value.account_fingerprint, fingerprint);
+        assert_eq!(value.sample_count(), 1);
     }
 }

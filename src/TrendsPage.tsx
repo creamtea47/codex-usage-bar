@@ -80,6 +80,7 @@ type TrendsTranslationKey =
   | 'trends.range.hours24'
   | 'trends.range.days7'
   | 'trends.range.days30'
+  | 'trends.range.all'
   | 'trends.range.custom'
   | 'trends.range.customApplied'
   | 'trends.custom.dialogTitle'
@@ -92,7 +93,6 @@ type TrendsTranslationKey =
   | 'trends.custom.error.invalid'
   | 'trends.custom.error.future'
   | 'trends.custom.error.reversed'
-  | 'trends.custom.error.tooLong'
   | 'trends.custom.error.emptyToday'
   | 'trends.partialCoverage'
   | 'trends.partialCoverageFrom'
@@ -166,7 +166,6 @@ function pickerIssue(error: DateValidationError): CustomHistoryDateIssue | null 
 function customIssueKey(issue: CustomHistoryDateIssue): TrendsTranslationKey {
   if (issue === 'future') return 'trends.custom.error.future';
   if (issue === 'reversed') return 'trends.custom.error.reversed';
-  if (issue === 'tooLong') return 'trends.custom.error.tooLong';
   if (issue === 'emptyToday') return 'trends.custom.error.emptyToday';
   if (issue === 'missingStart' || issue === 'missingEnd') return 'trends.custom.error.required';
   return 'trends.custom.error.invalid';
@@ -693,17 +692,21 @@ export default function TrendsPage({
           sx={{
             alignSelf: { xs: 'stretch', md: 'auto' },
             display: 'grid',
-            gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(4, auto)' },
+            gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(5, auto)' },
             '& .MuiToggleButtonGroup-grouped': {
               minWidth: 0,
               m: 0,
               border: 1,
               borderColor: 'divider',
               borderRadius: 0,
-              '&:nth-of-type(1)': { borderTopLeftRadius: 10 },
+              '&:nth-of-type(1)': {
+                borderTopLeftRadius: 10,
+                borderBottomLeftRadius: { md: 10 },
+              },
               '&:nth-of-type(2)': { borderTopRightRadius: { xs: 10, md: 0 } },
-              '&:nth-of-type(3)': { borderBottomLeftRadius: { xs: 10, md: 0 } },
-              '&:nth-of-type(4)': {
+              '&:nth-of-type(5)': {
+                gridColumn: { xs: '1 / -1', md: 'auto' },
+                borderBottomLeftRadius: { xs: 10, md: 0 },
                 borderBottomRightRadius: 10,
                 borderTopRightRadius: { md: 10 },
               },
@@ -713,6 +716,7 @@ export default function TrendsPage({
           <ToggleButton value="24h">{translate('trends.range.hours24')}</ToggleButton>
           <ToggleButton value="7d">{translate('trends.range.days7')}</ToggleButton>
           <ToggleButton value="30d">{translate('trends.range.days30')}</ToggleButton>
+          <ToggleButton value="all">{translate('trends.range.all')}</ToggleButton>
           <ToggleButton value="custom" ref={customTriggerRef}>
             {rangeChoice === 'custom'
               ? translate('trends.range.customApplied')

@@ -43,10 +43,11 @@ use crate::{
     },
     usage::{ResetCreditAvailability, UsageAccountIdentity, UsageClient},
     usage_history::{
-        clear_history_storage, load_history, save_history, AccountIdentity, AccountSelection,
-        Forecast as HistoryForecast, ForecastStatus as HistoryForecastStatus,
-        HistoryGenerationInput, HistoryStorageStatus, HistoryWindowInput, UsageHistory,
-        UsageHistoryQueryError, UsageHistoryRequest, USAGE_HISTORY_FILE_NAME,
+        clear_history_storage, clear_legacy_backup_for_current_account, load_history, save_history,
+        AccountIdentity, AccountSelection, Forecast as HistoryForecast,
+        ForecastStatus as HistoryForecastStatus, HistoryGenerationInput, HistoryStorageStatus,
+        HistoryWindowInput, UsageHistory, UsageHistoryQueryError, UsageHistoryRequest,
+        USAGE_HISTORY_FILE_NAME,
     },
 };
 use chrono::{DateTime, Duration as ChronoDuration, Local, Timelike, Utc};
@@ -338,17 +339,14 @@ impl AppState {
         if !history_enabled {
             let account_changed = match runtime.history.select_account(identity) {
                 Ok(AccountSelection::Unchanged) => false,
-                Ok(AccountSelection::Initialized | AccountSelection::ChangedAndCleared { .. }) => {
-                    true
-                }
+                Ok(AccountSelection::Initialized | AccountSelection::Switched { .. }) => true,
                 Err(_) => {
                     runtime.storage_status = HistoryStorageStatus::Unavailable;
                     false
                 }
             };
             if account_changed {
-                let saved = clear_history_storage(&self.history_path)
-                    .and_then(|_| save_history(&self.history_path, &runtime.history));
+                let saved = save_history(&self.history_path, &runtime.history);
                 runtime.storage_status = if saved.is_ok() {
                     HistoryStorageStatus::Ready
                 } else {
@@ -378,13 +376,7 @@ impl AppState {
         };
 
         if mutation.changed() {
-            let saved = if mutation.account_changed {
-                // 先删除旧账号文件；安全新文件即使写失败，也不会继续保留旧样本。
-                clear_history_storage(&self.history_path)
-                    .and_then(|_| save_history(&self.history_path, &runtime.history))
-            } else {
-                save_history(&self.history_path, &runtime.history)
-            };
+            let saved = save_history(&self.history_path, &runtime.history);
             runtime.storage_status = if saved.is_ok() {
                 HistoryStorageStatus::Ready
             } else {
@@ -1408,7 +1400,6 @@ fn history_query_error_code(error: UsageHistoryQueryError) -> String {
     match error {
         UsageHistoryQueryError::EmptyOrReversedRange => "historyRangeInvalid",
         UsageHistoryQueryError::FutureEnd => "historyRangeFuture",
-        UsageHistoryQueryError::SpanTooLarge => "historyRangeTooLarge",
     }
     .to_owned()
 }
@@ -1473,12 +1464,16 @@ async fn clear_usage_history(
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
     // 与刷新严格使用 refresh_guard -> usage_history 的统一锁序，防止固定临时文件争用或旧数据回写。
     let _refresh_barrier = state.refresh_guard.lock().await;
-    let replacement = UsageHistory::new_random();
+    let removed;
     {
         let mut runtime = state.usage_history.lock().await;
-        let saved = clear_history_storage(&state.history_path)
+        let mut replacement = runtime.history.clone();
+        removed = replacement.clear_samples();
+        let saved = clear_legacy_backup_for_current_account(&state.history_path, &replacement)
             .and_then(|_| save_history(&state.history_path, &replacement));
-        runtime.history = replacement;
+        if saved.is_ok() {
+            runtime.history = replacement;
+        }
         runtime.storage_status = if saved.is_ok() {
             HistoryStorageStatus::Ready
         } else {
@@ -1493,7 +1488,7 @@ async fn clear_usage_history(
     state.apply_auto_main_height(&app, &snapshot);
     emit_dashboard(&app, snapshot);
     emit_usage_history_updated(&app);
-    log::info!("用户已清除本地趋势历史。");
+    log::info!("用户已清除当前账号本地趋势历史：samples_removed={removed}。");
     Ok(())
 }
 
@@ -2259,7 +2254,17 @@ fn schedule_geometry_save(window: Window) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // 必须在会创建窗口、托盘或后台任务的插件之前注册，确保重复启动只唤醒首个实例。
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            handle_second_instance(args.len(), || tray::show_main_window(app));
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -2390,6 +2395,21 @@ pub fn run() {
         .expect("启动 CodexUsageBar 失败");
 }
 
+/// 处理重复启动通知，只记录脱敏上下文并委托既有窗口激活入口。
+///
+/// 参数内容可能包含本机路径或协议参数，因此日志只保留数量；`show_main_window`
+/// 仅定位 Tauri 已创建的主窗口，不会创建第二个窗口或托盘图标。
+fn handle_second_instance(show_main_arg_count: usize, show_main_window: impl FnOnce()) {
+    log::info!("检测到重复启动，正在唤醒现有主窗口：参数数量={show_main_arg_count}");
+    show_main_window();
+}
+
+/// 主动释放单实例锁，供不会经过插件正常退出钩子的显式重启路径调用。
+#[cfg(target_os = "macos")]
+pub(crate) fn destroy_single_instance_lock(app: &AppHandle) {
+    tauri_plugin_single_instance::destroy(app);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2397,6 +2417,16 @@ mod tests {
         models::{DashboardErrorCode, Language, NotificationSettings, Theme},
         usage::UsageClient,
     };
+    use std::cell::Cell;
+
+    #[test]
+    fn second_instance_delegates_once_to_existing_main_window_activation() {
+        let activation_count = Cell::new(0_u8);
+
+        handle_second_instance(2, || activation_count.set(activation_count.get() + 1));
+
+        assert_eq!(activation_count.get(), 1);
+    }
 
     #[test]
     fn only_supported_refresh_intervals_are_accepted() {

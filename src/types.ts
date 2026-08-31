@@ -164,7 +164,7 @@ export interface QuotaAutoContinueStatus {
   lastResetDetectedAt?: string | null;
 }
 
-export type UsageHistoryPreset = '24h' | '7d' | '30d';
+export type UsageHistoryPreset = '24h' | '7d' | '30d' | 'all';
 
 /**
  * History IPC always uses an explicit tagged request. Custom dates are converted

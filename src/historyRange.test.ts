@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildCustomHistoryRequest,
-  countInclusiveLocalDays,
   hasPartialHistoryCoverage,
   validateCustomHistoryDates,
 } from './historyRange';
@@ -18,18 +17,13 @@ afterEach(() => {
 });
 
 describe('custom history local-date boundaries', () => {
-  it('accepts at most 30 inclusive local calendar days regardless of elapsed hours', () => {
+  it('accepts arbitrary past local calendar ranges across months', () => {
     runtimeProcess.env.TZ = 'America/Los_Angeles';
     const now = new Date(2030, 3, 30, 12, 0);
 
-    expect(countInclusiveLocalDays(new Date(2030, 3, 1), new Date(2030, 3, 30))).toBe(30);
-    expect(validateCustomHistoryDates(new Date(2030, 3, 1), new Date(2030, 3, 30), now)).toEqual({
+    expect(validateCustomHistoryDates(new Date(2029, 0, 1), new Date(2030, 3, 30), now)).toEqual({
       valid: true,
       issue: null,
-    });
-    expect(validateCustomHistoryDates(new Date(2030, 2, 31), new Date(2030, 3, 30), now)).toEqual({
-      valid: false,
-      issue: 'tooLong',
     });
   });
 

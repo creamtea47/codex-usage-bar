@@ -242,6 +242,8 @@ pub async fn install_pending_update(app: &AppHandle, state: &AppUpdateState) -> 
     #[cfg(target_os = "macos")]
     {
         log::info!("应用更新替换完成，正在重启应用。");
+        // `AppHandle::restart` 会直接拉起新进程；先释放监听器，避免新进程被旧锁误判为重复实例。
+        crate::destroy_single_instance_lock(app);
         app.restart();
     }
 

@@ -1,5 +1,3 @@
-export const MAX_CUSTOM_HISTORY_LOCAL_DAYS = 30;
-
 export type CustomHistoryDateIssue =
   | 'missingStart'
   | 'missingEnd'
@@ -7,7 +5,6 @@ export type CustomHistoryDateIssue =
   | 'invalidEnd'
   | 'future'
   | 'reversed'
-  | 'tooLong'
   | 'emptyToday';
 
 export interface CustomHistoryDateValidation {
@@ -43,12 +40,6 @@ function isSameLocalCalendarDay(left: Date, right: Date): boolean {
   );
 }
 
-/** Counts selected calendar dates, not elapsed 24-hour periods, so DST days remain one day. */
-export function countInclusiveLocalDays(start: Date, end: Date): number {
-  if (!isValidDate(start) || !isValidDate(end)) return 0;
-  return Math.round((localCalendarOrdinal(end) - localCalendarOrdinal(start)) / 86_400_000) + 1;
-}
-
 export function validateCustomHistoryDates(
   start: Date | null,
   end: Date | null,
@@ -64,9 +55,6 @@ export function validateCustomHistoryDates(
   const endDay = localCalendarOrdinal(end);
   if (startDay > today || endDay > today) return { valid: false, issue: 'future' };
   if (startDay > endDay) return { valid: false, issue: 'reversed' };
-  if (countInclusiveLocalDays(start, end) > MAX_CUSTOM_HISTORY_LOCAL_DAYS) {
-    return { valid: false, issue: 'tooLong' };
-  }
   if (
     startDay === today
     && endDay === today
