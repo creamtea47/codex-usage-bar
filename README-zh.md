@@ -2,205 +2,135 @@
 
 # CodexUsageBar
 
-**一个隐私优先、紧凑的 Windows 与 macOS Codex 用量悬浮卡片。**
+**把 Codex 剩余额度、重置提醒和用量趋势放到桌面上。**
 
-使用 Tauri 2、Rust、React、TypeScript、Material UI 与 Vite 构建。
+适用于 Windows 与 macOS 的轻量悬浮卡片，支持额度自动接续。
 
-[下载最新版本](https://github.com/creamtea47/codex-usage-bar/releases/latest) · [查看截图](#截图) · [隐私与功能边界](#隐私与功能边界) · [开发指南](#开发)
+[下载最新版本](https://github.com/creamtea47/codex-usage-bar/releases/latest) · [核心功能](#核心功能) · [截图](#截图) · [详细指南](docs/guide-zh.md)
 
 [![Build](https://github.com/creamtea47/codex-usage-bar/actions/workflows/build.yml/badge.svg)](https://github.com/creamtea47/codex-usage-bar/actions/workflows/build.yml)
 [![Latest Release](https://img.shields.io/github/v/release/creamtea47/codex-usage-bar?display_name=tag)](https://github.com/creamtea47/codex-usage-bar/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/creamtea47/codex-usage-bar/total)](https://github.com/creamtea47/codex-usage-bar/releases)
-[![Stars](https://img.shields.io/github/stars/creamtea47/codex-usage-bar?style=flat)](https://github.com/creamtea47/codex-usage-bar/stargazers)
 
-[English](README.md)
+[English](README.md) | 简体中文
+
+<img src="docs/images/dashboard-dark-zh.png" alt="深色悬浮卡：剩余额度、重置倒计时和节奏建议" width="520">
 
 </div>
 
-> CodexUsageBar 默认只在本机读取已登录 Codex 的用量信息。只有用户明确开启“额度自动接续”或二次确认“立即测试”后，才会发送固定的最小 `hi` 请求；应用不上传凭据、不刷新 Token，也不修改认证文件。
+## 核心功能
+
+| 功能 | 能帮你做什么 |
+| --- | --- |
+| **桌面额度卡片** | 查看每个额度窗口的剩余百分比、重置时间和倒计时；支持定时刷新、置顶、拖动、大小锁定和关闭到托盘。 |
+| **重置与到账提醒** | 额度进入新周期或重置卡数量增加时发送系统通知，也支持低额度、消耗过快提醒及跨午夜静默时段。 |
+| **额度趋势采集** | 按剩余额度百分比记录历史，查看 24 小时、7 天、30 天、全部历史或自定义日期的曲线、今日消耗和本地预测。 |
+| **额度自动接续** | 开启后，在周额度重置时自动发送最小请求，帮助不常使用时也及时启动下一周期。可查看排期、触发原因和执行结果。 |
+| **个性化与更新** | 简体中文 / English、浅色 / 深色 / 跟随系统、开机启动；发现新版本后提示，由你确认下载和安装。 |
+
+## 快速开始
+
+1. 从 [Releases](https://github.com/creamtea47/codex-usage-bar/releases/latest) 下载对应安装包。
+
+   | 设备 | 安装包 |
+   | --- | --- |
+   | Windows x64 | `CodexUsageBar-x64-setup.exe` |
+   | Windows ARM64 | `CodexUsageBar-arm64-setup.exe` |
+   | Intel Mac（macOS 11+） | `CodexUsageBar-macos-x64.dmg` |
+   | Apple silicon Mac（macOS 11+） | `CodexUsageBar-macos-arm64.dmg` |
+
+2. 在本机登录 Codex，然后启动 CodexUsageBar。Windows 安装器通常无需管理员权限；macOS 打开 DMG 后将应用拖到“应用程序”。
+3. 首次启动自动读取额度，默认每分钟刷新一次。在卡片右上角打开设置，按需开启提醒与自动接续。
+
+> macOS 安装包尚未经过 Apple 公证。首次启动若被拦截，可在“系统设置 → 隐私与安全性”中允许打开。v0.2.5 及更早版本需先手动安装新版，才能使用应用内更新。
+
+### 提醒：额度重置和重置卡到账都不错过
+
+在 **设置 → 通知** 打开总开关并授予系统权限，再选择规则：
+
+- **额度重置**：检测到额度进入新周期时提醒。
+- **重置卡到账**：同一账号的重置卡总数增加时提醒，需单独开启；只通知到账，不会自动使用重置卡。
+- **低额度 / 消耗过快**：默认阈值分别为剩余 20% 和落后时间进度 10 个百分点，可自行调整。
+- **静默时段**：支持如 22:00–08:00 的跨午夜范围，被静默的提醒不会稍后补发。
+
+通知总开关默认关闭。首次成功采集和切换账号用于建立基线，不会把已有低额度或已有重置卡当作新事件提醒。检测依赖成功刷新，并非服务端实时推送。
+
+### 趋势：按额度百分比了解消耗节奏
+
+在 **设置 → 趋势** 查看曲线。本地采集默认开启，仅记录成功刷新的额度快照；记录的是**额度百分比**，不是 Token 数量或费用账单。
+
+- 每个额度窗口独立绘图，重置处断开曲线，纵轴固定为 0–100%。
+- 今日消耗从本地时间 00:00 累计，跨多个重置周期时可以超过 100%。
+- 数据充足后显示能否撑到重置的本地估算；数据不足时显示“采集中”。预测不是官方承诺。
+- 历史永久保存在本机，较旧数据会压缩采样；按匿名账号分区保存，切换回来可继续查看。
+- 可暂停采集而保留历史，也可确认清除当前账号历史。应用关闭期间不采集，也不会凭空补齐历史。
+
+### 自动接续：帮助下一周期及时开始
+
+在 **设置 → 额度自动接续** 开启并确认。应用关注当前账号的周额度窗口（6–8 天），在检测到额度恢复或到达重置时间后，发送固定的最小 `hi` 请求。
+
+- 默认关闭；开启后会产生真实模型请求，可能消耗少量额度。这是额度周期接续，不是付费订阅续费。
+- 初次尝试失败后，按重置事件的 +1、+5、+30 分钟时点重试；同一事件成功后不再重复发送。
+- 需要电脑保持唤醒、网络可用且应用仍在运行（可留在托盘）。超过 30 分钟才恢复运行会错过该周期；不支持强制唤醒，因此无法保证所有情况下准时开始。
+- “立即测试”需再次确认，只发送一次，不自动重试。可搭配“开机启动”和“关闭到托盘”使用。
 
 ## 截图
 
-### macOS 深色主题下的紧凑用量悬浮卡
+以下为 v0.6.2 当前界面组件在浏览器中的截图，使用合成示例数据；不含真实账户或用量，也不代表系统通知投递、原生窗口或自动接续已经执行。见[截图记录](docs/screenshots.md)。
 
-![CodexUsageBar 在 macOS 深色主题下的紧凑主界面：原生透明圆角、动态额度窗口、剩余额度和右上角控件](docs/images/dashboard-light.png)
+| 浅色额度卡片 | 深色额度卡片 |
+| --- | --- |
+| ![浅色额度卡片](docs/images/dashboard-light-zh.png) | ![深色额度卡片](docs/images/dashboard-dark-zh.png) |
 
-> 正常状态不会占用额外位置；发现新版本时，刷新按钮左侧会出现绿色小更新图标。点击图标会打开“关于与更新”和安装确认框，不会直接下载或安装。
+### 通知规则与静默时段
 
-### 跟随深色主题的 macOS 设置窗口与更新页
+![通知设置：重置、重置卡到账、阈值和静默时段](docs/images/notifications-zh.png)
 
-![CodexUsageBar macOS 设置窗口：原生标题栏跟随深色主题，关于与更新页显示自动检测开关与手动更新入口](docs/images/settings-update.png)
+### 额度趋势与今日消耗
 
-## 功能
+![趋势页面：时间范围、额度曲线、今日消耗与本地预测](docs/images/trends-zh.png)
 
-- 一个额度窗口时，默认以 `460 × 260` 的紧凑卡片打开，消除底部无效留白；新增额度窗口或出现可靠建议时仅按内容增高，最高 `560px`。额度卡和超过三行的建议分别在各自区域滚动；手动调整大小后会保持用户选择的尺寸。
-- 动态显示接口返回的全部额度窗口、剩余百分比、重置时间，以及按绝对重置时刻逐秒递减的本地倒计时。归零后显示“正在重置…”，直到下次成功刷新提供新周期。
-- 成功刷新后展示如 `j***@example.com · Pro` 的掩码账号摘要，以及下次自动刷新倒计时和最近刷新时间。
-- 启动立即刷新，并按用户选择的固定 1 / 3 / 5 / 10 / 30 分钟间隔自动刷新；新安装默认 1 分钟，升级用户保留原间隔。连续失败后依次等待 1 / 3 / 5 / 10 / 30 分钟重试，之后保持 30 分钟，任意一次成功即恢复固定间隔；手动刷新可绕过等待，并从完成时刻重新排期。
-- 右上角提供“刷新、设置、关闭”按钮；发现新版本时显示绿色小更新图标，点击后再由你确认安装；请求进行中会禁用刷新，避免重复请求。
-- 长周期额度显示控量线，并始终在卡片右下角重复展示其四舍五入后的“建议最低剩余额度”；悬停提示会说明它仅用于本地节奏参考，不是官方阈值。本地样本足够时，可靠预测按额度卡顺序单独显示在底部建议区，不会替换控量建议。
-- 提供完整的简体中文和英文界面；“显示”页可跟随系统语言或手动覆盖。任意 `zh-*` 系统语言解析为简体中文，其余语言回落英文。
-- 无边框、可拖动、可缩放的桌面悬浮卡，支持跟随系统、浅色、深色主题、置顶和位置 / 大小锁定；在 macOS 失焦状态下首次点击也会直接响应。
-- 默认点击主窗口关闭按钮会隐藏到系统托盘并继续后台刷新；左键点击托盘图标会恢复并聚焦主窗口，右键点击才会打开“显示主窗口、打开设置、退出”菜单。关闭“关闭时最小化到托盘”后，主窗口关闭按钮才会直接退出。
-- 设置以独立、不透明的原生窗口打开，左侧依次分为“显示”“数据与刷新”“通知”“趋势”“额度自动接续”“启动”“关于与更新”七类；再次打开设置时会恢复并聚焦已有窗口，不会重复创建，也不会继续藏在后台。
-- “额度自动接续”默认关闭。开启后同时观察额度恢复信号和当前账号 6–8 天周窗口的 `reset_at` 截止时间，记录是哪一种条件触发自动操作；失败最多在 `+1`、`+5`、`+30` 分钟重试，成功立即停止。由于 [OpenAI 模型目录](https://developers.openai.com/api/docs/models) 会持续迭代，模型来自账号实时清单：有 `gpt-5.4` 时优先使用，否则选首个非图片文本模型，清单不可用时才兼容回退。
-- 独立“通知”页提供低剩余额度、消耗快于时间进度、额度周期重置和重置卡到账提醒。总开关默认关闭；前三个子项默认开启，重置卡到账提醒单独默认关闭。低额度初值为 20%，超速差值初值为 10 个百分点，两者都支持 0–100。静默时段默认关闭，初始范围为 22:00–08:00，支持跨午夜，期间抑制的事件不会在结束后补发。
-- 在设置中提供独立的 24 小时 / 7 天 / 滚动最近 30 天 / 全部历史趋势页，并可自定义任意过去的本地日历日期范围。结束日期选今天时，范围截止到点击“应用”的时刻；默认仍为 24 小时，重启后不保留所选范围。采集默认开启，历史按匿名账号分区永久保存在本机 `usage-history.json`；切换账号会自动恢复对应分区，“清除历史”只删除当前账号。暂停后只停止新增样本，已有图表与预测仍可查看；重新开启采集时会先自动恢复趋势页，只有恢复确实失败时才提供手动“重试”。每个额度窗口显示固定 0–100% 图表、重置周期断线、今日消耗和四态本地预测；今日消耗按系统本地自然日 00:00 起基于成功样本累计，跨额度周期分别计算后相加，因此可能超过 100%。升级前没有的旧数据会明确显示为“部分覆盖”，不会伪造。
-- “诊断与反馈”提供仅含白名单的诊断摘要、只写剪贴板操作、独立的新建 Issue 外链，以及校验当前版本后的 Release 说明外链；诊断内容不会拼进 Issue URL。
-- 默认在启动后自动检查一次、之后最多每 6 小时检查一次；可在“关于与更新”中关闭。该页还提供“GitHub 仓库”按钮，且只允许打开当前仓库的精确 HTTPS 根地址。自动检查只读取包含各平台更新包签名的公开 HTTPS `latest.json` 清单，不会下载、安装或重启应用。
-- 发现新版时主卡右上角会显示绿色小更新图标；点击后会直接打开“关于与更新”和安装确认框。只有确认“下载并安装”后，Rust 后端才会下载并验证 Tauri 签名。Windows 会交接当前用户 NSIS 安装器，macOS 会在必要时请求系统授权、替换 App 后重启。
+### 自动接续排期
 
-## 安装
+![自动接续：目标重置时间、下次尝试和结果记录](docs/images/auto-continue-zh.png)
 
-1. 前往 [Releases](https://github.com/creamtea47/codex-usage-bar/releases/latest)，按设备选择资产：
+<details>
+<summary>更多截图：显示设置、关于与更新</summary>
 
-   | 设备 | 下载文件 | 安装方式 |
-   | --- | --- | --- |
-   | Windows x64（大多数电脑） | `CodexUsageBar-x64-setup.exe` | 运行 NSIS 安装包；按当前用户安装，通常无需管理员权限。 |
-   | Windows on ARM | `CodexUsageBar-arm64-setup.exe` | 运行 NSIS 安装包；按当前用户安装，通常无需管理员权限。 |
-   | Intel Mac（macOS 11+） | `CodexUsageBar-macos-x64.dmg` | 打开 DMG，将 App 拖入“应用程序”。 |
-   | Apple 芯片 Mac（macOS 11+） | `CodexUsageBar-macos-arm64.dmg` | 打开 DMG，将 App 拖入“应用程序”。 |
+![显示设置：语言、主题和窗口行为](docs/images/display-zh.png)
 
-2. 确保 Codex 已在本机登录，再启动 **CodexUsageBar**。
+![关于与更新：版本、更新检查和诊断反馈](docs/images/about-zh.png)
 
-> 从 v0.2.5 或更早版本升级时，请先手动安装首个启用应用内更新器的版本（v0.2.6 或更高）。安装完成后，后续版本才可以通过应用自动检测并由你确认安装。
+</details>
 
-当前 macOS DMG 采用临时代码签名，尚未经过 Apple 公证；首次打开若被 Gatekeeper 拦截，请在“系统设置 → 隐私与安全性”允许打开，或按住 Control 点击 App 后选择“打开”。应用内更新的 Tauri 签名用于验证更新包完整性，不能替代 Apple Developer ID 签名与公证。
+## 隐私与数据
 
-安装后的新版本会使用新的应用标识和配置目录，不依赖原来的 `luodaoyi/codex-useage-win` 仓库，也不会迁移或清理旧版设置、自启项。
+凭据仅由本机 Rust 后端读取，前端不接触 Token 或认证文件。额度读取、趋势与通知默认只读；自动接续仅在明确开启或确认测试后发送请求，不会自动使用重置卡。应用不刷新 Token，也不修改 `auth.json`。
 
-### Windows 旧版升级提示
+认证文件依次从可执行文件旁、`%CODEX_HOME%/auth.json`、用户主目录下的 `.codex/auth.json` 查找。认证失效时重新登录 Codex，再点击刷新。
 
-Windows 安装包的发布者为 `creamtea47`。为兼容旧版本升级，早期版本已将同一安装目录同时写入旧的 `luodaoyi` 键和新的 `creamtea47` 键，因此当前安装器可正确定位已有卸载器。它只影响 Windows 安装兼容性，不影响 Git 仓库、更新地址、应用标识或数据目录。
-
-若当前正停在 v0.2.1 的该报错窗口，直接退出安装器并下载当前正式版本；无需手动删除注册表或 `auth.json`。
-
-## 使用方式
-
-打开后，卡片会立即尝试读取用量。右上角“刷新”可立即手动重试，即使当前正等待失败退避也不受影响；旁边的“设置”会打开独立窗口，其中按“显示”“数据与刷新”“通知”“趋势”“额度自动接续”“启动”“关于与更新”分类。
-
-“显示”页可切换语言、主题、置顶和位置 / 大小锁定；“数据与刷新”页只包含固定刷新间隔和隐私说明；“通知”页包含系统权限、提醒规则、静默时段和测试操作；“趋势”页可切换 24 小时、7 天、滚动最近 30 天、全部历史或任意过去日期的自定义范围，并控制本地采集及提供二次确认的当前账号清除操作；“额度自动接续”页显示目标重置、下一尝试、尝试槽、最近触发原因，并分开显示最近自动结果与最近手动测试；“启动”页控制开机自启及关闭时托盘行为；“关于与更新”页显示当前版本、更新操作、仓库精确外链、脱敏诊断、问题反馈和更新说明。关闭设置窗口只会隐藏设置页；主窗口默认关闭到托盘，托盘“退出”始终直接退出。
-
-自动接续依赖应用在托盘中保持运行且电脑处于唤醒状态。睡眠或退出超过目标重置点 30 分钟会把本周期标记为“已错过”，恢复时只占用最近一个到期槽，不会连续补跑。手动“立即测试”必须二次确认，只发送一次且不自动重试。
-
-系统通知只有在你手动开启并授予操作系统权限后才生效。首次成功快照只建立额度规则基线，不会立即提醒当时已经处于低额度的窗口；首次取得重置卡计数或账号切换也只建立卡数基线，只有同一账号的卡片总数增加才提醒。同一额度周期内，每类已开启的低额度或超速事件只提醒一次；`resetAt` 向后进入新周期时可提醒一次重置。重置卡到账可与同次额度事件合并为一条不含账号的通知，额度窗口最多列出三个。静默时段按本地时间的半开区间 `[开始, 结束)` 判断，支持跨午夜，期间被抑制的事件不会补发。Windows 上的通知名称和图标必须以安装后的 NSIS 包为准；开发环境通知不作为正式验收结果。
-
-趋势采集对新安装和升级用户都默认开启，只记录成功快照且不按日期、点数或流数量淘汰：最新 24 小时保留采集样本，1–7 天按 15 分钟桶压缩，7–32 天按小时桶压缩，32 天以上按 UTC 日桶保留每日首尾点；所有层级都保留重置周期边界。“今日消耗”始终统计系统本地当天 00:00 到当前时刻，与当前选择的图表范围相互独立。预测仅使用当前周期的近期样本，显示“正在采集”“近期稳定”“预计在重置前耗尽”或“预计可撑到重置”；可靠的耗尽时刻按 15 分钟取整，并且不会外推到重置之后。关闭采集只停止新增样本，不会隐藏、删除或上传已有图表与预测明细；“清除历史”会在二次确认后永久删除当前账号已有曲线点。
-
-“GitHub 仓库”只打开 `https://github.com/creamtea47/codex-usage-bar`。“复制脱敏诊断”只把白名单摘要写入剪贴板。“反馈问题”会单独打开 GitHub Issue 页面，绝不会附加诊断；请先检查复制内容，再自行决定是否粘贴。“查看更新说明”会为合法的 `X.Y.Z` 应用版本打开对应 tag 页面，版本异常时回退到仓库 Releases 总页。
-
-应用默认会在启动后自动检查一次、之后最多每 6 小时检查一次，也可以在设置中关闭。需要立即检查时，打开设置并点击“检查更新”：
-
-- 已有新版本时，主卡右上角会显示绿色小更新图标；点击图标会直接打开更新页和确认框。你点击“下载并安装”后，应用才会下载并验证更新包签名，再交接原生安装流程。
-- Windows 开始安装时会关闭 CodexUsageBar；macOS 替换 App 后会重启。应用不会在未确认时静默下载、替换或重启。
-- 已是最新版本、网络不可用或签名验证失败时，不会影响已显示的用量数据；签名失败会取消安装。
-
-## 隐私与功能边界
-
-认证文件只由 Rust 后端在请求期间读取。常规用量、趋势和通知功能保持只读；自动接续只有在用户明确开启或确认测试后才会发送真实请求。React 前端仅收到经过过滤的用量快照和自动接续状态；它从不接收 `auth.json`、access token、请求头、接口原始响应、模型回复、原始错误或未掩码邮箱。
-
-`auth.json` 的查找优先级如下：
-
-1. 正在运行的应用可执行文件同目录。
-2. `%CODEX_HOME%\auth.json`。
-3. Windows：`%USERPROFILE%\.codex\auth.json`；macOS：`~/.codex/auth.json`。
-
-用量功能仅读取 `GET https://chatgpt.com/backend-api/wham/usage` 的用量结果；更新功能独立读取公开 HTTPS `latest.json` 清单，并且：
-
-- 不读取 refresh token、不刷新 OAuth Token、不写回或修改 `auth.json`；每次自动尝试都会重新读取最新 access token。
-- 自动接续先只读刷新用量，校验仍是同一重置事件和账号；`reset_at` 已推进不再单独构成跳过理由，只有同一事件已经记录手动或自动成功时才阻止后续发送。没有同事件成功记录时，先读取账号实时 Codex 模型清单，再向 `POST https://chatgpt.com/backend-api/codex/responses` 发送固定 `hi`，强制 `stream: true`、`store: false`，且只在 SSE 收到 `response.completed` 时判定成功。模型回复正文不展示、不保存。
-- 自动接续运行状态保存在 `settings.json` 同目录下独立、版本化的 `quota-auto-continue.json`。schema v2 只包含本机随机盐、加盐账号 / 周窗口指纹、当前周期与 pending 下一周期时间、最近额度观测、脱敏 `eventId` / `generationId`、通知处置、30 分钟事件锁、已占用尝试槽、完成标记、时间戳、触发原因，以及分离的自动 / 手动脱敏结果摘要；不保存 Token、账号 ID、邮箱、请求头、响应正文或模型回复。同一尝试槽会在发请求前原子落盘，崩溃恢复后不会重复执行。
-- 在 `settings.json` 同目录按日写入脱敏的 `quota-audit-YYYY-MM-DD.jsonl`，保留 14 天。每条记录仅含 UTC 时间、固定级别 / 动作码、不透明事件 / 代次 ID、触发原因、重置前后整数剩余比例与 `reset_at`、从 0 开始的尝试槽和固定错误码；不含凭据、账号 ID 或邮箱、路径或 URL、用量原始响应、提示词 / 回复正文或任意错误文本。
-- 不额外请求重置卡，也不调用重置卡消耗或其他写入接口；只从现有 `wham/usage` 用量响应读取附带的重置卡总数和当前可使用数摘要，不发起 OAuth 登录流程。
-- 重置卡通知基线保存在 `settings.json` 同目录下独立、版本化的 `reset-credit-notification.json`。文件只包含 schema 版本、本机随机盐、加盐账号指纹和最近一次卡片总数；不保存 Token、账号 ID、邮箱、当前可使用数或原始响应。
-- 不安装前端文件系统或 HTTP 权限插件；敏感 I/O 保持在 Rust 后端。
-- 掩码账号摘要仅在用量请求成功且接口提供账号邮箱时生成；不会从 `auth.json` 读取邮箱，不持久化未掩码邮箱，也不会将任一种邮箱写入运行日志。
-- 趋势历史保存在 `settings.json` 同目录下独立、版本化的 `usage-history.json`。文件只包含本机随机盐、不可逆的加盐账号指纹、匿名账号分区、匿名的本机加盐额度流键 / 周期长度、重置周期时间、采样时间和剩余百分比；上游窗口 ID 也只参与哈希，不会原样落盘。不保存账号 ID、Token、邮箱、上游窗口名称、原始响应、代理、URL 或认证路径。账号切换只更换当前分区，不会删除其他账号历史。
-- 设置窗口只能通过专属历史 IPC 取得脱敏后的百分比、时间、预测和 fallback 标签元数据；它不能调用主卡的 `get_dashboard`，因此不会取得掩码账号、套餐或实时原始快照。
-- 系统通知只使用本地化 fallback 窗口名、额度数值，以及重置卡新增数、总数和当前可使用数；不包含掩码账号、上游窗口名称、Token 或原始响应。
-- 诊断摘要采用固定白名单：schema 与应用版本、平台 / 架构、语言、主题、刷新间隔、连续失败次数、通知开关 / 权限、Dashboard 状态 / 错误代码、窗口数、最近刷新、更新状态、历史样本数 / 存储状态、托盘关闭开关，以及自动接续开关 / 固定枚举状态。明确排除 Token、账号、邮箱、路径、代理、URL、额度百分比、重置时间、尝试时间、曲线点、原始错误和日志。
-- 设置 WebView 只有剪贴板**写文本**权限，没有读取权限；外链仅允许仓库精确根地址、当前仓库的 Release 页面和新建 Issue 页面，仓库根地址不使用通配符。主 WebView 没有剪贴板或通知插件权限；通知权限申请与测试都必须经过设置窗口专属 Rust 命令。
-- 更新检查只访问 `creamtea47/codex-usage-bar` 的包含各平台更新包签名的公开 HTTPS `latest.json` 清单，不携带 `auth.json`、Token、邮箱或用量数据。下载包必须与内置公钥匹配才会安装。
-
-认证文件缺失、Token 失效或接口返回未授权时，最后一次成功数据会保留并标记为“已过期”。请在 Codex 中重新登录后，再点击右上角“刷新”。
-
-## 技术架构
-
-| 层 | 技术 | 作用 |
-| --- | --- | --- |
-| 桌面界面 | React 19 + TypeScript + Material UI + i18next + Recharts 3 + Vite | 紧凑双语用量卡、动态加载趋势页、主题、侧栏设置、无障碍、拖动与缩放交互 |
-| 原生边界 | Tauri 2 command / event / capability | 按窗口限制 IPC、系统通知权限与发送、只写剪贴板，以及仓库根地址 / Issue / Release 精确外链 |
-| 数据与持久化 | Rust + Tokio + Reqwest + Serde | 默认只读用量、选择性最小接续请求、固定刷新与失败退避、请求去重、版本化脱敏运行状态、本地历史、预测、设置、自启和脱敏日志 |
-
-完整前端 IPC 另包含设置窗口限定的 `get_quota_auto_continue_status`、`set_quota_auto_continue_enabled` 和 `test_quota_auto_continue`；状态通过 `quota-auto-continue-updated` 事件更新。普通 `save_settings` 会保留当前自动接续开关，不能绕过专属副作用入口。`get_dashboard` 和手动刷新仅限主窗口；通知、历史、自动接续、界面故障上报、诊断、自启和更新操作仅限设置窗口。更新 IPC 只返回版本摘要和下载进度；URL、签名、原始清单、凭据和未掩码账号信息永不跨越 Rust 边界。
-
-## 日志与排查
-
-- 设置及主卡 / 设置窗口的位置：Windows 为 `%APPDATA%\com.creamtea47.codexusagebar\settings.json`；macOS 为 `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json`。
-- 自动接续脱敏运行状态：同目录下的 `quota-auto-continue.json`；关闭功能不会删除排期状态，重新开启后会先按当前账号最新快照校验。
-- 重置卡通知基线：同目录下的 `reset-credit-notification.json`；只保存脱敏账号指纹和最近卡片总数，用于跨重启识别新增卡片，不保存当前可使用数或账号原文。
-- 本地趋势样本：位于 `settings.json` 同目录的 `usage-history.json`；不按日期、点数或流数量淘汰，每次查询每个系列最多展示 1,000 点。最新 24 小时保留已采集样本，1–7 天按 15 分钟桶压缩，7–32 天按小时桶压缩，32 天以上按 UTC 日桶保留每日首尾点，并始终保留重置周期边界。schema v1 会无损迁移到多账号 schema v2，并在首次改写前创建一次迁移备份。可在“趋势”中暂停或清除当前账号历史，绝不上传；升级前没有样本的时段会显示为“部分覆盖”。
-- 运行日志：Windows 为 `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log`；macOS 为 `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log`；均保留 14 天。
-- 日志只记录时间、级别、任务时点、尝试序号、所选模型、操作结果和脱敏错误类别；不记录 Token、账号、Authorization 请求头、认证文件内容、原始 SSE、响应正文或模型回复。设置界面故障仅记录固定类别，更新日志仅记录版本号和脱敏结果。
-- 受代理网络限制时，原生请求会遵循 Windows/macOS 系统代理与 `HTTP_PROXY` / `HTTPS_PROXY`；代理地址和凭据不会写入日志。
-- 无法读取用量时，先确认 Codex 已登录，再点击右上角“刷新”。自动失败会按界面显示的 1 / 3 / 5 / 10 / 30 分钟退避，成功后恢复用户选择的固定间隔。
-- 可使用“复制脱敏诊断”取得白名单摘要。请勿向 Issue、截图或评论提交 `auth.json`、Token、未经检查的日志、凭据或私人账号信息。
-- 若旧 Win32 版开通过自启，旧的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 项不会被新版迁移或删除；确认新版可用后请自行关闭旧项，避免两个悬浮窗同时启动。
+趋势、设置和脱敏接续状态保存在本机，运行日志保留 14 天。完整访问边界、文件路径、采样策略和诊断说明见[详细指南](docs/guide-zh.md)。
 
 ## 开发
 
-开发环境需要 Node.js 22.13+ 或 24+、pnpm 10 和稳定版 Rust。Windows 还需要 MSVC 工具链与 WebView2 Runtime；macOS 需要 Xcode Command Line Tools。不需要全局安装 Tauri CLI。
+技术栈：Tauri 2 · Rust · React 19 · TypeScript · Material UI · Recharts · Vite。
 
-主悬浮卡依赖真正的原生透明窗口来呈现 CSS 圆角。Tauri 在 macOS 上需要 `app.macOSPrivateApi: true` 才能透明化 WKWebView 背景；缺少该项会在四角露出白色矩形底层。该私有 API 不适用于 Mac App Store，但不影响当前 GitHub Release 的 DMG 分发方式。
+需要 Node.js 22.13+ 或 24+、pnpm 10、stable Rust；Windows 还需 MSVC 和 WebView2，macOS 还需 Xcode Command Line Tools。
 
-macOS 的应用内更新只允许从标准 `.app/Contents/MacOS` 包内执行。`tauri dev` 的裸调试二进制会在下载前拒绝安装，避免更新器把 `target/debug` 误当成需要替换的 App 目录；请使用本地 DMG 验证完整安装流程。
-
-Windows 的通知应用名称与图标只能用安装后的 NSIS 包验收；开发可执行文件的通知身份不作为发布验收结果。
-
-```powershell
+```sh
 pnpm install --frozen-lockfile
-pnpm lint
-pnpm test
-cargo test --locked --manifest-path src-tauri/Cargo.toml
 pnpm tauri dev
 ```
 
-构建当前系统的发行包：
-
-仓库会自动合并 `tauri.windows.conf.json` 或 `tauri.macos.conf.json`，为 Tauri 构建选择当前系统的原生安装包。普通本地构建没有发布私钥，因此应使用下列 CI 等价命令关闭发布签名与更新产物：
-
-```powershell
-# Windows：普通本地包（不需要发布私钥）
-pnpm tauri build --bundles nsis --no-sign --config src-tauri/tauri.unsigned.conf.json
-
-# macOS：普通本地包（不需要发布私钥）
-pnpm tauri build --bundles dmg --no-sign --config src-tauri/tauri.unsigned.conf.json
+```sh
+pnpm lint
+pnpm test
+pnpm build
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-产物位于 `src-tauri\target\release\bundle\nsis\` 或 `src-tauri/target/release/bundle/dmg/`。
+本地打包、签名、原生平台注意事项和 CI 发布流程见[开发与发布指南](docs/guide-zh.md)。
 
-## CI 与发布
+## 反馈与贡献
 
-推送到 `main` / `master` 或创建 Pull Request 时，GitHub Actions 会在原生 Windows x64、Windows ARM64、Intel Mac 与 Apple 芯片 Mac 运行器上执行前端 lint、前端测试、Rust 单测和未签名的原生打包。推送 `v*` 标签后，工作流只在 tag 构建步骤读取 GitHub Actions Secret 中的 `TAURI_SIGNING_PRIVATE_KEY`，为四个应用内更新载荷生成 Tauri 签名，再先创建草稿 Release、最后原子发布完整更新集。macOS DMG 仅用于手动安装，尚未经过 Apple 公证：
-
-当前签名私钥不带口令；若未来改用带口令的私钥，还需在 GitHub Actions 配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。稳定更新标签必须使用 `vX.Y.Z` 格式，避免预发布版本进入稳定更新通道。
-
-- `CodexUsageBar-x64-setup.exe`
-- `CodexUsageBar-arm64-setup.exe`
-- `CodexUsageBar-macos-x64.dmg`
-- `CodexUsageBar-macos-arm64.dmg`
-- 两个 Windows 安装包对应的 `.sig`
-- 两个 macOS `.app.tar.gz` 自动更新包及对应 `.sig`
-- `latest.json`（包含四个平台更新包签名的公开更新清单）
-
-维护者发布示例：
-
-```powershell
-git tag -a v0.6.2 -m "v0.6.2 永久历史、多账号分区与单实例修复"
-git push origin master
-git push origin v0.6.2
-```
-
-## 不包含的能力
-
-不提供未确认的静默下载或更新、任务栏停靠模式、通用旧布局迁移、云端历史同步、跨账号历史选择器、自定义接续提示词、OAuth Token 续期或系统级定时唤醒。已有安装仅会按上述规则进行一次紧凑高度调整。
+欢迎通过 [Issues](https://github.com/creamtea47/codex-usage-bar/issues) 反馈问题或建议，通过 Pull Request 贡献改进。报告问题时请提供系统、应用版本、复现步骤和截图；也可在“关于与更新”复制脱敏诊断，检查后自行粘贴。不要提交 `auth.json`、Token 或私人账户资料。

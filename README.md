@@ -2,205 +2,135 @@
 
 # CodexUsageBar
 
-**A privacy-first, compact floating Codex usage card for Windows and macOS.**
+**Keep Codex quota, reset alerts, and usage trends on your desktop.**
 
-Built with Tauri 2, Rust, React, TypeScript, Material UI, and Vite.
+A compact floating card for Windows and macOS, with optional quota auto-continuation.
 
-[Download](https://github.com/creamtea47/codex-usage-bar/releases/latest) · [Screenshots](#screenshots) · [Privacy](#privacy-and-feature-boundary) · [Development](#development)
+[Download](https://github.com/creamtea47/codex-usage-bar/releases/latest) · [Features](#features) · [Screenshots](#screenshots) · [Detailed guide](docs/guide.md)
 
 [![Build](https://github.com/creamtea47/codex-usage-bar/actions/workflows/build.yml/badge.svg)](https://github.com/creamtea47/codex-usage-bar/actions/workflows/build.yml)
 [![Latest Release](https://img.shields.io/github/v/release/creamtea47/codex-usage-bar?display_name=tag)](https://github.com/creamtea47/codex-usage-bar/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/creamtea47/codex-usage-bar/total)](https://github.com/creamtea47/codex-usage-bar/releases)
-[![Stars](https://img.shields.io/github/stars/creamtea47/codex-usage-bar?style=flat)](https://github.com/creamtea47/codex-usage-bar/stargazers)
 
-[简体中文](README-zh.md)
+English | [简体中文](README-zh.md)
+
+<img src="docs/images/dashboard-dark-en.png" alt="Dark quota card with remaining limits, reset countdowns, and pacing advice" width="520">
 
 </div>
 
-> CodexUsageBar reads signed-in Codex usage locally by default. It sends a fixed minimal `hi` only after the user explicitly enables **Quota Auto-Continuation** or confirms **Test now**. It never uploads credentials, refreshes tokens, or modifies authentication files.
+## Features
+
+| Feature | What it does |
+| --- | --- |
+| **Desktop quota card** | See remaining percentages, reset times, and countdowns for every quota window. Includes scheduled refresh, always-on-top, dragging, size locking, and close-to-tray. |
+| **Reset and credit alerts** | Get system notifications when quota resets or reset credits arrive, plus low-quota alerts, pace warnings, and quiet hours. |
+| **Quota trend collection** | Track remaining quota percentages over 24 hours, 7 days, 30 days, all history, or custom dates, with today's consumption and local forecasts. |
+| **Quota auto-continuation** | Optionally send a minimal request when weekly quota resets to help start the next cycle even during light usage. Inspect the schedule, trigger, and results. |
+| **Personalization and updates** | English / Simplified Chinese, light / dark / system themes, autostart, and update notifications with user-confirmed installation. |
+
+## Quick start
+
+1. Download the matching installer from [Releases](https://github.com/creamtea47/codex-usage-bar/releases/latest).
+
+   | Device | Asset |
+   | --- | --- |
+   | Windows x64 | `CodexUsageBar-x64-setup.exe` |
+   | Windows ARM64 | `CodexUsageBar-arm64-setup.exe` |
+   | Intel Mac (macOS 11+) | `CodexUsageBar-macos-x64.dmg` |
+   | Apple silicon Mac (macOS 11+) | `CodexUsageBar-macos-arm64.dmg` |
+
+2. Sign in to Codex on this computer, then launch CodexUsageBar. Windows normally installs without administrator privileges; on macOS, open the DMG and drag the app to Applications.
+3. Quota loads at launch and refreshes every minute by default. Open Settings from the card's top-right corner to enable alerts and auto-continuation.
+
+> macOS packages are not Apple-notarized. If the first launch is blocked, allow it in **System Settings → Privacy & Security**. Versions v0.2.5 and earlier need one manual upgrade before in-app updates become available.
+
+### Alerts for resets and reset-credit arrivals
+
+Open **Settings → Notifications**, enable notifications, grant OS permission, and choose your rules:
+
+- **Quota reset:** notify when a quota window enters a new cycle.
+- **Reset-credit arrival:** notify when the same account's total credit count increases. Enable this rule separately; it never automatically redeems credits.
+- **Low quota / pace:** defaults are 20% remaining and a 10-percentage-point deficit against elapsed-time pace. Both are adjustable.
+- **Quiet hours:** supports ranges crossing midnight, such as 22:00–08:00. Suppressed alerts are not replayed later.
+
+The master switch defaults off. The first successful sample and account switches establish baselines instead of treating existing low quota or existing credits as new events. Detection relies on successful refreshes, not real-time server push.
+
+### Trends measured in quota percentages
+
+Open **Settings → Trends**. Local collection defaults on and records successful usage snapshots. It measures **quota percentages**, not token counts or billing costs.
+
+- Each quota window has its own 0–100% chart, with breaks at cycle resets.
+- Today's consumption accumulates from local midnight and can exceed 100% across multiple cycles.
+- With enough samples, local forecasts estimate whether quota will last until reset. Otherwise they show **Collecting**. Forecasts are not official guarantees.
+- History stays on this computer permanently, with older samples compacted. Anonymous account partitions restore the matching history when you switch back.
+- Pause collection while keeping existing history, or confirm deletion of the current account's history. The app cannot collect while closed or reconstruct missing history.
+
+### Auto-continuation for the next quota cycle
+
+Open **Settings → Quota Auto-Continuation**, enable it, and confirm. The app watches the current account's weekly window (6–8 days) and sends a fixed minimal `hi` request after detecting quota recovery or reaching the reset deadline.
+
+- Defaults off. Enabling it sends real model requests that may consume a small amount of quota. It continues quota cycles; it does not renew a paid subscription.
+- After an unsuccessful initial attempt, retry slots are +1, +5, and +30 minutes from the reset event. A successful event is not sent again.
+- The computer must be awake, online, and running the app (the tray is fine). Resuming more than 30 minutes late misses the cycle. There is no forced wake, so timely continuation cannot be guaranteed in every situation.
+- **Test now** requires a second confirmation and sends once without retries. Autostart and close-to-tray can help keep the app available.
 
 ## Screenshots
 
-### Compact floating usage card in macOS dark mode
+Captured from the current v0.6.2 UI components in a browser with synthetic example data. These contain no real account or usage data and do not demonstrate native windows, OS notification delivery, or completed continuation requests. See the [capture notes](docs/screenshots.md).
 
-![CodexUsageBar compact dashboard on macOS showing native transparent corners, dynamic quota windows, remaining usage, and top-right controls](docs/images/dashboard-light.png)
+| Light quota card | Dark quota card |
+| --- | --- |
+| ![Light quota card](docs/images/dashboard-light-en.png) | ![Dark quota card](docs/images/dashboard-dark-en.png) |
 
-> The normal state uses no extra space. When an update is available, a small green update icon appears to the left of Refresh. It opens About & updates and the confirmation dialog; it does not immediately download or install anything.
+### Notification rules and quiet hours
 
-### Theme-aware macOS Settings and updates page
+![Notifications: quota resets, credit arrivals, thresholds, and quiet hours](docs/images/notifications-en.png)
 
-![CodexUsageBar macOS Settings window with a dark native title bar and the About and updates page showing automatic checks and the manual update entry point](docs/images/settings-update.png)
+### Quota trends and today's consumption
 
-## Features
+![Trends: date ranges, quota charts, daily consumption, and local forecasts](docs/images/trends-en.png)
 
-- Opens as a compact `460 × 260` floating card for one quota window, removing unused bottom space. It expands for additional windows and for the reliable-advice area (up to `560px`); quota cards and advice beyond three visible lines scroll in their own areas. A manually resized card keeps its chosen size.
-- Displays every quota window returned by the usage API, its remaining percentage, reset time, and a local countdown that ticks every second from the absolute reset deadline. At zero it shows **Resetting…** until a successful refresh supplies the next cycle.
-- Shows a masked account summary such as `j***@example.com · Pro` after a successful refresh, together with the next automatic-refresh countdown and most recent refresh time.
-- Refreshes at launch and on a fixed, configurable 1 / 3 / 5 / 10 / 30 minute interval. New installations default to 1 minute, while upgrades keep their saved interval. Consecutive failures retry after 1 / 3 / 5 / 10 / 30 minutes and remain at 30 minutes until a request succeeds; manual refresh bypasses the wait and reschedules from completion.
-- Keeps **Refresh**, **Settings**, and **Close** in the upper-right corner. A green update icon appears when a new version is available and opens the user-confirmed install flow. Refresh is disabled while a request is running to prevent duplicate requests.
-- Draws a pace marker for long quota windows and always repeats its rounded value as the card's suggested minimum remaining quota. Its tooltip explains that this is a local pacing estimate, not an official limit. Reliable long-window forecasts appear separately in the bottom advice area, in quota-card order, without replacing the pace suggestion.
-- Provides a complete Simplified Chinese and English interface. **Display** can follow the system language or override it; any `zh-*` system locale resolves to Simplified Chinese and other locales fall back to English.
-- Uses a borderless, draggable, resizable desktop card with system, light, and dark themes; supports always-on-top and position / size lock, and responds to the first click while unfocused on macOS.
-- Hides the main window to the system tray by default. Left-clicking the tray icon restores and focuses the main window, while right-clicking opens the menu to show the main window, open Settings, or explicitly quit. Disabling **Minimize to tray on close** makes the close button exit instead.
-- Opens Settings in a separate opaque native window with seven sidebar categories: **Display**, **Data & refresh**, **Notifications**, **Trends**, **Quota Auto-Continuation**, **Startup**, and **About & updates**. Reopening Settings restores and focuses the existing window instead of creating a duplicate or leaving it hidden in the background.
-- Keeps **Quota Auto-Continuation** off by default. When enabled, it watches both a detected quota recovery and the current account’s 6–8 day `reset_at` deadline, records which condition triggered the automatic action, and retries failures at `+1`, `+5`, and `+30` minutes. Because the [OpenAI model catalog](https://developers.openai.com/api/docs/models) evolves, it uses the account’s live manifest: prefer `gpt-5.4` when advertised, otherwise choose the first non-image text model, and use a compatibility fallback only when the manifest is unavailable.
-- Offers an independent **Notifications** page for opt-in alerts about low remaining quota, usage running ahead of elapsed-time pace, a newly reset quota cycle, and reset-credit arrivals. The master switch is off by default; the first three rules default on, while reset-credit arrivals default off independently. Low quota starts at 20%, pace deficit at 10 percentage points, and both thresholds accept 0–100. Quiet hours default off with an initial 22:00–08:00 range, support crossing midnight, and never replay suppressed alerts later.
-- Keeps a lightweight 24-hour / 7-day / rolling-30-day / all-history trend view in Settings, plus a custom range covering any past local calendar dates. A custom range ending today stops at the instant **Apply** is chosen; the default remains 24 hours and the selection is not persisted across restarts. Collection is enabled by default and retained permanently in anonymous account partitions inside `usage-history.json`; switching accounts restores the matching partition, while **Clear history** deletes only the current account. Pausing stops new samples while keeping existing charts and forecasts visible; turning collection back on automatically recovers the trend view before offering a manual retry. Each quota window has a fixed 0–100% chart with reset-cycle breaks, today's consumption, and a four-state local forecast. Today's consumption accumulates successful samples from 00:00 in the system's local calendar day, sums separate quota cycles, and can therefore exceed 100%. Upgrades explicitly show partial coverage until enough new history has been collected instead of inventing older data.
-- Adds **Diagnostics & feedback** with a whitelist-only diagnostic summary, a write-only clipboard action, a separate new-Issue link, and a validated current-version Release-notes link. Diagnostic text is never inserted into the Issue URL.
-- Checks once shortly after launch and then at most every six hours by default; it can be disabled in **About & updates**. That page also provides a **GitHub repository** button restricted to this repository's exact HTTPS root URL. Automatic checks read only the public HTTPS `latest.json` manifest containing signatures for each platform update payload; they never download, install, or restart the app.
-- When a new version is found, a small green update icon appears in the card's upper-right corner. It opens **About & updates** and the confirmation dialog. Only after confirming **Download and install** does Rust download and verify the Tauri signature. Windows hands off to the current-user NSIS installer; macOS may request authorization, replaces the app, and restarts.
+### Auto-continuation schedule
 
-## Install
+![Auto-continuation: reset target, next attempt, and result history](docs/images/auto-continue-en.png)
 
-1. Open [Releases](https://github.com/creamtea47/codex-usage-bar/releases/latest) and choose the matching asset:
+<details>
+<summary>More screenshots: display settings and updates</summary>
 
-   | Device | Asset | Install |
-   | --- | --- | --- |
-   | Windows x64 (most PCs) | `CodexUsageBar-x64-setup.exe` | Run the NSIS installer. It installs for the current user and normally needs no administrator privileges. |
-   | Windows on ARM | `CodexUsageBar-arm64-setup.exe` | Run the NSIS installer. It installs for the current user and normally needs no administrator privileges. |
-   | Intel Mac (macOS 11+) | `CodexUsageBar-macos-x64.dmg` | Open the DMG and drag the app to Applications. |
-   | Apple silicon Mac (macOS 11+) | `CodexUsageBar-macos-arm64.dmg` | Open the DMG and drag the app to Applications. |
+![Display: language, theme, and window behavior](docs/images/display-en.png)
 
-2. Sign in to Codex on this computer, then start **CodexUsageBar**.
+![About and updates: version, update checks, and diagnostics](docs/images/about-en.png)
 
-> When upgrading from v0.2.5 or earlier, manually install the first updater-enabled version (v0.2.6 or newer). Automatic detection and user-confirmed installation are available only after that bootstrap upgrade.
+</details>
 
-The current macOS DMGs are ad-hoc signed and not Apple-notarized. If Gatekeeper blocks the first launch, allow the app in **System Settings → Privacy & Security**, or Control-click it and choose **Open**. The Tauri updater signature verifies update payload integrity; it does not replace Apple Developer ID signing or notarization.
+## Privacy and local data
 
-The application uses a new application identifier and configuration directory. It is independent of the former `luodaoyi/codex-useage-win` repository and deliberately does not migrate or remove old settings or autostart entries.
+Only the local Rust backend reads credentials; the frontend never receives tokens or authentication files. Quota reads, trends, and notifications are read-only. Auto-continuation sends requests only after opt-in or test confirmation, and never automatically consumes reset credits. The app does not refresh tokens or modify `auth.json`.
 
-### Windows legacy-upgrade note
+Credentials are searched beside the executable, then in `%CODEX_HOME%/auth.json`, then in `.codex/auth.json` under your home directory. If authentication expires, sign in to Codex again and refresh.
 
-Windows builds identify `creamtea47` as the publisher. For legacy-upgrade compatibility, earlier releases already wrote the same install path under both the legacy `luodaoyi` key and the new `creamtea47` key, so current installers can find an existing uninstaller correctly. This affects only Windows installer compatibility—not the Git repository, update endpoint, application identifier, or data directory.
-
-If an old v0.2.1 installer is currently showing that error, exit it and download a current release. Do not manually delete the registry entry or `auth.json`.
-
-## Usage
-
-The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry immediately, including while an automatic failure-backoff deadline is pending. The adjacent **Settings** button opens a separate window organized into **Display**, **Data & refresh**, **Notifications**, **Trends**, **Quota Auto-Continuation**, **Startup**, and **About & updates**.
-
-**Display** controls language, theme, always-on-top, and position / size lock. **Data & refresh** contains the fixed refresh interval and privacy explanation. **Notifications** contains OS permission, alert rules, quiet hours, and the test action. **Trends** switches among 24 hours, 7 days, rolling 30 days, all history, or a custom range covering any past dates; it also controls local collection and confirmed deletion for the current account. **Quota Auto-Continuation** shows the target reset, next attempt, consumed slots, the latest trigger reason, and separate sanitized results for automatic actions and manual tests. **Startup** controls autostart and close-to-tray behavior. Closing Settings only hides it; closing the main window hides to the tray by default, while tray **Quit** always exits.
-
-Auto-continuation requires the app to remain running in the tray while the computer is awake. Resuming or restarting more than 30 minutes after the target marks that cycle missed; only the latest due slot runs, so earlier slots are never replayed back-to-back. **Test now** always requires a second confirmation, sends once, and never retries.
-
-System notifications remain disabled until you turn them on and grant operating-system permission. The first successful snapshot establishes quota-rule baselines rather than immediately warning about an already-low window; the first observed reset-credit count and every account switch likewise establish a count baseline, and only a later increase for the same account alerts. Within one quota cycle, each enabled low-quota or pace event is sent once; a later `resetAt` starts a new cycle and can produce one reset notification. A reset-credit arrival can be merged with same-refresh quota events into one account-free notification with at most three window entries. Quiet hours use local time in the half-open `[start, end)` interval, including cross-midnight ranges, and suppressed events are not replayed. On Windows, notification name and icon behavior must be judged from an installed NSIS package; development notifications are not a release acceptance result.
-
-Trend collection starts enabled for both new and upgraded installations. Only successful snapshots are sampled, with no age, point-count, or stream-count eviction: the newest 24 hours keep collected samples, days 1–7 use 15-minute buckets, days 7–32 use hourly buckets, and older history keeps the first and last point in each UTC-day bucket while preserving reset-cycle boundaries. **Today's consumption** always covers 00:00 through now in the system's local calendar day, independently of the selected chart range. Forecasting uses recent samples from the current cycle and reports **Collecting**, **Stable**, **Expected to run out before reset**, or **Expected to last until reset**. A reliable exhaustion time is rounded to 15 minutes and is never extrapolated past the quota reset. Turning collection off stops new samples without hiding or deleting existing charts and forecast details; **Clear history** permanently removes the current account's points after confirmation.
-
-**GitHub repository** opens only `https://github.com/creamtea47/codex-usage-bar`. **Copy sanitized diagnostics** writes a whitelist summary to the clipboard. **Report an issue** opens a separate GitHub Issue page and never appends diagnostics; inspect the copied summary before deciding whether to paste it. **View release notes** opens the tag page for a validated `X.Y.Z` application version and otherwise falls back to the repository's Releases page.
-
-The app checks once shortly after launch and then at most every six hours by default; you can turn this off in Settings. Choose **Check for updates** when you want to check immediately:
-
-- When an update is available, a small green update icon appears in the card's upper-right corner. Clicking it opens the update page and confirmation dialog. Only clicking **Download and install** downloads the payload, verifies its signature, and hands it to the native installer.
-- Windows closes CodexUsageBar when installation starts; macOS restarts after replacing the app. The app never silently downloads, replaces, or restarts without confirmation.
-- A current build, network error, or signature-verification failure never affects the quota data already on screen. A signature failure cancels installation.
-
-## Privacy and feature boundary
-
-Only the Rust backend reads local credentials during a request. Usage, trends, and notifications remain read-only; auto-continuation sends a real request only after explicit opt-in or test confirmation. React receives filtered usage and sanitized continuation status, never `auth.json`, access tokens, request headers, raw API responses, model replies, raw errors, or an unmasked email address.
-
-`auth.json` is searched in this order:
-
-1. Next to the running application executable.
-2. `%CODEX_HOME%\auth.json`.
-3. Windows: `%USERPROFILE%\.codex\auth.json`; macOS: `~/.codex/auth.json`.
-
-The usage feature only reads `GET https://chatgpt.com/backend-api/wham/usage`; the update feature separately reads the public HTTPS `latest.json` manifest, and the app:
-
-- Never reads refresh tokens, refreshes OAuth tokens, or writes to `auth.json`; every attempt rereads the latest access token.
-- Auto-continuation first refreshes usage read-only to verify the same reset event and account. An advanced `reset_at` alone is no longer a reason to skip; only an automatic or manual success already recorded for the same event prevents a later send. When no same-event success exists, it reads the live Codex model manifest and sends fixed `hi` to `POST https://chatgpt.com/backend-api/codex/responses` with `stream: true` and `store: false`. Only an SSE `response.completed` event counts as success; response text is neither displayed nor stored.
-- Stores auto-continuation runtime state in a separate versioned `quota-auto-continue.json` beside `settings.json`. Schema v2 contains only a local salt, salted account/window fingerprints, the active cycle and pending next-cycle time, the latest quota observation, opaque `eventId` / `generationId`, notification disposition, the 30-minute event lock, consumed slots, completion marker, timestamps, trigger reason, and separate sanitized automatic/manual result summaries. It never stores tokens, account IDs, email, request headers, response bodies, or model replies. A slot is atomically persisted before sending, so crash recovery cannot repeat it.
-- Writes a daily sanitized `quota-audit-YYYY-MM-DD.jsonl` beside `settings.json` and retains it for 14 days. Each record contains only a UTC timestamp, fixed level/action codes, opaque event/generation IDs, trigger reason, old/new integer remaining percentages and `reset_at` values, a zero-based slot index, and a fixed error code; it excludes credentials, account IDs or email, paths or URLs, raw quota responses, prompt/reply text, and arbitrary error text.
-- Makes no additional reset-credit request and never calls a reset-credit consumption or other write endpoint. It only reads the total and currently usable reset-credit summary already attached to the existing `wham/usage` response, and never begins an OAuth flow.
-- Stores the reset-credit notification baseline in a separate versioned `reset-credit-notification.json` beside `settings.json`. It contains only the schema version, a local random salt, a salted account fingerprint, and the latest total count; it never stores tokens, account IDs, email, the currently usable count, or the raw response.
-- Does not install frontend filesystem or HTTP permissions; sensitive I/O stays in Rust.
-- Derives the optional masked account summary only from a successful usage response. It does not read an email from `auth.json`, persist an unmasked email, or write either form of the email to runtime logs.
-- Stores trend history in a separate, versioned `usage-history.json` beside `settings.json`. The file contains a local random salt, irreversible salted account fingerprints, anonymous account partitions, anonymous locally salted quota-window stream keys / durations, reset-cycle timestamps, sample times, and remaining percentages. Raw upstream window IDs are hash inputs only. It never stores an account ID, Token, email, upstream label, raw response, proxy, URL, or authentication path. Switching accounts changes the active partition without deleting other account history.
-- Exposes only sanitized percentages, timestamps, forecast metadata, and fallback-label metadata through the Settings-only history IPC. The Settings window cannot call the main card's `get_dashboard`, so it never receives the masked account, plan, or live raw snapshot.
-- Builds system-notification text only from localized fallback window names, quota values, and reset-credit gained/total/currently-usable counts; it never includes the masked account, upstream window label, Token, or raw response.
-- Generates diagnostics from a fixed whitelist: schema/app/platform fields, refresh and notification status, dashboard/update/history summaries, the close-to-tray setting, and the continuation enabled flag/fixed enum phase. It excludes tokens, accounts, email, paths, proxy settings, URLs, quota percentages, reset or attempt times, curve points, raw errors, and logs.
-- Grants the Settings WebView clipboard **write-text only**—never clipboard read—and restricts external opening to the exact repository root, its Release pages, and its new-Issue page. No wildcard is granted for the repository root. The main WebView has neither clipboard nor notification-plugin permission; notification permission and test actions go through Settings-only Rust commands.
-- Checks updates only against the public HTTPS `latest.json` manifest containing signatures for each platform update payload for `creamtea47/codex-usage-bar`, without sending `auth.json`, tokens, email, or usage data. A payload must match the embedded public key before it can be installed.
-
-If credentials are missing, expired, or rejected, the last successful snapshot remains visible as stale. Sign in to Codex again, then choose top-right **Refresh**.
-
-## Architecture
-
-| Layer | Technology | Responsibility |
-| --- | --- | --- |
-| Desktop UI | React 19 + TypeScript + Material UI + i18next + Recharts 3 + Vite | Compact bilingual card, lazy-loaded Trends page, themes, sidebar Settings, accessibility, drag and resize interactions |
-| Native boundary | Tauri 2 commands, events, and capabilities | Window-scoped IPC, OS notification permission / delivery, write-only clipboard, and exact repository / Issue / Release links |
-| Data and persistence | Rust + Tokio + Reqwest + Serde | Read-only usage by default, opt-in minimal continuation requests, fixed refresh/backoff, request de-duplication, versioned sanitized runtime state, local history, forecasting, settings, autostart, and redacted logs |
-
-The frontend IPC also includes Settings-only `get_quota_auto_continue_status`, `set_quota_auto_continue_enabled`, and `test_quota_auto_continue`, with sanitized updates on `quota-auto-continue-updated`. Ordinary `save_settings` preserves the current continuation flag and cannot bypass the dedicated side-effect command. Dashboard/manual refresh remain main-window only; notification, history, continuation, diagnostics, autostart, and update actions are Settings-window only. URLs, signatures, raw manifests, credentials, and unmasked account details never cross the Rust boundary.
-
-## Logs and troubleshooting
-
-- Settings and independent main/settings-window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
-- Sanitized auto-continuation state: `quota-auto-continue.json` beside `settings.json`. Disabling the feature does not delete it; re-enabling first validates it against the latest current-account snapshot.
-- Reset-credit notification baseline: `reset-credit-notification.json` beside `settings.json`. It stores only a sanitized account fingerprint and the latest total count to detect arrivals across restarts, never the currently usable count or account plaintext.
-- Local trend samples: `usage-history.json` beside `settings.json`. Samples are not evicted by age, point count, or stream count; each queried series still displays at most 1,000 points. The newest 24 hours keep collected samples, samples from 1–7 days use 15-minute buckets, samples from 7–32 days use hourly buckets, and older history keeps the first and last point per UTC-day bucket while preserving reset boundaries. Schema v1 migrates losslessly to multi-account schema v2 with a one-time pre-rewrite backup. Collection can be paused or the current account cleared in **Trends**, and data is never uploaded; time before the upgrade is reported as partial coverage when no samples exist.
-- Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
-- Logs contain timestamps, levels, task deadlines, attempt numbers, selected model names, operation results, and sanitized result categories. They never contain tokens, account identifiers, Authorization headers, authentication-file contents, raw SSE, response bodies, or model replies.
-- On proxy-restricted networks, native requests follow the Windows/macOS system proxy and `HTTP_PROXY` / `HTTPS_PROXY`; proxy addresses and credentials are never written to logs.
-- If usage cannot be loaded, first confirm that Codex is signed in, then choose top-right **Refresh**. Automatic failures use the visible 1 / 3 / 5 / 10 / 30 minute retry schedule and return to the selected fixed interval after success.
-- Use **Copy sanitized diagnostics** for the whitelist summary. Never submit `auth.json`, a Token, unreviewed logs, credentials, or private account details to an Issue, screenshot, or comment.
-- Autostart from the legacy Win32 app is neither migrated nor removed. Disable its old `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry after confirming the new app works, otherwise two widgets may start together.
+History, settings, and sanitized continuation state remain local. Runtime logs are retained for 14 days. See the [detailed guide](docs/guide.md) for access boundaries, storage paths, sampling policies, and troubleshooting.
 
 ## Development
 
-Development requires Node.js 22.13+ or 24+, pnpm 10, and stable Rust. Windows additionally needs the MSVC toolchain and WebView2 Runtime; macOS needs Xcode Command Line Tools. A global Tauri CLI is not required.
+Built with Tauri 2 · Rust · React 19 · TypeScript · Material UI · Recharts · Vite.
 
-The main card relies on a genuinely transparent native window for its CSS-rounded corners. On macOS, Tauri requires `app.macOSPrivateApi: true` to make the WKWebView background transparent; without it, an opaque white rectangle shows through at all four corners. This private API is not compatible with Mac App Store distribution, but it is compatible with the project's current GitHub Release DMGs.
+Requires Node.js 22.13+ or 24+, pnpm 10, and stable Rust. Windows also needs MSVC and WebView2; macOS needs Xcode Command Line Tools.
 
-In-app updates on macOS are allowed only when the executable is running from a standard `.app/Contents/MacOS` bundle. The raw `tauri dev` binary rejects installation before downloading so the updater cannot mistake `target/debug` for the App directory; use a local DMG to test the complete install flow.
-
-On Windows, validate notification app name and icon only from an installed NSIS package. The development executable's notification identity is not considered a release test result.
-
-```powershell
+```sh
 pnpm install --frozen-lockfile
-pnpm lint
-pnpm test
-cargo test --locked --manifest-path src-tauri/Cargo.toml
 pnpm tauri dev
 ```
 
-Build the native package for the current platform with:
-
-The repository automatically merges `tauri.windows.conf.json` or `tauri.macos.conf.json` to select the native installer for the current platform. Ordinary local builds do not have the release key, so use the following CI-equivalent commands to disable release signing and updater artifacts:
-
-```powershell
-# Windows: ordinary local bundle (no release key required)
-pnpm tauri build --bundles nsis --no-sign --config src-tauri/tauri.unsigned.conf.json
-
-# macOS: ordinary local bundle (no release key required)
-pnpm tauri build --bundles dmg --no-sign --config src-tauri/tauri.unsigned.conf.json
+```sh
+pnpm lint
+pnpm test
+pnpm build
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-Output is written below `src-tauri\target\release\bundle\nsis\` or `src-tauri/target/release/bundle/dmg/`.
+See the [development and release guide](docs/guide.md) for native packaging, signing, platform caveats, and CI releases.
 
-## CI and releases
+## Feedback and contributions
 
-Pushes to `main` / `master` and pull requests run frontend lint/tests, Rust tests, and unsigned native bundles on Windows x64, Windows ARM64, Intel Mac, and Apple silicon Mac runners. A `v*` tag reads `TAURI_SIGNING_PRIVATE_KEY` only in tag-build steps from GitHub Actions Secrets, generates Tauri signatures for the four in-app updater payloads, creates a draft Release, and only then publishes the complete update set. macOS DMGs remain manual-install artifacts and are not Apple-notarized:
-
-The current signing key has no password. If a future encrypted key is used, configure `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in GitHub Actions as well. Stable updater releases must use `vX.Y.Z` tags so prereleases cannot enter the stable update channel.
-
-- `CodexUsageBar-x64-setup.exe`
-- `CodexUsageBar-arm64-setup.exe`
-- `CodexUsageBar-macos-x64.dmg`
-- `CodexUsageBar-macos-arm64.dmg`
-- `.sig` files for both Windows installers
-- macOS `.app.tar.gz` updater payloads and their `.sig` files
-- `latest.json`, the public manifest containing signatures for all four platform update payloads
-
-Example maintainer release:
-
-```powershell
-git tag -a v0.6.2 -m "v0.6.2 permanent history, account partitions, and single-instance fix"
-git push origin master
-git push origin v0.6.2
-```
-
-## Intentionally excluded
-
-There are no unconfirmed silent downloads or updates, taskbar-docked mode, general legacy-layout migration, cloud history sync, cross-account history selector, custom continuation prompts, OAuth token refresh, or OS-level forced wake. Existing installations receive only the one-time compact-height adjustment described above.
+Report bugs and suggestions through [Issues](https://github.com/creamtea47/codex-usage-bar/issues), or send a Pull Request. Include your OS, app version, reproduction steps, and screenshots. **About & updates** can copy a sanitized diagnostic summary for you to review and paste. Never submit `auth.json`, tokens, or private account details.
