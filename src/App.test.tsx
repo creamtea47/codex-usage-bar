@@ -306,7 +306,8 @@ describe('App', () => {
   });
 
   it('shows only reliable long-cycle forecasts in an ordered, three-line footer', async () => {
-    const baseWindow = readySnapshot.quotaWindows[0];
+    // 与下方耗尽时刻使用同一本地时区，避免 UTC 运行器产生不同的提前时长。
+    const baseWindow = { ...readySnapshot.quotaWindows[0], startAt: '2030-01-01T08:00:00', resetAt: '2030-01-08T08:00:00' };
     const forecast = {
       status: 'lastsUntilReset' as const,
       exhaustsAt: null,
