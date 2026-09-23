@@ -1,3 +1,7 @@
+import { accountsBridge, currentAccountId } from './accountsBridge';
+import { CycleList, RangeSummaryView } from './HistoryDetails';
+import type { RangeSummary, CycleSummary } from './accountTypes';
+import { forecastText, useForecastClock } from './forecastPresentation';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import QueryStatsRoundedIcon from '@mui/icons-material/QueryStatsRounded';
 import StorageRoundedIcon from '@mui/icons-material/StorageRounded';
@@ -37,10 +41,13 @@ import {
   AreaChart,
   CartesianGrid,
   ReferenceLine,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
+  usePlotArea,
+  useXAxisInverseDataSnapScale,
 } from 'recharts';
 
 import { formatDateTime, formatDuration } from './format';
@@ -273,7 +280,56 @@ interface SeriesCardProps {
   translateAny: (key: string, options?: Record<string, unknown>) => string;
 }
 
+/** 捕获绘图区点击，避免曲线填充层拦住选择，也不依赖异步悬浮状态。 */
+function RangeClickLayer({ onSelect }: { onSelect: (timestamp: number) => void }) {
+  const plot = usePlotArea();
+  const inverse = useXAxisInverseDataSnapScale();
+  const marker = useRef<SVGGElement>(null);
+  useEffect(() => {
+    const svg = marker.current?.ownerSVGElement;
+    if (!plot || !inverse || !svg) return;
+    const select = (event: MouseEvent) => {
+      const matrix = svg.getScreenCTM();
+      if (!matrix) return;
+      const point = svg.createSVGPoint();
+      point.x = event.clientX; point.y = event.clientY;
+      const local = point.matrixTransform(matrix.inverse());
+      if (local.x < plot.x || local.x > plot.x + plot.width || local.y < plot.y || local.y > plot.y + plot.height) return;
+      onSelect(Number(inverse(local.x)));
+    };
+    svg.addEventListener('click', select, true);
+    return () => svg.removeEventListener('click', select, true);
+  }, [plot, inverse, onSelect]);
+  return <g ref={marker} aria-hidden="true" />;
+}
+
 function SeriesCard({ request, series, language, translate, translateAny }: SeriesCardProps) {
+  const { t: featureT } = useTranslation();
+  const forecastNow = useForecastClock();
+  const [selection, setSelection] = useState<number[]>([]);
+  const [cursor, setCursor] = useState(0);
+  const [rangeSummary, setRangeSummary] = useState<RangeSummary | null>(null);
+  const [rangeError, setRangeError] = useState(false);
+  const [currentCycle, setCurrentCycle] = useState<CycleSummary | undefined>();
+  const accountId = currentAccountId();
+  const start = selection.length === 2 ? Math.min(...selection) : null;
+  const end = selection.length === 2 ? Math.max(...selection) : null;
+  useEffect(() => {
+    if (start === null || end === null) return;
+    let disposed = false;
+    // Date.parse 仅用于图表坐标；IPC 保留 Rust 原始亚毫秒时间，避免选中的终点被排除。
+    void accountsBridge.analytics<RangeSummary>({ kind: 'range', windowId: series.windowId, startAt: series.points.find((p) => Date.parse(p.sampledAt) === start)?.sampledAt ?? new Date(start).toISOString(), endAt: series.points.find((p) => Date.parse(p.sampledAt) === end)?.sampledAt ?? new Date(end).toISOString() }, accountId)
+      .then((result) => { if (!disposed) { setRangeSummary(result); setRangeError(false); } })
+      .catch(() => { if (!disposed) setRangeError(true); });
+    return () => { disposed = true; };
+  }, [start, end, series.windowId, series.points, accountId]);
+  const selectPoint = (timestamp: number) => {
+    const points = validHistoryPoints(series.points);
+    if (!points.length || !Number.isFinite(timestamp)) return;
+    const closest = points.reduce((best, point) => Math.abs(point.timestamp - timestamp) < Math.abs(best.timestamp - timestamp) ? point : best);
+    setRangeSummary(null); setRangeError(false);
+    setSelection((previous) => previous.length === 1 ? [previous[0], closest.timestamp] : [closest.timestamp]);
+  };
   const theme = useTheme();
   const gradientId = `usage-trend-${useId().replace(/:/g, '')}`;
   const chart = useMemo(() => prepareChartData(series.points), [series.points]);
@@ -337,8 +393,16 @@ function SeriesCard({ request, series, language, translate, translateAny }: Seri
 
         {chart.points.length > 0 ? (
           <Box
-            role="img"
+            role="group"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              const points = validHistoryPoints(series.points);
+              if (event.key === 'Escape') setSelection([]);
+              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') { event.preventDefault(); setCursor((i) => Math.max(0, Math.min(points.length - 1, i + (event.key === 'ArrowRight' ? 1 : -1)))); }
+              if (event.key === 'Enter' && points[cursor]) { event.preventDefault(); selectPoint(points[cursor].timestamp); }
+            }}
             aria-label={translate('trends.chart.aria', { label })}
+            aria-description={featureT('feature.rangeHint')}
             sx={{ width: '100%', height: 236, mt: 1.5 }}
           >
             <ResponsiveContainer width="100%" height="100%">
@@ -370,7 +434,10 @@ function SeriesCard({ request, series, language, translate, translateAny }: Seri
                   tickLine={false}
                   axisLine={false}
                 />
+                {start !== null && end !== null && <ReferenceArea x1={start} x2={end} fill={theme.palette.primary.main} fillOpacity={0.15} />}
+                {selection.map((point, index) => <ReferenceLine key={`selection-${index}`} x={point} stroke={theme.palette.primary.main} strokeWidth={2} />)}
                 <Tooltip
+                  content={selection.length === 2 && !rangeError ? () => <Box sx={{ p: 1.5, bgcolor: 'background.paper', border: 1, borderColor: 'divider', borderRadius: 1, maxWidth: 380 }}><RangeSummaryView summary={rangeSummary} /></Box> : undefined}
                   isAnimationActive={false}
                   formatter={(value) => [
                     `${Math.round(Number(Array.isArray(value) ? value[0] : value))}%`,
@@ -409,6 +476,7 @@ function SeriesCard({ request, series, language, translate, translateAny }: Seri
                   dot={chart.points.filter((point) => point.remainingPercent !== null).length <= 12}
                   isAnimationActive={false}
                 />
+                <RangeClickLayer onSelect={selectPoint} />
               </AreaChart>
             </ResponsiveContainer>
           </Box>
@@ -418,17 +486,20 @@ function SeriesCard({ request, series, language, translate, translateAny }: Seri
           </Alert>
         )}
 
+        <Stack direction="row" sx={{ alignItems: 'center', gap: 1 }}><Typography variant="caption" color="text.secondary">{featureT('feature.rangeHint')}</Typography><Button size="small" disabled={!selection.length} onClick={() => setSelection([])}>{featureT('feature.clear')}</Button></Stack>
+        {selection.length === 2 && <Box sx={{ mt: 1 }}>{rangeError ? <Alert severity="error">{translate('trends.loadError')}</Alert> : <RangeSummaryView summary={rangeSummary} />}</Box>}
         <Box sx={{ mt: 1.5, pt: 1.5, borderTop: 1, borderColor: 'divider' }}>
           <Typography variant="caption" color="text.secondary">
             {translate('trends.forecast.label')}
           </Typography>
           <Typography variant="body2" sx={{ mt: 0.25, fontWeight: 700 }}>
-            {forecast}
+            {series.currentResetAt || currentCycle ? forecastText(series.forecast, series.currentResetAt ?? currentCycle?.resetAt ?? null, forecastNow, language) : forecast}
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.45 }}>
             {basis}
           </Typography>
         </Box>
+        <CycleList now={forecastNow} windowId={series.windowId} request={request} lastSampleAt={series.points.at(-1)?.sampledAt} onCurrentCycle={setCurrentCycle} />
       </CardContent>
     </Card>
   );
@@ -839,8 +910,8 @@ export default function TrendsPage({
           <Stack spacing={2}>
             {history.series.map((series, index) => (
               <SeriesCard
-                key={`${series.windowId}-${index}`}
-                request={request}
+                key={`${series.windowId}-${index}-${JSON.stringify(history.request)}`}
+                request={history.request}
                 series={series}
                 language={language}
                 translate={translate}

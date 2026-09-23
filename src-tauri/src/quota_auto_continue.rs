@@ -28,7 +28,7 @@ const MODEL_MANIFEST_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/mod
 const RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_CLIENT_VERSION: &str = "0.146.0";
 const CODEX_USER_AGENT: &str = "codex_cli_rs/0.146.0 (Ubuntu 22.4.0; x86_64) xterm-256color";
-const MODEL_FALLBACK: &str = "gpt-5.4";
+
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const WEEKLY_MIN_SECONDS: i64 = 6 * 24 * 60 * 60;
 const WEEKLY_MAX_SECONDS: i64 = 8 * 24 * 60 * 60;
@@ -67,6 +67,7 @@ pub enum QuotaAutoContinueErrorCode {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaAutoContinueStatus {
+    pub account_id: Option<String>,
     pub enabled: bool,
     pub phase: QuotaAutoContinuePhase,
     pub target_reset_at: Option<DateTime<Utc>>,
@@ -91,6 +92,8 @@ pub struct QuotaAutoContinueResult {
     pub error_code: Option<QuotaAutoContinueErrorCode>,
     pub model: Option<String>,
     pub slot_index: Option<u8>,
+    #[serde(default)]
+    pub details: Option<ResponseDetails>,
 }
 
 /// 趋势侧车只需要稳定 generation 与脱敏窗口范围，不需要读取调度内部状态。
@@ -351,211 +354,14 @@ impl PersistedRuntimeState {
     }
 }
 
-#[derive(Clone)]
-struct QuotaAutoContinueClient {
-    client: Client,
-    models_endpoint: String,
-    responses_endpoint: String,
-}
+mod protocol;
+use protocol::QuotaAutoContinueClient;
+pub use protocol::{ModelOption, ResponseDetails};
 
 #[derive(Debug)]
 pub struct SendFailure {
     pub code: QuotaAutoContinueErrorCode,
     pub model: Option<String>,
-}
-
-impl QuotaAutoContinueClient {
-    fn new() -> Result<Self, QuotaAutoContinueErrorCode> {
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| QuotaAutoContinueErrorCode::Network)?;
-        Ok(Self {
-            client,
-            models_endpoint: MODEL_MANIFEST_ENDPOINT.to_owned(),
-            responses_endpoint: RESPONSES_ENDPOINT.to_owned(),
-        })
-    }
-
-    #[cfg(test)]
-    fn with_endpoints(models_endpoint: String, responses_endpoint: String) -> Self {
-        Self {
-            client: Client::builder()
-                .connect_timeout(Duration::from_millis(250))
-                .timeout(Duration::from_millis(250))
-                .build()
-                .unwrap(),
-            models_endpoint,
-            responses_endpoint,
-        }
-    }
-
-    async fn send_greeting(
-        &self,
-        expected_account: Option<(&str, &str)>,
-    ) -> Result<String, SendFailure> {
-        let credentials = read_auth_credentials().map_err(|error| SendFailure {
-            code: auth_error_code(error),
-            model: None,
-        })?;
-        self.send_greeting_with_credentials(credentials, expected_account)
-            .await
-    }
-
-    async fn send_greeting_with_credentials(
-        &self,
-        credentials: AuthCredentials,
-        expected_account: Option<(&str, &str)>,
-    ) -> Result<String, SendFailure> {
-        if let Some((expected, salt)) = expected_account {
-            let identity = credentials
-                .account_id
-                .as_deref()
-                .map(AccountIdentity::AccountId)
-                .unwrap_or_else(|| AccountIdentity::Token(&credentials.access_token));
-            let actual = account_fingerprint(salt, identity).map_err(|_| SendFailure {
-                code: QuotaAutoContinueErrorCode::AccountChanged,
-                model: None,
-            })?;
-            if actual != expected {
-                return Err(SendFailure {
-                    code: QuotaAutoContinueErrorCode::AccountChanged,
-                    model: None,
-                });
-            }
-        }
-
-        let model = match self.fetch_preferred_model(&credentials).await {
-            Ok(model) => model,
-            Err(
-                QuotaAutoContinueErrorCode::AuthMissing | QuotaAutoContinueErrorCode::AuthInvalid,
-            ) => {
-                return Err(SendFailure {
-                    code: QuotaAutoContinueErrorCode::AuthInvalid,
-                    model: None,
-                });
-            }
-            Err(error) => {
-                log::info!("额度自动接续模型清单不可用，使用兼容回退：类别={error:?}。");
-                MODEL_FALLBACK.to_owned()
-            }
-        };
-        log::info!("额度自动接续准备发送最小请求：模型={model}。");
-
-        let payload = build_greeting_payload(&model);
-        let mut request = self
-            .client
-            .post(&self.responses_endpoint)
-            .bearer_auth(&credentials.access_token)
-            .header("Accept", "text/event-stream")
-            .header("Content-Type", "application/json")
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("Originator", "codex_cli_rs")
-            .header("Version", CODEX_CLIENT_VERSION)
-            .header("User-Agent", CODEX_USER_AGENT)
-            .json(&payload);
-        if let Some(account_id) = credentials.account_id.as_deref() {
-            request = request.header("ChatGPT-Account-Id", account_id);
-        }
-        let mut response = request.send().await.map_err(|_| SendFailure {
-            code: QuotaAutoContinueErrorCode::Network,
-            model: Some(model.clone()),
-        })?;
-        if !response.status().is_success() {
-            return Err(SendFailure {
-                code: status_error_code(response.status()),
-                model: Some(model),
-            });
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(SendFailure {
-                code: QuotaAutoContinueErrorCode::InvalidResponse,
-                model: Some(model),
-            });
-        }
-
-        let mut pending = Vec::<u8>::new();
-        let mut received = 0_usize;
-        while let Some(chunk) = response.chunk().await.map_err(|_| SendFailure {
-            code: QuotaAutoContinueErrorCode::Network,
-            model: Some(model.clone()),
-        })? {
-            received = received.saturating_add(chunk.len());
-            if received > MAX_RESPONSE_BYTES {
-                return Err(SendFailure {
-                    code: QuotaAutoContinueErrorCode::InvalidResponse,
-                    model: Some(model),
-                });
-            }
-            pending.extend_from_slice(&chunk);
-            while let Some(position) = pending.iter().position(|byte| *byte == b'\n') {
-                let line = pending.drain(..=position).collect::<Vec<_>>();
-                match parse_sse_line(&line) {
-                    SseSignal::Completed => return Ok(model),
-                    SseSignal::Failed => {
-                        return Err(SendFailure {
-                            code: QuotaAutoContinueErrorCode::InvalidResponse,
-                            model: Some(model),
-                        });
-                    }
-                    SseSignal::Continue => {}
-                }
-            }
-        }
-        if parse_sse_line(&pending) == SseSignal::Completed {
-            Ok(model)
-        } else {
-            Err(SendFailure {
-                code: QuotaAutoContinueErrorCode::InvalidResponse,
-                model: Some(model),
-            })
-        }
-    }
-
-    async fn fetch_preferred_model(
-        &self,
-        credentials: &AuthCredentials,
-    ) -> Result<String, QuotaAutoContinueErrorCode> {
-        let mut request = self
-            .client
-            .get(&self.models_endpoint)
-            .query(&[("client_version", CODEX_CLIENT_VERSION)])
-            .bearer_auth(&credentials.access_token)
-            .header("Accept", "application/json")
-            .header("Originator", "codex_cli_rs")
-            .header("Version", CODEX_CLIENT_VERSION)
-            .header("User-Agent", CODEX_USER_AGENT);
-        if let Some(account_id) = credentials.account_id.as_deref() {
-            request = request.header("ChatGPT-Account-Id", account_id);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| QuotaAutoContinueErrorCode::Network)?;
-        if !response.status().is_success() {
-            return Err(status_error_code(response.status()));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            return Err(QuotaAutoContinueErrorCode::InvalidResponse);
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| QuotaAutoContinueErrorCode::InvalidResponse)?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(QuotaAutoContinueErrorCode::InvalidResponse);
-        }
-        let payload: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| QuotaAutoContinueErrorCode::InvalidResponse)?;
-        select_preferred_model(&payload).ok_or(QuotaAutoContinueErrorCode::NoTextModel)
-    }
 }
 
 pub struct QuotaAutoContinueRuntime {
@@ -571,6 +377,14 @@ pub struct QuotaAutoContinueRuntime {
 }
 
 impl QuotaAutoContinueRuntime {
+    pub fn bind_account(&mut self, account: std::sync::Arc<crate::accounts::ManagedAccount>) {
+        self.client.account = Some(account);
+    }
+
+    pub async fn models(&self) -> Result<Vec<ModelOption>, QuotaAutoContinueErrorCode> {
+        self.client.models().await
+    }
+
     pub fn new(path: PathBuf) -> Result<Self, QuotaAutoContinueErrorCode> {
         Self::new_with_client(path, QuotaAutoContinueClient::new()?)
     }
@@ -580,6 +394,24 @@ impl QuotaAutoContinueRuntime {
         client: QuotaAutoContinueClient,
     ) -> Result<Self, QuotaAutoContinueErrorCode> {
         let (mut persisted, migrated) = load_runtime_state(&path);
+        // 崩溃可能发生在 POST 发出后、结果落盘前；不能把 Running 当作可安全重试。
+        let interrupted_send = persisted.active_cycle.as_mut().is_some_and(|cycle| {
+            if cycle.phase != QuotaAutoContinuePhase::Running {
+                return false;
+            }
+            cycle.request_completed = true;
+            cycle.phase = QuotaAutoContinuePhase::Failed;
+            true
+        });
+        if interrupted_send {
+            if let Some(result) = persisted.last_automatic_result.as_mut() {
+                result.error_code = Some(QuotaAutoContinueErrorCode::Network);
+                result
+                    .details
+                    .get_or_insert_with(ResponseDetails::default)
+                    .delivery_uncertain = true;
+            }
+        }
         let interrupted_claim = persisted
             .active_cycle
             .as_mut()
@@ -595,7 +427,7 @@ impl QuotaAutoContinueRuntime {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let audit = QuotaAuditLog::new(audit_directory, Utc::now());
-        if (migrated || interrupted_claim.is_some())
+        if (migrated || interrupted_claim.is_some() || interrupted_send)
             && save_runtime_state(&path, &persisted).is_err()
         {
             return Err(QuotaAutoContinueErrorCode::Persistence);
@@ -922,6 +754,7 @@ impl QuotaAutoContinueRuntime {
         let persisted = self.persisted();
         let latest = latest_compat_result(&persisted);
         QuotaAutoContinueStatus {
+            account_id: self.client.account.as_ref().map(|a| a.id.clone()),
             enabled,
             phase: if enabled {
                 persisted.phase()
@@ -1182,7 +1015,13 @@ impl QuotaAutoContinueRuntime {
             .as_ref()
             .expect("due attempt must have a confirmed reset event")
             .clone();
+        *self
+            .client
+            .details
+            .lock()
+            .unwrap_or_else(|v| v.into_inner()) = None;
         persisted.last_automatic_result = Some(QuotaAutoContinueResult {
+            details: None,
             attempted_at: Some(now),
             success_at: None,
             error_code: None,
@@ -1256,10 +1095,15 @@ impl QuotaAutoContinueRuntime {
         }
         if let Some(result) = persisted.last_automatic_result.as_mut() {
             result.error_code = Some(error);
+            result.details = self.client.last_details();
             result.model = model.clone();
         }
         let cycle = persisted.active_cycle.as_mut().expect("same cycle exists");
-        let exhausted = cycle.consumed_slots[3];
+        let exhausted = cycle.consumed_slots[3]
+            || self
+                .client
+                .last_details()
+                .is_some_and(|d| d.delivery_uncertain);
         if exhausted {
             // +30 分钟末槽失败即为最终结案；否则 scheduler 会再次唤醒并误改成 Missed。
             cycle.request_completed = true;
@@ -1303,6 +1147,7 @@ impl QuotaAutoContinueRuntime {
             return;
         }
         if let Some(result) = persisted.last_automatic_result.as_mut() {
+            result.details = self.client.last_details();
             result.success_at = Some(now);
             result.error_code = None;
             result.model = Some(model.clone());
@@ -1376,6 +1221,7 @@ impl QuotaAutoContinueRuntime {
     pub fn record_manual_success(&self, model: String, now: DateTime<Utc>) {
         let mut persisted = self.persisted();
         persisted.last_manual_result = Some(QuotaAutoContinueResult {
+            details: self.client.last_details(),
             attempted_at: Some(now),
             success_at: Some(now),
             error_code: None,
@@ -1415,7 +1261,22 @@ impl QuotaAutoContinueRuntime {
 
     pub fn record_manual_failure(&self, failure: &SendFailure) {
         let mut persisted = self.persisted();
+        if self
+            .client
+            .last_details()
+            .is_some_and(|d| d.delivery_uncertain)
+        {
+            if let Some(cycle) = persisted
+                .active_cycle
+                .as_mut()
+                .filter(|c| c.confirmed_event.is_some())
+            {
+                cycle.request_completed = true;
+                cycle.phase = QuotaAutoContinuePhase::Failed;
+            }
+        }
         persisted.last_manual_result = Some(QuotaAutoContinueResult {
+            details: self.client.last_details(),
             attempted_at: Some(Utc::now()),
             success_at: None,
             error_code: Some(failure.code),
@@ -1634,6 +1495,8 @@ fn quota_window_fingerprint(salt: &str, window_id: &str, window_seconds: i64) ->
 
 fn auth_error_code(error: AuthError) -> QuotaAutoContinueErrorCode {
     match error {
+        AuthError::Network => QuotaAutoContinueErrorCode::Network,
+        AuthError::Persistence => QuotaAutoContinueErrorCode::Persistence,
         AuthError::MissingFile => QuotaAutoContinueErrorCode::AuthMissing,
         _ => QuotaAutoContinueErrorCode::AuthInvalid,
     }
@@ -1648,6 +1511,7 @@ fn status_error_code(status: StatusCode) -> QuotaAutoContinueErrorCode {
     }
 }
 
+#[cfg(test)]
 fn select_preferred_model(payload: &Value) -> Option<String> {
     let models = payload.get("models")?.as_array()?;
     let candidates = models
@@ -1656,11 +1520,7 @@ fn select_preferred_model(payload: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|slug| !slug.is_empty() && is_text_model(slug))
         .collect::<Vec<_>>();
-    candidates
-        .iter()
-        .find(|slug| **slug == MODEL_FALLBACK)
-        .or_else(|| candidates.first())
-        .map(|slug| (*slug).to_owned())
+    candidates.first().map(|slug| (*slug).to_owned())
 }
 
 fn is_text_model(slug: &str) -> bool {
@@ -1688,6 +1548,7 @@ enum SseSignal {
     Failed,
 }
 
+#[cfg(test)]
 fn parse_sse_line(line: &[u8]) -> SseSignal {
     let Ok(line) = std::str::from_utf8(line) else {
         return SseSignal::Continue;
@@ -1768,6 +1629,7 @@ fn migrate_v1(v1: PersistedRuntimeStateV1) -> PersistedRuntimeState {
         last_automatic_result: v1
             .last_attempt_at
             .map(|attempted_at| QuotaAutoContinueResult {
+                details: None,
                 attempted_at: Some(attempted_at),
                 success_at: v1.last_success_at,
                 error_code: v1.last_error_code,
@@ -1781,6 +1643,7 @@ fn migrate_v1(v1: PersistedRuntimeStateV1) -> PersistedRuntimeState {
         last_manual_result: if v1.last_attempt_at.is_none() {
             v1.last_success_at
                 .map(|success_at| QuotaAutoContinueResult {
+                    details: None,
                     attempted_at: None,
                     success_at: Some(success_at),
                     error_code: v1.last_error_code,
@@ -1856,7 +1719,7 @@ mod tests {
         time::SystemTime,
     };
 
-    struct MockResponse {
+    pub(super) struct MockResponse {
         status: &'static str,
         content_type: &'static str,
         body: String,
@@ -1865,7 +1728,7 @@ mod tests {
     }
 
     impl MockResponse {
-        fn json(body: &str) -> Self {
+        pub(super) fn json(body: &str) -> Self {
             Self {
                 status: "200 OK",
                 content_type: "application/json",
@@ -1875,7 +1738,7 @@ mod tests {
             }
         }
 
-        fn sse(body: &str) -> Self {
+        pub(super) fn sse(body: &str) -> Self {
             Self {
                 status: "200 OK",
                 content_type: "text/event-stream",
@@ -1885,7 +1748,7 @@ mod tests {
             }
         }
 
-        fn status(status: &'static str) -> Self {
+        pub(super) fn status(status: &'static str) -> Self {
             Self {
                 status,
                 content_type: "application/json",
@@ -1897,7 +1760,7 @@ mod tests {
     }
 
     /// 本地 TCP 服务只实现测试所需的最小 HTTP 子集，避免测试接触真实账号或外部网络。
-    fn mock_http_server(
+    pub(super) fn mock_http_server(
         responses: Vec<MockResponse>,
     ) -> (String, Receiver<String>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1997,6 +1860,7 @@ mod tests {
         window_seconds: i64,
     ) -> DashboardSnapshot {
         DashboardSnapshot {
+            account_id: None,
             status: DashboardStatus::Ready,
             account_email_masked: None,
             plan_label: None,
@@ -2020,7 +1884,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_stable_model_then_first_text_model() {
+    fn selects_first_text_model_without_a_hardcoded_preference() {
         let preferred = serde_json::json!({"models":[
             {"slug":"gpt-image-2"},
             {"slug":"gpt-5.6-sol"},
@@ -2028,7 +1892,7 @@ mod tests {
         ]});
         assert_eq!(
             select_preferred_model(&preferred).as_deref(),
-            Some("gpt-5.4")
+            Some("gpt-5.6-sol")
         );
         let first = serde_json::json!({"models":[{"slug":"gpt-image-2"},{"slug":"gpt-5.6-sol"}]});
         assert_eq!(
@@ -2100,22 +1964,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn falls_back_to_compatible_model_when_manifest_is_unavailable() {
-        let (base, _requests, server) = mock_http_server(vec![
-            MockResponse::status("503 Service Unavailable"),
-            MockResponse::sse("data: {\"type\":\"response.completed\"}\n\n"),
-        ]);
+    async fn manifest_failure_does_not_send_a_fallback_request() {
+        let (base, requests, server) =
+            mock_http_server(vec![MockResponse::status("503 Service Unavailable")]);
         let client = QuotaAutoContinueClient::with_endpoints(
             format!("{base}/models"),
             format!("{base}/responses"),
         );
-
-        let selected = client
+        let error = client
             .send_greeting_with_credentials(mock_credentials(), None)
             .await
-            .unwrap();
-        assert_eq!(selected, MODEL_FALLBACK);
+            .unwrap_err();
+        assert_eq!(error.code, QuotaAutoContinueErrorCode::ServiceUnavailable);
+        assert!(error.model.is_none());
+        assert!(requests
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .starts_with("GET"));
         server.join().unwrap();
+        assert!(requests.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2195,14 +2062,12 @@ mod tests {
     async fn enforces_total_request_timeout_without_retrying_inside_one_slot() {
         let mut delayed_manifest = MockResponse::json(r#"{"models":[{"slug":"text-model"}]}"#);
         delayed_manifest.delay_millis = 800;
-        let (base, requests, server) = mock_http_server(vec![
-            delayed_manifest,
-            MockResponse::sse("data: {\"type\":\"response.completed\"}\n\n"),
-        ]);
+        let (base, requests, server) = mock_http_server(vec![delayed_manifest]);
         let client = QuotaAutoContinueClient::with_endpoints(
             format!("{base}/models"),
             format!("{base}/responses"),
-        );
+        )
+        .with_test_timeout(Duration::from_millis(250));
         let failure = client
             .send_greeting_with_credentials(mock_credentials(), None)
             .await
@@ -2235,6 +2100,47 @@ mod tests {
             detected_at,
         );
         runtime.pending_reset_event(detected_at).unwrap()
+    }
+
+    #[test]
+    fn interrupted_or_uncertain_send_never_rearms_automatic_slots() {
+        let path = temp_path("interrupted-send");
+        let now = Utc::now();
+        let runtime = QuotaAutoContinueRuntime::new(path.clone()).unwrap();
+        establish_recovered_reset(&runtime, true, now + ChronoDuration::hours(1), now);
+        assert!(runtime.claim_due_attempt(true, now).unwrap().is_some());
+        drop(runtime);
+        let recovered = QuotaAutoContinueRuntime::new(path.clone()).unwrap();
+        assert!(recovered.status(true, now).next_attempt_at.is_none());
+        assert!(
+            recovered
+                .persisted()
+                .last_automatic_result
+                .as_ref()
+                .unwrap()
+                .details
+                .as_ref()
+                .unwrap()
+                .delivery_uncertain
+        );
+        // 手动请求失联同样不能让已确认事件由后台接着重发。
+        *recovered.client.details.lock().unwrap() = Some(ResponseDetails {
+            delivery_uncertain: true,
+            ..Default::default()
+        });
+        recovered.record_manual_failure(&SendFailure {
+            code: QuotaAutoContinueErrorCode::Network,
+            model: Some("test".into()),
+        });
+        assert!(
+            recovered
+                .persisted()
+                .active_cycle
+                .as_ref()
+                .unwrap()
+                .request_completed
+        );
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -2472,6 +2378,7 @@ mod tests {
         cycle.phase = QuotaAutoContinuePhase::WaitingForRetry;
         cycle.consumed_slots[0] = true;
         state.last_automatic_result = Some(QuotaAutoContinueResult {
+            details: None,
             attempted_at: Some(at(1_000)),
             success_at: None,
             error_code: Some(QuotaAutoContinueErrorCode::Network),

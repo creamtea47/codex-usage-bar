@@ -156,6 +156,10 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Refresh usage' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Open settings' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Quit app' })).toBeTruthy();
+    expect(screen.getAllByRole('button').slice(0, 4).map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Refresh usage', 'Switch viewed account', 'Open settings', 'Quit app',
+    ]);
+    expect(screen.queryByRole('combobox')).toBeNull();
     expect(screen.getByRole('region', { name: 'Quota windows' })).toBeTruthy();
     expect(screen.getByLabelText('Usage service online')).toBeTruthy();
     expect(document.documentElement.lang).toBe('en');
@@ -360,9 +364,8 @@ describe('App', () => {
     expect(getComputedStyle(suggestions).height).toBe('76px');
     expect(getComputedStyle(suggestions).overflowY).toBe('auto');
     expect(getComputedStyle(suggestionRows[0]).whiteSpace).toBe('nowrap');
-    expect(getComputedStyle(suggestionRows[0]).textOverflow).toBe('ellipsis');
-    fireEvent.mouseOver(suggestionRows[0]);
-    expect((await screen.findByRole('tooltip')).textContent).toBe('建议（周限额）：预计可撑到重置');
+    fireEvent.mouseOver(suggestionRows[1]);
+    expect((await screen.findByRole('tooltip')).textContent).toMatch(/^建议（月限额）：预计 01\/07 10:30 耗尽（约 .*比重置提前 21小时30分）$/);
     expect(screen.queryByText(/建议（短周期限额）/)).toBeNull();
     expect(screen.queryByText(/建议（稳定额度）/)).toBeNull();
     expect(screen.queryByText(/建议（无效预测）/)).toBeNull();

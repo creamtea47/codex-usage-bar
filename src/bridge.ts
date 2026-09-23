@@ -1,3 +1,4 @@
+import { currentAccountId } from './accountsBridge';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -15,22 +16,22 @@ import type {
 
 /** 所有敏感 I/O 都经由这层调用 Rust command；前端不直接读取文件或发起认证请求。 */
 export const usageBridge = {
-  getDashboard: () => invoke<DashboardSnapshot>('get_dashboard'),
-  refreshDashboard: () => invoke<DashboardSnapshot>('refresh_dashboard'),
+  getDashboard: () => invoke<DashboardSnapshot>('get_dashboard', { accountId: currentAccountId() }),
+  refreshDashboard: () => invoke<DashboardSnapshot>('refresh_dashboard', { accountId: currentAccountId() }),
   getSettings: () => invoke<Settings>('get_settings'),
   saveSettings: (settings: Settings) => invoke<Settings>('save_settings', { settings }),
   setNotificationsEnabled: (enabled: boolean) =>
     invoke<NotificationEnableResult>('set_notifications_enabled', { enabled }),
   sendTestNotification: () => invoke<void>('send_test_notification'),
   getUsageHistory: (request: UsageHistoryRequest) =>
-    invoke<UsageHistoryResponse>('get_usage_history', { request }),
+    invoke<UsageHistoryResponse>('get_usage_history', { request, accountId: currentAccountId() }),
   setHistoryEnabled: (enabled: boolean) => invoke<Settings>('set_history_enabled', { enabled }),
   getQuotaAutoContinueStatus: () =>
-    invoke<QuotaAutoContinueStatus>('get_quota_auto_continue_status'),
-  setQuotaAutoContinueEnabled: (enabled: boolean) =>
-    invoke<QuotaAutoContinueStatus>('set_quota_auto_continue_enabled', { enabled }),
-  testQuotaAutoContinue: () => invoke<QuotaAutoContinueStatus>('test_quota_auto_continue'),
-  clearUsageHistory: () => invoke<void>('clear_usage_history'),
+    invoke<QuotaAutoContinueStatus>('get_quota_auto_continue_status', { accountId: currentAccountId() }),
+  setQuotaAutoContinueEnabled: (enabled: boolean, accountId = currentAccountId()) =>
+    invoke<QuotaAutoContinueStatus>('set_quota_auto_continue_enabled', { enabled, accountId }),
+  testQuotaAutoContinue: () => invoke<QuotaAutoContinueStatus>('test_quota_auto_continue', { accountId: currentAccountId() }),
+  clearUsageHistory: () => invoke<void>('clear_usage_history', { accountId: currentAccountId() }),
   reportSettingsUiFault: (code: SettingsUiFaultCode) =>
     invoke<void>('report_settings_ui_fault', { faultCode: code }),
   getDiagnostics: () => invoke<string>('get_diagnostics'),
@@ -56,7 +57,7 @@ export const usageBridge = {
   listenForSettingsNavigation: (handler: (section: 'about') => void) =>
     listen<'about'>('settings-navigate', (event) => handler(event.payload)),
   listenForUsageHistory: (handler: () => void) =>
-    listen('usage-history-updated', () => handler()),
+    listen<{ accountId?: string | null }>('usage-history-updated', (event) => { if (!event.payload?.accountId || event.payload.accountId === currentAccountId()) handler(); }),
   listenForQuotaAutoContinue: (handler: (status: QuotaAutoContinueStatus) => void) =>
-    listen<QuotaAutoContinueStatus>('quota-auto-continue-updated', (event) => handler(event.payload)),
+    listen<QuotaAutoContinueStatus>('quota-auto-continue-updated', (event) => { if (!event.payload.accountId || event.payload.accountId === currentAccountId()) handler(event.payload); }),
 };

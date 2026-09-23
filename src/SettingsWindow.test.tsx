@@ -229,7 +229,7 @@ describe('SettingsWindow', () => {
     await waitFor(() => expect(windowMocks.setTheme).toHaveBeenLastCalledWith(null));
   });
 
-  it('provides seven ordered sidebar categories and keeps data settings focused on refresh and privacy', async () => {
+  it('provides eight ordered sidebar categories and keeps data settings focused on refresh and privacy', async () => {
     await renderLoaded();
 
     expect(screen.getByRole('button', { name: '显示' })).toBeTruthy();
@@ -239,7 +239,8 @@ describe('SettingsWindow', () => {
     expect(screen.getByRole('button', { name: '额度自动接续' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '启动' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '关于与更新' })).toBeTruthy();
-    expect(screen.getAllByRole('button').slice(0, 7).map((button) => button.textContent)).toEqual([
+    expect(screen.getAllByRole('button').slice(0, 8).map((button) => button.textContent)).toEqual([
+      '账号管理',
       '显示',
       '数据与刷新',
       '通知',

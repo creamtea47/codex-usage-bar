@@ -1,9 +1,12 @@
+import { accountsBridge } from './accountsBridge';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useState, type ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TrendsPage from './TrendsPage';
 import type { UsageHistoryRequest, UsageHistoryResponse } from './types';
+
+vi.mock('./accountsBridge', () => ({ currentAccountId: () => null, accountsBridge: { analytics: vi.fn().mockResolvedValue([]) } }));
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
@@ -94,6 +97,8 @@ vi.mock('react-i18next', async (importOriginal) => {
 });
 
 vi.mock('recharts', () => ({
+  usePlotArea: () => undefined,
+  useXAxisInverseDataSnapScale: () => undefined,
   ResponsiveContainer: ({ children }: { children: ReactNode }) => (
     <div data-testid="responsive-chart">{children}</div>
   ),
@@ -106,6 +111,7 @@ vi.mock('recharts', () => ({
     <path data-testid="trend-area" data-connect-nulls={String(connectNulls)} />
   ),
   CartesianGrid: () => <g />,
+  ReferenceArea: () => <rect data-testid="selection-area" />,
   ReferenceLine: ({ label }: { label?: { value?: ReactNode } }) => (
     <text data-testid="reset-marker">{label?.value}</text>
   ),
@@ -208,6 +214,30 @@ function renderPage(options: RenderOptions = {}) {
 describe('TrendsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(accountsBridge.analytics<unknown>).mockResolvedValue([]);
+  });
+
+  it('selects two endpoints using the keyboard and clears without stale range results', async () => {
+    const analyticsMock = vi.mocked(accountsBridge.analytics<unknown>);
+    analyticsMock.mockImplementation(async (request) => request.kind === 'range' ? {
+      startAt: request.startAt, endAt: request.endAt, durationSeconds: 3600,
+      firstRemainingPercent: 80, lastRemainingPercent: 70, consumedPercent: 90,
+      cycleCount: 2, sampleCount: 4, partial: false, bucketSeconds: 0,
+    } : []);
+    const precise = structuredClone(populatedHistory);
+    precise.series[0].points = [
+      { sampledAt: '2030-01-01T01:00:00.123456Z', remainingPercent: 80, breakBefore: true },
+      { sampledAt: '2030-01-01T02:00:00.123456Z', remainingPercent: 70, breakBefore: false },
+    ];
+    renderPage({ getUsageHistory: async () => precise });
+    const chart = await screen.findByRole('group', { name: 'Weekly limit history chart' });
+    fireEvent.keyDown(chart, { key: 'Enter' });
+    fireEvent.keyDown(chart, { key: 'ArrowRight' });
+    fireEvent.keyDown(chart, { key: 'Enter' });
+    await waitFor(() => expect(analyticsMock).toHaveBeenCalledWith(expect.objectContaining({ kind: 'range', windowId: 'private-account@example.com', startAt: precise.series[0].points[0].sampledAt, endAt: precise.series[0].points[1].sampledAt }), null));
+    expect(screen.getByTestId('selection-area')).toBeTruthy();
+    fireEvent.keyDown(chart, { key: 'Escape' });
+    expect(screen.queryByTestId('selection-area')).toBeNull();
   });
 
   it('renders sanitized per-window history, a reset break, metrics, and forecast', async () => {
@@ -222,7 +252,7 @@ describe('TrendsPage', () => {
     expect(screen.getByText('Expected to last until reset')).toBeTruthy();
     expect(screen.queryByText('private-account@example.com')).toBeNull();
     expect(screen.getByRole('article', { name: 'Weekly limit trend' })).toBeTruthy();
-    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Weekly limit history chart' })).toBeTruthy();
     expect(screen.getByTestId('area-chart').getAttribute('data-point-count')).toBe('4');
     expect(screen.getByTestId('trend-area').getAttribute('data-connect-nulls')).toBe('false');
     expect(screen.getByTestId('reset-marker').textContent).toBe('Reset');
@@ -411,7 +441,7 @@ describe('TrendsPage', () => {
     await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(false));
     expect(screen.getByText('Collection is paused. Existing history remains available.')).toBeTruthy();
     expect(screen.getByText('Weekly limit')).toBeTruthy();
-    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Weekly limit history chart' })).toBeTruthy();
     expect(screen.getByText(/3 samples/)).toBeTruthy();
     expect(screen.getByText('Expected to last until reset')).toBeTruthy();
     expect(getUsageHistory).toHaveBeenCalledTimes(1);
@@ -435,14 +465,14 @@ describe('TrendsPage', () => {
     await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(false));
     expect(await screen.findByText('Collection paused.')).toBeTruthy();
     expect(screen.getByText('Weekly limit')).toBeTruthy();
-    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Weekly limit history chart' })).toBeTruthy();
 
     fireEvent.click(collectionSwitch);
     await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(true));
     expect(await screen.findByText('Collection enabled.')).toBeTruthy();
     expect(onSetHistoryEnabled.mock.calls).toEqual([[false], [true]]);
     expect(screen.getByText('Weekly limit')).toBeTruthy();
-    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Weekly limit history chart' })).toBeTruthy();
     expect(screen.getByText(/3 samples/)).toBeTruthy();
     expect(getUsageHistory).toHaveBeenCalledTimes(1);
   });
@@ -517,7 +547,7 @@ describe('TrendsPage', () => {
     await act(async () => finishEnable?.());
     await waitFor(() => expect((collectionSwitch as HTMLInputElement).checked).toBe(true));
     expect(screen.getByText('Weekly limit')).toBeTruthy();
-    expect(screen.getByRole('img', { name: 'Weekly limit history chart' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Weekly limit history chart' })).toBeTruthy();
     expect(getUsageHistory).toHaveBeenCalledTimes(1);
   });
 

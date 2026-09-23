@@ -33,10 +33,10 @@ describe('usageBridge', () => {
     await usageBridge.getUsageHistory(customRequest);
 
     expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'get_usage_history', {
-      request: presetRequest,
+      request: presetRequest, accountId: null,
     });
     expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'get_usage_history', {
-      request: customRequest,
+      request: customRequest, accountId: null,
     });
   });
 
@@ -57,9 +57,9 @@ describe('usageBridge', () => {
     await usageBridge.testQuotaAutoContinue();
     await usageBridge.listenForQuotaAutoContinue(handler);
 
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'get_quota_auto_continue_status');
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'set_quota_auto_continue_enabled', { enabled: true });
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, 'test_quota_auto_continue');
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'get_quota_auto_continue_status', { accountId: null });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'set_quota_auto_continue_enabled', { enabled: true, accountId: null });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, 'test_quota_auto_continue', { accountId: null });
     expect(tauriMocks.listen).toHaveBeenCalledWith('quota-auto-continue-updated', expect.any(Function));
   });
 });

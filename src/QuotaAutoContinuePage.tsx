@@ -1,3 +1,6 @@
+import { ModelPicker } from './AccountsPage';
+import { useAccounts } from './accountsBridge';
+import { ResponsePanel } from './ResponsePanel';
 import AutorenewRoundedIcon from '@mui/icons-material/AutorenewRounded';
 import {
   Alert,
@@ -38,7 +41,7 @@ interface QuotaAutoContinuePageProps {
 
 /**
  * 真实请求操作始终先在本页完成二次确认；父组件只负责调用设置窗口限定的 Rust IPC。
- * 页面仅展示脱敏排期与结果类别，不接收账号、Token 或模型回复。
+ * 页面展示脱敏排期和有界纯文本回复，认证材料不进入前端。
  */
 export default function QuotaAutoContinuePage({
   enabled,
@@ -51,6 +54,8 @@ export default function QuotaAutoContinuePage({
   onTest,
 }: QuotaAutoContinuePageProps) {
   const { t } = useTranslation();
+  const accounts = useAccounts();
+  const account = accounts.accounts.find((a) => a.id === accounts.selectedId);
   const [confirmAction, setConfirmAction] = useState<'enable' | 'test' | null>(null);
   const busy = disabled || isChanging || isTesting;
   const phase = status?.phase ?? (enabled ? 'waitingForWeeklyWindow' : 'disabled');
@@ -78,12 +83,13 @@ export default function QuotaAutoContinuePage({
           </Typography>
         </Box>
 
+        {account && <Paper variant="outlined" sx={{ p: 2 }}><ModelPicker key={`${account.id}-${account.model ?? ''}`} account={account} disabled={busy} /></Paper>}
         <Paper variant="outlined" sx={{ p: 2 }}>
           <Stack spacing={1.25}>
             <FormControlLabel
               control={
                 <Switch
-                  checked={status?.enabled ?? enabled}
+                  checked={account?.autoContinue ?? status?.enabled ?? enabled}
                   disabled={busy}
                   onChange={(event) => {
                     if (event.target.checked) setConfirmAction('enable');
@@ -152,6 +158,8 @@ export default function QuotaAutoContinuePage({
           </Stack>
         </Paper>
 
+        <ResponsePanel result={automaticResult} automatic />
+        <ResponsePanel result={status?.lastManualResult ?? null} automatic={false} />
         <Alert severity="info" variant="outlined">
           {t('settings.quotaAutoContinue.runtimeNotice')}
         </Alert>

@@ -14,7 +14,7 @@ A compact floating card for Windows and macOS, with optional quota auto-continua
 
 English | [简体中文](README-zh.md)
 
-<img src="docs/images/dashboard-dark-en.png" alt="Dark quota card with remaining limits, reset countdowns, and pacing advice" width="520">
+<img src="docs/images/compact-main-en.png" alt="Compact quota card with account switching, remaining quota, and a short exhaustion forecast" width="460">
 
 </div>
 
@@ -23,6 +23,8 @@ English | [简体中文](README-zh.md)
 | Feature | What it does |
 | --- | --- |
 | **Desktop quota card** | See remaining percentages, reset times, and countdowns for every quota window. Includes scheduled refresh, always-on-top, dragging, size locking, and close-to-tray. |
+| **Multiple accounts** | Import managed auth.json copies, monitor accounts independently, identify the Codex login file, and switch the viewed account from the title bar or Settings sidebar. |
+| **Ranges and cycles** | Select two chart points to measure consumption across resets, then expand cycle rows into retained samples. |
 | **Reset and credit alerts** | Get system notifications when quota resets or reset credits arrive, plus low-quota alerts, pace warnings, and quiet hours. |
 | **Quota trend collection** | Track remaining quota percentages over 24 hours, 7 days, 30 days, all history, or custom dates, with today's consumption and local forecasts. |
 | **Quota auto-continuation** | Optionally send a minimal request when weekly quota resets to help start the next cycle even during light usage. Inspect the schedule, trigger, and results. |
@@ -67,16 +69,18 @@ Open **Settings → Trends**. Local collection defaults on and records successfu
 
 ### Auto-continuation for the next quota cycle
 
-Open **Settings → Quota Auto-Continuation**, enable it, and confirm. The app watches the current account's weekly window (6–8 days) and sends a fixed minimal `hi` request after detecting quota recovery or reaching the reset deadline.
+Open **Settings → Quota Auto-Continuation**, select an account, enable it, and confirm. For each enabled account, the app watches its weekly window (6–8 days) and sends a fixed minimal `hi` request after detecting quota recovery or reaching the reset deadline.
 
 - Defaults off. Enabling it sends real model requests that may consume a small amount of quota. It continues quota cycles; it does not renew a paid subscription.
-- After an unsuccessful initial attempt, retry slots are +1, +5, and +30 minutes from the reset event. A successful event is not sent again.
+- Retryable failures use slots at +1, +5, and +30 minutes from the reset event. Successful or uncertain-delivery requests are not automatically sent again.
 - The computer must be awake, online, and running the app (the tray is fine). Resuming more than 30 minutes late misses the cycle. There is no forced wake, so timely continuation cannot be guaranteed in every situation.
 - **Test now** requires a second confirmation and sends once without retries. Autostart and close-to-tray can help keep the app available.
 
 ## Screenshots
 
-Captured from the current v0.6.2 UI components in a browser with synthetic example data. These contain no real account or usage data and do not demonstrate native windows, OS notification delivery, or completed continuation requests. See the [capture notes](docs/screenshots.md).
+The compact card and account screenshots show v0.7.0; the additional settings illustrations below are from v0.6.2. All use synthetic example data and do not demonstrate native windows, notification delivery, or completed continuation requests. See the [capture notes](docs/screenshots.md).
+
+![v0.7.0 compact card](docs/images/compact-main-en.png)
 
 | Light quota card | Dark quota card |
 | --- | --- |
@@ -103,11 +107,17 @@ Captured from the current v0.6.2 UI components in a browser with synthetic examp
 
 </details>
 
+## Accounts and detailed usage
+
+Manage multiple auth.json copies with per-account monitoring and a shared display selector. Select two chart points for interval consumption, expand each reset cycle into retained samples, and see estimated exhaustion relative to reset. Each account selects its continuation model and retains the latest automatic and manual response. Applying/restoring Codex credentials requires Codex to be closed and preserves custom provider routing.
+
+Reset credits show held and currently usable counts separately. The nearest expiry stays visible, with each credit's expiry in the tooltip; eligibility comes from the service. The app only reads credit details and never redeems credits. Main-card forecasts stay short, with time-to-exhaustion and time-before-reset in the tooltip.
+
 ## Privacy and local data
 
-Only the local Rust backend reads credentials; the frontend never receives tokens or authentication files. Quota reads, trends, and notifications are read-only. Auto-continuation sends requests only after opt-in or test confirmation, and never automatically consumes reset credits. The app does not refresh tokens or modify `auth.json`.
+Only the local Rust backend reads credentials; the frontend never receives tokens or authentication files. Quota reads, trends, and notifications are read-only. Auto-continuation sends requests only after opt-in or test confirmation, and never automatically consumes reset credits. Managed accounts support OAuth token refresh. The separate **Apply to Codex** action replaces Codex credentials while preserving provider configuration.
 
-Credentials are searched beside the executable, then in `%CODEX_HOME%/auth.json`, then in `.codex/auth.json` under your home directory. If authentication expires, sign in to Codex again and refresh.
+Credentials are searched beside the executable, then in `%CODEX_HOME%/auth.json`, then in `.codex/auth.json` under your home directory. Import additional credentials in **Accounts**; sign in again and update the managed copy when refresh is unavailable.
 
 History, settings, and sanitized continuation state remain local. Runtime logs are retained for 14 days. See the [detailed guide](docs/guide.md) for access boundaries, storage paths, sampling policies, and troubleshooting.
 

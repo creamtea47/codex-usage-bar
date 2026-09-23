@@ -1,3 +1,5 @@
+import AccountsPage, { AccountSelector } from './AccountsPage';
+import { useAccounts, currentAccountId } from './accountsBridge';
 import BugReportOutlinedIcon from '@mui/icons-material/BugReportOutlined';
 import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
@@ -69,7 +71,7 @@ import {
 
 const TrendsPage = lazy(() => import('./TrendsPage'));
 
-type SettingsSection = 'display' | 'data' | 'notifications' | 'trends' | 'quota-auto-continue' | 'startup' | 'about';
+type SettingsSection = 'accounts' | 'display' | 'data' | 'notifications' | 'trends' | 'quota-auto-continue' | 'startup' | 'about';
 type SettingsLoadState = 'loading' | 'ready' | 'error';
 type SettingsUpdater = Partial<Settings> | ((current: Settings) => Settings);
 type FeedbackKey =
@@ -133,6 +135,7 @@ const refreshOptions = [60, 180, 300, 600, 1800] as const;
 const navigation: Array<{
   id: SettingsSection;
   labelKey:
+    | 'feature.accounts'
     | 'settings.nav.display'
     | 'settings.nav.data'
     | 'settings.nav.notifications'
@@ -142,6 +145,7 @@ const navigation: Array<{
     | 'settings.nav.about';
   icon: React.ReactElement;
 }> = [
+  { id: 'accounts', labelKey: 'feature.accounts', icon: <InfoOutlinedIcon fontSize="small" /> },
   { id: 'display', labelKey: 'settings.nav.display', icon: <PaletteOutlinedIcon fontSize="small" /> },
   { id: 'data', labelKey: 'settings.nav.data', icon: <RefreshRoundedIcon fontSize="small" /> },
   {
@@ -184,6 +188,7 @@ function releaseNotesUrl(version: string | null | undefined): string {
 
 /** Independent settings window; all sensitive operations remain in label-gated Rust commands. */
 export default function SettingsWindow() {
+  const { selectedId } = useAccounts();
   const { t, i18n } = useTranslation();
   const [settingsView, setSettingsView] = useState<SettingsViewState>({
     settings: defaultSettings,
@@ -203,6 +208,7 @@ export default function SettingsWindow() {
   const [isChangingAutostart, setIsChangingAutostart] = useState(false);
   const [isSendingTestNotification, setIsSendingTestNotification] = useState(false);
   const [quotaAutoContinueStatus, setQuotaAutoContinueStatus] = useState<QuotaAutoContinueStatus | null>(null);
+
   const [isChangingQuotaAutoContinue, setIsChangingQuotaAutoContinue] = useState(false);
   const [isTestingQuotaAutoContinue, setIsTestingQuotaAutoContinue] = useState(false);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -347,7 +353,7 @@ export default function SettingsWindow() {
       disposed = true;
       removeListeners.splice(0).forEach((remove) => remove());
     };
-  }, [applySettingsSnapshot]);
+  }, [applySettingsSnapshot, selectedId]);
 
   const activeTheme = useMemo(() => resolveTheme(settings.theme, prefersDark), [settings.theme, prefersDark]);
   const muiTheme = useMemo(() => createUsageTheme(activeTheme), [activeTheme]);
@@ -467,13 +473,15 @@ export default function SettingsWindow() {
     if (isChangingQuotaAutoContinue) return;
     setIsChangingQuotaAutoContinue(true);
     try {
+      const expectedAccount = currentAccountId();
       const status = await enqueueSettingsMutation(async (current) => {
-        const nextStatus = await usageBridge.setQuotaAutoContinueEnabled(enabled);
+        const nextStatus = await (expectedAccount ? usageBridge.setQuotaAutoContinueEnabled(enabled, expectedAccount) : usageBridge.setQuotaAutoContinueEnabled(enabled));
         return {
           settings: { ...current, quotaAutoContinueEnabled: nextStatus.enabled },
           value: nextStatus,
         };
       });
+      if (currentAccountId() !== expectedAccount) return;
       setQuotaAutoContinueStatus(status);
       setFeedback({
         key: enabled
@@ -491,8 +499,11 @@ export default function SettingsWindow() {
   const testQuotaAutoContinue = async () => {
     if (isTestingQuotaAutoContinue) return;
     setIsTestingQuotaAutoContinue(true);
+    const expectedAccount = currentAccountId();
     try {
-      setQuotaAutoContinueStatus(await usageBridge.testQuotaAutoContinue());
+      const result = await usageBridge.testQuotaAutoContinue();
+      if (currentAccountId() !== expectedAccount) return;
+      setQuotaAutoContinueStatus(result);
       setFeedback({ key: 'settings.quotaAutoContinue.feedback.testSent', severity: 'success' });
     } catch {
       setFeedback({ key: 'settings.quotaAutoContinue.feedback.testFailed', severity: 'error' });
@@ -587,7 +598,7 @@ export default function SettingsWindow() {
       <Box
         component="main"
         data-theme-mode={activeTheme}
-        sx={{ display: 'flex', width: '100%', minHeight: '100vh', bgcolor: 'background.paper', color: 'text.primary' }}
+        sx={{ display: 'flex', width: '100%', height: '100dvh', overflow: 'hidden', bgcolor: 'background.paper', color: 'text.primary' }}
       >
         <Drawer
           variant="permanent"
@@ -596,6 +607,8 @@ export default function SettingsWindow() {
             flexShrink: 0,
             '& .MuiDrawer-paper': {
               width: drawerWidth,
+              display: 'flex',
+              flexDirection: 'column',
               boxSizing: 'border-box',
               borderRight: 1,
               borderColor: 'divider',
@@ -603,7 +616,7 @@ export default function SettingsWindow() {
             },
           }}
         >
-          <Toolbar sx={{ minHeight: 72, px: 2 }}>
+          <Toolbar sx={{ minHeight: 72, px: 2, flexShrink: 0 }}>
             <Stack direction="row" spacing={1} sx={{ alignItems: 'center', minWidth: 0 }}>
               <SettingsSuggestOutlinedIcon color="primary" />
               <Box sx={{ minWidth: 0 }}>
@@ -617,7 +630,7 @@ export default function SettingsWindow() {
             </Stack>
           </Toolbar>
           <Divider />
-          <List aria-label={t('settings.navigationAria')} disablePadding sx={{ px: 1, py: 1 }}>
+          <List aria-label={t('settings.navigationAria')} disablePadding sx={{ px: 1, py: 1, flex: 1, minHeight: 0, overflowY: 'auto' }}>
             {navigation.map((item) => {
               const label = t(item.labelKey);
               return (
@@ -636,6 +649,10 @@ export default function SettingsWindow() {
               );
             })}
           </List>
+          <Divider />
+          <Box component="section" aria-label={t('feature.selected')} sx={{ p: 1.5, flexShrink: 0 }}>
+            <AccountSelector sidebar />
+          </Box>
         </Drawer>
 
         <Box
@@ -646,9 +663,9 @@ export default function SettingsWindow() {
           <Box
             sx={{
               width: '100%',
-              maxWidth: activeSection === 'trends' ? 980 : 680,
+              maxWidth: activeSection === 'trends' ? 980 : activeSection === 'accounts' ? 1000 : 680,
               mx: 'auto',
-              px: { xs: 2, sm: 4 },
+              px: { xs: 2, sm: activeSection === 'accounts' ? 3 : 4 },
               py: 4,
             }}
           >
@@ -659,6 +676,7 @@ export default function SettingsWindow() {
               </Alert>
             )}
 
+            {activeSection === 'accounts' && <AccountsPage />}
             {activeSection === 'display' && (
               <Stack spacing={2.5}>
                 <Box>
@@ -787,7 +805,7 @@ export default function SettingsWindow() {
                 recoveryRevision={trendsOperationRevision}
               >
                 <Suspense fallback={<LinearProgress aria-label={t('trends.loading')} />}>
-                  <TrendsPage
+                  <TrendsPage key={selectedId ?? 'legacy'}
                     historyEnabled={settings.historyEnabled}
                     getUsageHistory={usageBridge.getUsageHistory}
                     onSetHistoryEnabled={updateHistoryEnabled}
@@ -799,9 +817,9 @@ export default function SettingsWindow() {
             )}
 
             {activeSection === 'quota-auto-continue' && (
-              <QuotaAutoContinuePage
+              <QuotaAutoContinuePage key={selectedId ?? 'legacy'}
                 enabled={settings.quotaAutoContinueEnabled}
-                status={quotaAutoContinueStatus}
+                status={quotaAutoContinueStatus?.accountId && quotaAutoContinueStatus.accountId !== selectedId ? null : quotaAutoContinueStatus}
                 language={settings.language}
                 disabled={settingsControlsDisabled}
                 isChanging={isChangingQuotaAutoContinue}

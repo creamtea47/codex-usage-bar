@@ -1,3 +1,4 @@
+import type { ResponseDetails } from './accountTypes';
 export type DashboardStatus = 'loading' | 'ready' | 'stale' | 'error';
 export type Theme = 'system' | 'light' | 'dark';
 export type Language = 'system' | 'zh-CN' | 'en';
@@ -39,10 +40,11 @@ export interface QuotaWindow {
 }
 
 export interface DashboardSnapshot {
+  accountId?: string | null;
   status: DashboardStatus;
   /**
    * 仅由 Rust 从成功响应中提取并脱敏后的展示邮箱，例如 j***@example.com。
-   * 前端绝不会接触认证文件、Token、请求头或原始账号资料。
+   * 本字段只供主卡脱敏展示；设置窗口可从 AccountDetails 读取白名单身份信息。
    */
   accountEmailMasked: string | null;
   planLabel: string | null;
@@ -139,6 +141,7 @@ export type QuotaAutoContinueTriggerReason = 'quotaRecovered' | 'deadlineReached
  * slotIndex 使用后端的 0-based 尝试槽；手动测试没有槽位，因此为 null。
  */
 export interface QuotaAutoContinueResult {
+  details?: ResponseDetails | null;
   attemptedAt: string | null;
   successAt: string | null;
   errorCode: QuotaAutoContinueErrorCode | null;
@@ -146,8 +149,9 @@ export interface QuotaAutoContinueResult {
   slotIndex: number | null;
 }
 
-/** 自动接续状态严格限制为脱敏排期字段，不向前端暴露账号或请求内容。 */
+/** 设置窗口可获取该账号的排期及最近回复；认证材料始终留在 Rust 边界内。 */
 export interface QuotaAutoContinueStatus {
+  accountId?: string | null;
   enabled: boolean;
   phase: QuotaAutoContinuePhase;
   targetResetAt: string | null;
@@ -181,6 +185,7 @@ export interface UsageHistoryPoint {
 }
 
 export interface UsageHistorySeries {
+  currentResetAt?: string | null;
   /** Anonymous locally salted stream key; used only as a React correlation key and never rendered. */
   windowId: string;
   windowSeconds: number;
@@ -193,6 +198,7 @@ export interface UsageHistorySeries {
 }
 
 export interface UsageHistoryResponse {
+  accountId?: string | null;
   request: UsageHistoryRequest;
   appliedStartAt: string;
   appliedEndAtExclusive: string;

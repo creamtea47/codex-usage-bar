@@ -1,3 +1,6 @@
+import { AccountSwitcher } from './AccountsPage';
+import { useAccounts } from './accountsBridge';
+import { forecastText } from './forecastPresentation';
 import ArrowCircleUpRoundedIcon from '@mui/icons-material/ArrowCircleUpRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
@@ -88,6 +91,11 @@ function formatCountdown(nextRefreshAt: string | null, now: number): string {
  * 前端只消费 Rust 传回的已脱敏数据，避免认证边界被跨窗口 UI 打破。
  */
 export default function App() {
+  const { selectedId } = useAccounts();
+  return <Dashboard key={selectedId ?? "legacy"} />;
+}
+
+function Dashboard() {
   const { t, i18n } = useTranslation();
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(loadingSnapshot);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
@@ -213,9 +221,7 @@ export default function App() {
           quotaWindow.forecast.exhaustsAt &&
           Number.isFinite(new Date(quotaWindow.forecast.exhaustsAt).getTime())
         ) {
-          forecastMessage = t('quota.forecast.exhaustsAt', {
-            date: formatDateTime(quotaWindow.forecast.exhaustsAt, language),
-          });
+          forecastMessage = t('quota.forecast.exhaustsAt', { date: formatDateTime(quotaWindow.forecast.exhaustsAt, language) });
         }
         if (!forecastMessage) return [];
 
@@ -229,9 +235,12 @@ export default function App() {
                   duration: formatDuration(quotaWindow.windowSeconds, language),
                 }));
         const message = t('quota.forecast.suggestion', { label, forecast: forecastMessage });
-        return [{ id: quotaWindow.id, message }];
+        const detail = quotaWindow.forecast.status === 'exhaustsBeforeReset'
+          ? t('quota.forecast.suggestion', { label, forecast: forecastText(quotaWindow.forecast, quotaWindow.resetAt, now, language) })
+          : message;
+        return [{ id: quotaWindow.id, message, detail }];
       }),
-    [language, snapshot.quotaWindows, t],
+    [language, snapshot.quotaWindows, t, now],
   );
 
   const refresh = async () => {
@@ -367,6 +376,7 @@ export default function App() {
                   </IconButton>
                 </span>
               </Tooltip>
+              <AccountSwitcher />
               <Tooltip title={t('app.settings')}>
                 <IconButton aria-label={t('app.openSettings')} color="inherit" size="small" onClick={() => void openSettings()}>
                   <SettingsOutlinedIcon fontSize="small" />
@@ -464,10 +474,11 @@ export default function App() {
                 py: 1,
               }}
             >
-              {forecastSuggestions.map(({ id, message }) => (
-                <Tooltip key={id} title={message} placement="top">
+              {forecastSuggestions.map(({ id, message, detail }) => (
+                <Tooltip key={id} title={detail} placement="top" describeChild>
                   <Typography
                     data-forecast-suggestion
+                    tabIndex={0}
                     noWrap
                     variant="caption"
                     color="text.secondary"

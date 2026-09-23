@@ -4,13 +4,13 @@
 
 ## Usage
 
-The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry immediately, including while an automatic failure-backoff deadline is pending. The adjacent **Settings** button opens a separate window organized into **Display**, **Data & refresh**, **Notifications**, **Trends**, **Quota Auto-Continuation**, **Startup**, and **About & updates**.
+The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry immediately, including while an automatic failure-backoff deadline is pending. The adjacent **Settings** button opens a separate window organized into **Accounts**, **Display**, **Data & refresh**, **Notifications**, **Trends**, **Quota Auto-Continuation**, **Startup**, and **About & updates**.
 
 **Display** controls language, theme, always-on-top, and position / size lock. **Data & refresh** contains the fixed refresh interval and privacy explanation. **Notifications** contains OS permission, alert rules, quiet hours, and the test action. **Trends** switches among 24 hours, 7 days, rolling 30 days, all history, or a custom range covering any past dates; it also controls local collection and confirmed deletion for the current account. **Quota Auto-Continuation** shows the target reset, next attempt, consumed slots, the latest trigger reason, and separate sanitized results for automatic actions and manual tests. **Startup** controls autostart and close-to-tray behavior. Closing Settings only hides it; closing the main window hides to the tray by default, while tray **Quit** always exits.
 
 Auto-continuation requires the app to remain running in the tray while the computer is awake. Resuming or restarting more than 30 minutes after the target marks that cycle missed; only the latest due slot runs, so earlier slots are never replayed back-to-back. **Test now** always requires a second confirmation, sends once, and never retries.
 
-System notifications remain disabled until you turn them on and grant operating-system permission. The first successful snapshot establishes quota-rule baselines rather than immediately warning about an already-low window; the first observed reset-credit count and every account switch likewise establish a count baseline, and only a later increase for the same account alerts. Within one quota cycle, each enabled low-quota or pace event is sent once; a later `resetAt` starts a new cycle and can produce one reset notification. A reset-credit arrival can be merged with same-refresh quota events into one account-free notification with at most three window entries. Quiet hours use local time in the half-open `[start, end)` interval, including cross-midnight ranges, and suppressed events are not replayed. On Windows, notification name and icon behavior must be judged from an installed NSIS package; development notifications are not a release acceptance result.
+System notifications remain disabled until you turn them on and grant operating-system permission. The first successful snapshot establishes quota-rule baselines rather than immediately warning about an already-low window; the first observed reset-credit count and every account switch likewise establish a count baseline, and only a later increase for the same account alerts. Within one quota cycle, each enabled low-quota or pace event is sent once; a later `resetAt` starts a new cycle and can produce one reset notification. A reset-credit arrival can be merged with same-refresh quota events into one notification labeled with the account note with at most three window entries. Quiet hours use local time in the half-open `[start, end)` interval, including cross-midnight ranges, and suppressed events are not replayed. On Windows, notification name and icon behavior must be judged from an installed NSIS package; development notifications are not a release acceptance result.
 
 Trend collection starts enabled for both new and upgraded installations. Only successful snapshots are sampled, with no age, point-count, or stream-count eviction: the newest 24 hours keep collected samples, days 1–7 use 15-minute buckets, days 7–32 use hourly buckets, and older history keeps the first and last point in each UTC-day bucket while preserving reset-cycle boundaries. **Today's consumption** always covers 00:00 through now in the system's local calendar day, independently of the selected chart range. Forecasting uses recent samples from the current cycle and reports **Collecting**, **Stable**, **Expected to run out before reset**, or **Expected to last until reset**. A reliable exhaustion time is rounded to 15 minutes and is never extrapolated past the quota reset. Turning collection off stops new samples without hiding or deleting existing charts and forecast details; **Clear history** permanently removes the current account's points after confirmation.
 
@@ -22,34 +22,40 @@ The app checks once shortly after launch and then at most every six hours by def
 - Windows closes CodexUsageBar when installation starts; macOS restarts after replacing the app. The app never silently downloads, replaces, or restarts without confirmation.
 - A current build, network error, or signature-verification failure never affects the quota data already on screen. A signature failure cancels installation.
 
+## Account cards and viewing selection
+
+Cards use the full email as identity, with a plan chip, name/note, quota progress, and subscription date labeled as a credential record. Past subscription snapshots require verification. Expand account details for login method, user/account IDs, token expiry and the managed path; IDs and paths can be copied.
+
+The viewing selector stays at the bottom of Settings navigation. The main window has an account icon between Refresh and Settings, with a masked-email menu. Neither selector changes the Codex login file. Codex login source re-reads the file and matches its identity independently of saved bindings or viewed accounts. This is a disk-file observation, not proof of a running session cache.
+
+Full emails, IDs and paths are returned only to the Settings window through get_accounts. Other windows omit details and codexLogin, and logs exclude this information. Existing usage responses and credentials supply the data without extra network requests; failures retain the latest successful information.
+
+Reset credits show held and currently usable counts separately. The Accounts page loads their expiry details through a separate Settings-only GET, cached per account for five minutes and invalidated by held-count changes. The nearest expiry is always visible; the tooltip lists each expiry in local time. Missing dates stay unknown, and failed reads preserve previous details with a retry action. No credit redemption operation is provided.
+
+## Accounts, range statistics and responses
+
+Use **Accounts** to import multiple auth.json files, edit notes, pause monitoring and remove managed copies. Every enabled account refreshes independently; the shared selector chooses the account shown in the card and Settings. Removing managed credentials preserves history and does not sign Codex out.
+
+Click two chart points for interval duration and consumption; reverse selection works. Arrow keys move, Enter selects, Escape clears. Consumption is calculated from retained backend observations separately for each reset cycle: 80→20 followed by 100→70 after reset totals 90 percentage points. It is not token or monetary usage. Expand each cycle to page through 50 retained samples; partial coverage and historical precision are labeled. Current forecasts show time to exhaustion and time before reset. Past exhaustion is shown only when zero was observed, with the first-zero summary preserved during compaction.
+
+Each account selects an automatic or explicit model using a list or editable ID. There is no fixed old-model fallback. The latest automatic and manual results separately retain requested/reported model, HTTP status, duration, up to 8192 characters of text and sanitized errors. Only a completed event counts as success; uncertain delivery stops automatic replay. Legacy results indicate that text was not saved.
+
+The main window uses a short forecast line, with relative exhaustion and early-exhaustion durations in the tooltip. Trends and cycle rows retain the detailed forecast. Automatic height uses a 260px base plus 20px per visible advice row and section spacing; manually adjusted sizes retain control.
+
 ## Privacy and feature boundary
 
-Only the Rust backend reads local credentials during a request. Usage, trends, and notifications remain read-only; auto-continuation sends a real request only after explicit opt-in or test confirmation. React receives filtered usage and sanitized continuation status, never `auth.json`, access tokens, request headers, raw API responses, model replies, raw errors, or an unmasked email address.
+- Rust handles credential files, native import dialogs, requests and writes. WebViews never receive tokens, authentication files, request headers or full upstream JSON.
+- Initial discovery uses the executable directory, CODEX_HOME/auth.json, then home .codex/auth.json. Imports copy credentials into the restricted application configuration directory at `accounts/<local-account-key>/auth.json`; ordinary imports leave the source untouched. Windows uses a restricted ACL; Unix uses 700/600 directory/file permissions.
+- Managed accounts refresh OAuth tokens within thirty minutes of expiry and atomically save rotated credentials. Access-only files work until expiry. For an account bound to Codex, Codex owns refresh and the tool reads back the latest file. Switching away synchronizes credentials before resuming managed refresh.
+- Applying/restoring Codex credentials is a separate Windows file-store action. Close Codex desktop, CLI and IDE sessions first, then reopen manually after replacement. Credentials are backed up and verified. Existing config.toml and custom-provider routing remain unchanged.
+- Account notes, monitoring and model choices are stored in accounts/accounts.json. Imported default emails are masked. Credential copies remain sensitive and must not be shared or committed.
+- Usage reads wham/usage. Auto-continuation sends fixed hi to Codex Responses only after opt-in or confirmed testing, with stream=true and store=false. It never automatically consumes reset credits or starts a browser OAuth login.
+- Per-account state, latest replies and reset-credit baselines live under accounts/<local-account-key>/. Legacy state migrates only when salted identity matches; unmatched originals remain. Replies are excluded from runtime/audit logs.
+- The original usage-history.json retains its salt and anonymous account partitions. Disabling collection keeps history; clearing affects the selected account only. Older samples remain compacted at the existing age tiers.
+- Notifications are deduplicated per account and include its note. Logs retain timestamps, levels, anonymous account keys, actions and fixed error categories for fourteen days, excluding credentials and reply text.
+- Existing sanitized diagnostics, write-only clipboard access, constrained external links and signed-update checks remain in place. Update requests contain no account credentials.
 
-`auth.json` is searched in this order:
-
-1. Next to the running application executable.
-2. `%CODEX_HOME%\auth.json`.
-3. Windows: `%USERPROFILE%\.codex\auth.json`; macOS: `~/.codex/auth.json`.
-
-The usage feature only reads `GET https://chatgpt.com/backend-api/wham/usage`; the update feature separately reads the public HTTPS `latest.json` manifest, and the app:
-
-- Never reads refresh tokens, refreshes OAuth tokens, or writes to `auth.json`; every attempt rereads the latest access token.
-- Auto-continuation first refreshes usage read-only to verify the same reset event and account. An advanced `reset_at` alone is no longer a reason to skip; only an automatic or manual success already recorded for the same event prevents a later send. When no same-event success exists, it reads the live Codex model manifest and sends fixed `hi` to `POST https://chatgpt.com/backend-api/codex/responses` with `stream: true` and `store: false`. Only an SSE `response.completed` event counts as success; response text is neither displayed nor stored.
-- Stores auto-continuation runtime state in a separate versioned `quota-auto-continue.json` beside `settings.json`. Schema v2 contains only a local salt, salted account/window fingerprints, the active cycle and pending next-cycle time, the latest quota observation, opaque `eventId` / `generationId`, notification disposition, the 30-minute event lock, consumed slots, completion marker, timestamps, trigger reason, and separate sanitized automatic/manual result summaries. It never stores tokens, account IDs, email, request headers, response bodies, or model replies. A slot is atomically persisted before sending, so crash recovery cannot repeat it.
-- Writes a daily sanitized `quota-audit-YYYY-MM-DD.jsonl` beside `settings.json` and retains it for 14 days. Each record contains only a UTC timestamp, fixed level/action codes, opaque event/generation IDs, trigger reason, old/new integer remaining percentages and `reset_at` values, a zero-based slot index, and a fixed error code; it excludes credentials, account IDs or email, paths or URLs, raw quota responses, prompt/reply text, and arbitrary error text.
-- Makes no additional reset-credit request and never calls a reset-credit consumption or other write endpoint. It only reads the total and currently usable reset-credit summary already attached to the existing `wham/usage` response, and never begins an OAuth flow.
-- Stores the reset-credit notification baseline in a separate versioned `reset-credit-notification.json` beside `settings.json`. It contains only the schema version, a local random salt, a salted account fingerprint, and the latest total count; it never stores tokens, account IDs, email, the currently usable count, or the raw response.
-- Does not install frontend filesystem or HTTP permissions; sensitive I/O stays in Rust.
-- Derives the optional masked account summary only from a successful usage response. It does not read an email from `auth.json`, persist an unmasked email, or write either form of the email to runtime logs.
-- Stores trend history in a separate, versioned `usage-history.json` beside `settings.json`. The file contains a local random salt, irreversible salted account fingerprints, anonymous account partitions, anonymous locally salted quota-window stream keys / durations, reset-cycle timestamps, sample times, and remaining percentages. Raw upstream window IDs are hash inputs only. It never stores an account ID, Token, email, upstream label, raw response, proxy, URL, or authentication path. Switching accounts changes the active partition without deleting other account history.
-- Exposes only sanitized percentages, timestamps, forecast metadata, and fallback-label metadata through the Settings-only history IPC. The Settings window cannot call the main card's `get_dashboard`, so it never receives the masked account, plan, or live raw snapshot.
-- Builds system-notification text only from localized fallback window names, quota values, and reset-credit gained/total/currently-usable counts; it never includes the masked account, upstream window label, Token, or raw response.
-- Generates diagnostics from a fixed whitelist: schema/app/platform fields, refresh and notification status, dashboard/update/history summaries, the close-to-tray setting, and the continuation enabled flag/fixed enum phase. It excludes tokens, accounts, email, paths, proxy settings, URLs, quota percentages, reset or attempt times, curve points, raw errors, and logs.
-- Grants the Settings WebView clipboard **write-text only**—never clipboard read—and restricts external opening to the exact repository root, its Release pages, and its new-Issue page. No wildcard is granted for the repository root. The main WebView has neither clipboard nor notification-plugin permission; notification permission and test actions go through Settings-only Rust commands.
-- Checks updates only against the public HTTPS `latest.json` manifest containing signatures for each platform update payload for `creamtea47/codex-usage-bar`, without sending `auth.json`, tokens, email, or usage data. A payload must match the embedded public key before it can be installed.
-
-If credentials are missing, expired, or rejected, the last successful snapshot remains visible as stale. Sign in to Codex again, then choose top-right **Refresh**.
+Authentication failures retain the last successful snapshot as stale. Accounts distinguishes network errors, Codex-managed refresh, missing refresh tokens and required reimport.
 
 ## Architecture
 
@@ -59,13 +65,13 @@ If credentials are missing, expired, or rejected, the last successful snapshot r
 | Native boundary | Tauri 2 commands, events, and capabilities | Window-scoped IPC, OS notification permission / delivery, write-only clipboard, and exact repository / Issue / Release links |
 | Data and persistence | Rust + Tokio + Reqwest + Serde | Read-only usage by default, opt-in minimal continuation requests, fixed refresh/backoff, request de-duplication, versioned sanitized runtime state, local history, forecasting, settings, autostart, and redacted logs |
 
-The frontend IPC also includes Settings-only `get_quota_auto_continue_status`, `set_quota_auto_continue_enabled`, and `test_quota_auto_continue`, with sanitized updates on `quota-auto-continue-updated`. Ordinary `save_settings` preserves the current continuation flag and cannot bypass the dedicated side-effect command. Dashboard/manual refresh remain main-window only; notification, history, continuation, diagnostics, autostart, and update actions are Settings-window only. URLs, signatures, raw manifests, credentials, and unmasked account details never cross the Rust boundary.
+The frontend IPC also includes Settings-only `get_quota_auto_continue_status`, `set_quota_auto_continue_enabled`, and `test_quota_auto_continue`, with sanitized updates on `quota-auto-continue-updated`. Ordinary `save_settings` preserves the current continuation flag and cannot bypass the dedicated side-effect command. Dashboard/manual refresh remain main-window only; notification, history, continuation, diagnostics, autostart, and update actions are Settings-window only. Updater URLs/signatures, raw manifests and credentials never cross the Rust boundary; allowlisted full account details are restricted to Settings.
 
 ## Logs and troubleshooting
 
 - Settings and independent main/settings-window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
-- Sanitized auto-continuation state: `quota-auto-continue.json` beside `settings.json`. Disabling the feature does not delete it; re-enabling first validates it against the latest current-account snapshot.
-- Reset-credit notification baseline: `reset-credit-notification.json` beside `settings.json`. It stores only a sanitized account fingerprint and the latest total count to detect arrivals across restarts, never the currently usable count or account plaintext.
+- Auto-continuation state and latest retained replies: `accounts/<local-account-key>/quota-auto-continue.json`. Disabling the feature does not delete it; re-enabling first validates it against the latest account snapshot. Replies are not copied into logs.
+- Reset-credit notification baseline: `accounts/<local-account-key>/reset-credit-notification.json`. It stores only a sanitized account fingerprint and the latest total count to detect arrivals across restarts, never the currently usable count or account plaintext.
 - Local trend samples: `usage-history.json` beside `settings.json`. Samples are not evicted by age, point count, or stream count; each queried series still displays at most 1,000 points. The newest 24 hours keep collected samples, samples from 1–7 days use 15-minute buckets, samples from 7–32 days use hourly buckets, and older history keeps the first and last point per UTC-day bucket while preserving reset boundaries. Schema v1 migrates losslessly to multi-account schema v2 with a one-time pre-rewrite backup. Collection can be paused or the current account cleared in **Trends**, and data is never uploaded; time before the upgrade is reported as partial coverage when no samples exist.
 - Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
 - Logs contain timestamps, levels, task deadlines, attempt numbers, selected model names, operation results, and sanitized result categories. They never contain tokens, account identifiers, Authorization headers, authentication-file contents, raw SSE, response bodies, or model replies.
@@ -123,11 +129,11 @@ The current signing key has no password. If a future encrypted key is used, conf
 Example maintainer release:
 
 ```powershell
-git tag -a v0.6.2 -m "v0.6.2 permanent history, account partitions, and single-instance fix"
+git tag -a v0.7.0 -m "v0.7.0 account management, range statistics, and reset credit expiry"
 git push origin master
-git push origin v0.6.2
+git push origin v0.7.0
 ```
 
 ## Intentionally excluded
 
-There are no unconfirmed silent downloads or updates, taskbar-docked mode, general legacy-layout migration, cloud history sync, cross-account history selector, custom continuation prompts, OAuth token refresh, or OS-level forced wake. Existing installations receive only the one-time compact-height adjustment described above.
+There are no unconfirmed silent downloads or updates, taskbar-docked mode, general legacy-layout migration, cloud history sync, custom continuation prompts, or OS-level forced wake. Automatic window sizing follows the compact layout; manual sizes remain user-controlled.

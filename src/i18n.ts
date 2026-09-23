@@ -1,3 +1,4 @@
+import { featureEn, featureZh } from './featureStrings';
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
@@ -7,6 +8,7 @@ export type SupportedLanguage = Exclude<LanguagePreference, 'system'>;
 export const resources = {
   'zh-CN': {
     translation: {
+      feature: featureZh,
       common: {
         unavailable: '—',
         close: '关闭',
@@ -140,7 +142,7 @@ export const resources = {
           subtitle: '在周额度重置点发送固定的最小 hi 请求，让新周期尽早开始。',
           enabled: '启用额度自动接续',
           enabledDescription: '依据当前账号的 6–8 天周额度 reset_at 排期；重置点失败时最多在 +1、+5、+30 分钟各重试一次。',
-          realRequestWarning: '这不是只读操作。启用后会使用当前 auth.json 的访问令牌向 Codex 发送真实 hi 请求，并可能消耗少量额度；不会刷新 Token 或修改认证文件。',
+          realRequestWarning: '这不是只读操作。启用后会使用当前 auth.json 的访问令牌向 Codex 发送真实 hi 请求，并可能消耗少量额度；托管账号可刷新 OAuth 令牌；应用到 Codex 是独立操作。',
           currentStatus: '当前状态',
           targetResetAt: '目标重置时间',
           nextAttemptAt: '下一次尝试时间',
@@ -163,7 +165,7 @@ export const resources = {
           successAt: '成功（{{date}}）',
           test: '立即测试',
           testing: '正在发送…',
-          testDescription: '确认后仅发送一次固定 hi；失败不会自动重试，也不保存模型回复。',
+          testDescription: '确认后仅发送一次固定 hi；失败不会自动重试；此账号仅保存最近一次测试回复。',
           runtimeNotice: '应用必须保持运行且电脑处于可执行状态。若休眠或退出后超过重置点 30 分钟，本周期将标记为已错过，不会连续补跑。',
           enableConfirmTitle: '启用额度自动接续？',
           enableConfirmBody: '启用后，应用会在未来周额度重置点自动发送真实 hi 请求，并在失败时按既定时点重试。确认你接受可能产生的少量额度消耗。',
@@ -373,6 +375,7 @@ export const resources = {
   },
   en: {
     translation: {
+      feature: featureEn,
       common: {
         unavailable: '—',
         close: 'Close',
@@ -506,7 +509,7 @@ export const resources = {
           subtitle: 'Send a fixed minimal hi at the weekly reset boundary so the new cycle begins promptly.',
           enabled: 'Enable Quota Auto-Continuation',
           enabledDescription: 'Schedules from the current account’s 6–8 day reset_at window, retrying at +1, +5, and +30 minutes after a failed boundary attempt.',
-          realRequestWarning: 'This is not read-only. When enabled, the app uses the latest access token from auth.json to send a real hi request to Codex, which may consume a small amount of quota. It never refreshes tokens or changes authentication files.',
+          realRequestWarning: 'This is not read-only. When enabled, the app uses the latest access token from auth.json to send a real hi request to Codex, which may consume a small amount of quota. Managed accounts may refresh OAuth tokens; applying credentials to Codex is a separate operation.',
           currentStatus: 'Current status',
           targetResetAt: 'Target reset time',
           nextAttemptAt: 'Next attempt',
@@ -529,7 +532,7 @@ export const resources = {
           successAt: 'Succeeded ({{date}})',
           test: 'Test now',
           testing: 'Sending…',
-          testDescription: 'After confirmation, sends one fixed hi with no retry and never stores the model reply.',
+          testDescription: 'After confirmation, sends one fixed hi with no retry and keeps only the latest test reply for this account.',
           runtimeNotice: 'The app must remain running while the computer is awake. If it resumes or restarts more than 30 minutes after the reset boundary, this cycle is marked missed and earlier slots are not replayed.',
           enableConfirmTitle: 'Enable Quota Auto-Continuation?',
           enableConfirmBody: 'The app will send a real hi at future weekly reset boundaries and retry at the defined times after failures. Confirm that you accept the small possible quota cost.',

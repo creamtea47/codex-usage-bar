@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
+mod analytics;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -137,6 +138,9 @@ struct StoredUsageStream {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredUsageCycle {
+    /// 首次归零是事实摘要，不能在历史压缩时被桶末点覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_exhausted_at: Option<DateTime<Utc>>,
     /// 统一重置识别器生成的脱敏代次 ID。旧版历史没有该字段时保持 `None`，
     /// 由首次带代次的采样就地接管，避免升级本身制造一条虚假的趋势断点。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,6 +368,7 @@ pub struct UsageHistoryPoint {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageHistorySeries {
+    pub current_reset_at: Option<DateTime<Utc>>,
     pub window_id: String,
     pub window_seconds: i64,
     pub current_remaining_percent: u8,
@@ -616,6 +621,7 @@ impl UsageHistory {
                 }
                 let current_remaining_percent = stream.current_remaining_percent(now)?;
                 Some(UsageHistorySeries {
+                    current_reset_at: stream.cycles.last().and_then(|c| c.reset_at),
                     window_id: stream.window_id.clone(),
                     window_seconds: stream.window_seconds,
                     current_remaining_percent,
@@ -838,6 +844,7 @@ impl StoredUsageStream {
             window_id: window.window_id.clone(),
             window_seconds: window.window_seconds,
             cycles: vec![StoredUsageCycle {
+                first_exhausted_at: None,
                 generation_id: generation_id.map(ToOwned::to_owned),
                 reset_at: window.cycle_reset_at,
                 samples: vec![StoredUsageSample {
@@ -896,6 +903,7 @@ impl StoredUsageStream {
 
         if generation_changed || reset_advanced || inferred_reset {
             self.cycles.push(StoredUsageCycle {
+                first_exhausted_at: None,
                 generation_id: generation_id.map(ToOwned::to_owned),
                 reset_at: window.cycle_reset_at,
                 samples: vec![StoredUsageSample {
@@ -952,6 +960,13 @@ impl StoredUsageStream {
         let daily_cutoff = safe_subtract(now, Duration::days(32));
         let mut removed = 0;
         for cycle in &mut self.cycles {
+            if cycle.first_exhausted_at.is_none() {
+                cycle.first_exhausted_at = cycle
+                    .samples
+                    .iter()
+                    .find(|s| s.remaining_percent == 0)
+                    .map(|s| s.sampled_at);
+            }
             let compacted =
                 compact_cycle_for_age(&cycle.samples, daily_cutoff, medium_cutoff, recent_cutoff);
             removed += cycle.samples.len().saturating_sub(compacted.len());
@@ -2189,6 +2204,7 @@ mod tests {
                 samples.last().unwrap().sampled_at,
             ));
             cycles.push(StoredUsageCycle {
+                first_exhausted_at: None,
                 generation_id: None,
                 reset_at: None,
                 samples,
@@ -2603,21 +2619,25 @@ mod tests {
             window_seconds: 604_800,
             cycles: vec![
                 StoredUsageCycle {
+                    first_exhausted_at: None,
                     generation_id: None,
                     reset_at: None,
                     samples: samples(daily_first, Duration::hours(1)),
                 },
                 StoredUsageCycle {
+                    first_exhausted_at: None,
                     generation_id: None,
                     reset_at: None,
                     samples: samples(hourly_first, Duration::minutes(10)),
                 },
                 StoredUsageCycle {
+                    first_exhausted_at: None,
                     generation_id: None,
                     reset_at: None,
                     samples: samples(medium_first, Duration::minutes(3)),
                 },
                 StoredUsageCycle {
+                    first_exhausted_at: None,
                     generation_id: None,
                     reset_at: None,
                     samples: samples(recent_first, Duration::minutes(1)),
@@ -2682,6 +2702,7 @@ mod tests {
             window_seconds: 604_800,
             cycles: vec![
                 StoredUsageCycle {
+                    first_exhausted_at: None,
                     generation_id: None,
                     reset_at: None,
                     samples: vec![
@@ -2700,6 +2721,7 @@ mod tests {
                     ],
                 },
                 StoredUsageCycle {
+                    first_exhausted_at: None,
                     generation_id: None,
                     reset_at: None,
                     samples: vec![

@@ -2,6 +2,16 @@
 
 [English README](../README.md) · [中文 README](../README-zh.md)
 
+## v0.7.0 additions / 新增截图
+
+2026-09-23：直接复用 v0.7.0 React 组件，通过隔离的浏览器入口使用合成账号和额度数据。未读取真实凭证或发送上游请求。这些图片展示界面，不替代原生窗口或接口验收。
+
+- [紧凑主窗 / Chinese compact card](images/compact-main-zh.png)：340 × 296，中文浅色。
+- [Compact card / 英文紧凑主窗](images/compact-main-en.png)：460 × 296，英文深色。
+- [账号与重置卡有效期 / Accounts and credit expiry](images/accounts-credits-zh.png)：1000 × 840，中文浅色。
+
+下方保留 v0.6.2 的设置页及历史界面示例。
+
 ## Capture / 拍摄来源
 
 - Date / 日期：2026-09-12（Asia/Shanghai）。

@@ -10,6 +10,8 @@ use serde_json::{Map, Value};
 use std::{collections::HashSet, time::Duration as StdDuration};
 
 const USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const RESET_CREDITS_ENDPOINT: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 #[derive(Debug, thiserror::Error)]
 pub enum UsageError {
@@ -32,6 +34,8 @@ pub enum UsageError {
 impl UsageError {
     pub fn code(&self) -> DashboardErrorCode {
         match self {
+            Self::Auth(AuthError::Network) => DashboardErrorCode::Network,
+            Self::Auth(AuthError::Persistence) => DashboardErrorCode::LocalBridge,
             Self::Auth(AuthError::MissingFile) => DashboardErrorCode::AuthMissing,
             Self::Auth(_) | Self::Unauthorized => DashboardErrorCode::AuthInvalid,
             Self::Client => DashboardErrorCode::LocalBridge,
@@ -43,8 +47,9 @@ impl UsageError {
     }
 }
 
-/// 账号材料只在 Rust 刷新调用栈内短暂存在，供本地加盐哈希；不会经 IPC 或日志输出。
+/// 认证身份留在 Rust；profile 是设置窗口专用的白名单资料，不进入主卡快照或日志。
 pub struct FetchedDashboard {
+    pub profile: crate::account_profile::UsageProfile,
     pub snapshot: DashboardSnapshot,
     pub account_identity: UsageAccountIdentity,
     pub reset_credit_availability: Option<ResetCreditAvailability>,
@@ -68,6 +73,44 @@ pub struct UsageClient {
 }
 
 impl UsageClient {
+    /// 只 GET 卡片明细，复用同一客户端、代理与超时策略；原始卡 ID 不离开解析栈。
+    pub async fn fetch_reset_credit_details(
+        &self,
+        credentials: crate::auth::AuthCredentials,
+    ) -> Result<Vec<crate::reset_credit_details::ResetCreditItem>, UsageError> {
+        self.fetch_reset_credit_details_at(credentials, RESET_CREDITS_ENDPOINT)
+            .await
+    }
+
+    async fn fetch_reset_credit_details_at(
+        &self,
+        credentials: crate::auth::AuthCredentials,
+        endpoint: &str,
+    ) -> Result<Vec<crate::reset_credit_details::ResetCreditItem>, UsageError> {
+        let mut request = self
+            .client
+            .get(endpoint)
+            .bearer_auth(&credentials.access_token)
+            .header("Accept", "application/json");
+        if let Some(id) = credentials.account_id.as_deref() {
+            request = request.header("ChatGPT-Account-Id", id);
+        }
+        let mut response = request.send().await.map_err(|_| UsageError::Network)?;
+        if !response.status().is_success() {
+            return Err(status_to_error(response.status()));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| UsageError::Network)? {
+            if bytes.len() + chunk.len() > 1024 * 1024 {
+                return Err(UsageError::InvalidPayload);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let payload =
+            serde_json::from_slice::<Value>(&bytes).map_err(|_| UsageError::InvalidPayload)?;
+        crate::reset_credit_details::parse_credit_details(&payload)
+            .map_err(|_| UsageError::InvalidPayload)
+    }
     pub fn new() -> Result<Self, UsageError> {
         // reqwest 的 system-proxy feature 会安全读取系统代理和 HTTP(S)_PROXY，
         // 仅用于发起本次只读请求；代理配置绝不记录到日志或传给 React。
@@ -82,7 +125,14 @@ impl UsageClient {
 
     /// 仅使用 access_token 查询额度与重置卡计数；不会调用重置卡消耗或其他写入路径。
     pub async fn fetch_dashboard(&self) -> Result<FetchedDashboard, UsageError> {
-        let credentials = read_auth_credentials()?;
+        self.fetch_with_credentials(read_auth_credentials()?).await
+    }
+
+    /// 账号由调用者固定，请求期间的 UI 切换不会改变认证来源。
+    pub async fn fetch_with_credentials(
+        &self,
+        credentials: crate::auth::AuthCredentials,
+    ) -> Result<FetchedDashboard, UsageError> {
         let account_identity = credentials
             .account_id
             .clone()
@@ -121,7 +171,17 @@ impl UsageClient {
             .json()
             .await
             .map_err(|_| UsageError::InvalidPayload)?;
+        // 返回的身份必须属于发起请求的账号，不能把错误上游资料拼入另一张账号卡片。
+        if credentials
+            .account_id
+            .as_deref()
+            .zip(payload.get("account_id").and_then(Value::as_str))
+            .is_some_and(|(expected, actual)| expected != actual)
+        {
+            return Err(UsageError::InvalidPayload);
+        }
         Ok(FetchedDashboard {
+            profile: crate::account_profile::parse_usage_profile(&payload, Utc::now()),
             snapshot: parse_usage_payload(&payload)?,
             account_identity,
             reset_credit_availability: parse_reset_credit_availability(&payload),
@@ -181,6 +241,7 @@ pub fn parse_usage_payload(payload: &Value) -> Result<DashboardSnapshot, UsageEr
     }
     windows.sort_by_key(|window| window.window_seconds);
     Ok(DashboardSnapshot {
+        account_id: None,
         status: DashboardStatus::Ready,
         // 原始邮箱只存在于本次 JSON 解析栈内。前端、快照和日志都只能看到掩码结果。
         account_email_masked: parse_account_email_masked(payload),
@@ -301,6 +362,77 @@ fn fallback_label_for_window(seconds: i64) -> QuotaFallbackLabel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reset_credit_request_is_read_only_account_scoped_and_handles_failures() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!(
+            "http://{}/backend-api/wham/rate-limit-reset-credits",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                (
+                    "200 OK",
+                    r#"{"credits":[{"id":"private","status":"available","reset_type":"codex_rate_limits","expires_at":"2026-10-22T20:30:58Z"}]}"#,
+                ),
+                ("401 Unauthorized", "private server error"),
+                ("200 OK", "invalid json"),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(StdDuration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap().to_lowercase();
+                assert!(request.starts_with("get /backend-api/wham/rate-limit-reset-credits "));
+                assert!(request.contains("authorization: bearer test-token\r\n"));
+                assert!(request.contains("chatgpt-account-id: test-account\r\n"));
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = UsageClient {
+            client: Client::builder()
+                .no_proxy()
+                .timeout(StdDuration::from_secs(5))
+                .build()
+                .unwrap(),
+        };
+        let credentials = crate::auth::AuthCredentials {
+            access_token: "test-token".into(),
+            account_id: Some("test-account".into()),
+        };
+        let credits = client
+            .fetch_reset_credit_details_at(credentials.clone(), &endpoint)
+            .await
+            .unwrap();
+        assert_eq!(credits.len(), 1);
+        assert!(!serde_json::to_string(&credits).unwrap().contains("private"));
+        assert!(matches!(
+            client
+                .fetch_reset_credit_details_at(credentials.clone(), &endpoint)
+                .await,
+            Err(UsageError::Unauthorized)
+        ));
+        assert!(matches!(
+            client
+                .fetch_reset_credit_details_at(credentials, &endpoint)
+                .await,
+            Err(UsageError::InvalidPayload)
+        ));
+        server.join().unwrap();
+    }
 
     #[test]
     fn parses_primary_and_secondary_windows_without_private_fields() {

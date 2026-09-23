@@ -4,14 +4,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthCredentials {
     pub access_token: String,
     pub account_id: Option<String>,
 }
 
+impl std::fmt::Debug for AuthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthCredentials([redacted])")
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    #[error("认证服务网络请求失败，请稍后重试。")]
+    Network,
+    #[error("无法保存刷新后的凭证。")]
+    Persistence,
     #[error("未找到 Codex 登录信息，请先在 Codex 中登录。")]
     MissingFile,
     #[error("无法读取 Codex 登录信息，请重新登录 Codex。")]
@@ -65,9 +75,14 @@ pub fn resolve_auth_json_path_from(
         .ok_or(AuthError::MissingFile)
 }
 
-/// 认证文件不会通过 IPC 返回，也不会被本应用改写。
+/// 本读取入口不写文件也不向 IPC 返回认证材料；托管刷新和显式切换由 accounts 处理。
 pub fn read_auth_credentials() -> Result<AuthCredentials, AuthError> {
     let auth_path = resolve_auth_json_path()?;
+    read_auth_credentials_at(&auth_path)
+}
+
+/// 显式路径由 Rust 账号管理器提供，不能从展示账号的可变全局选择推断。
+pub fn read_auth_credentials_at(auth_path: &Path) -> Result<AuthCredentials, AuthError> {
     let contents = fs::read_to_string(auth_path).map_err(|_| AuthError::Unreadable)?;
     let root: Value = serde_json::from_str(&contents).map_err(|_| AuthError::InvalidJson)?;
     let tokens = root.get("tokens").unwrap_or(&Value::Null);

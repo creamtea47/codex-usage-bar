@@ -72,6 +72,8 @@ pub enum DashboardErrorCode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSnapshot {
+    #[serde(default)]
+    pub account_id: Option<String>,
     pub status: DashboardStatus,
     /// 仅来自成功的用量响应，并已在 Rust 内完成掩码；绝不保存或传递原始邮箱。
     pub account_email_masked: Option<String>,
@@ -85,6 +87,7 @@ pub struct DashboardSnapshot {
 impl Default for DashboardSnapshot {
     fn default() -> Self {
         Self {
+            account_id: None,
             status: DashboardStatus::Loading,
             account_email_masked: None,
             plan_label: None,

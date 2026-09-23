@@ -14,6 +14,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    include: ['src/**/*.test.{ts,tsx}'],
     globals: true,
     // Intel macOS GitHub runners can take more than Vitest's 5 s default
     // while React/MUI initializes; keep enough headroom without hiding hangs.

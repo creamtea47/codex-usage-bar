@@ -1,3 +1,7 @@
+mod account_hub;
+mod account_profile;
+mod accounts;
+use account_hub::*;
 mod app_update;
 mod auth;
 mod models;
@@ -6,6 +10,7 @@ mod quota_audit;
 mod quota_auto_continue;
 mod quota_reset;
 mod refresh_scheduler;
+mod reset_credit_details;
 mod reset_credit_notification;
 mod settings;
 mod tray;
@@ -57,7 +62,7 @@ use std::{
     fmt::Write as _,
     io,
     path::PathBuf,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
@@ -80,7 +85,7 @@ const AUTO_UPDATE_CHECK_START_DELAY: Duration = Duration::from_secs(8);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const QUOTA_AUTO_CONTINUE_IDLE_WAIT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
-// 悬浮卡的一张额度窗口尺寸。260px 恰好容纳成功态的一张额度卡，避免底部无效留白；
+// 账号切换位于标题栏，不再占用正文高度；底部每条短建议仅占一行。
 // 窗口数量或可靠建议增加时只扩展高度，最高后由前端分别滚动额度与建议区域。
 const MAIN_COMPACT_HEIGHT: u32 = 260;
 const MAIN_COMPACT_HEIGHT_PER_EXTRA_WINDOW: u32 = 145;
@@ -121,6 +126,12 @@ fn quota_auto_continue_wait_duration(
 }
 
 struct AppState {
+    reset_credit_cache: StdMutex<reset_credit_details::ResetCreditCache>,
+    reset_credit_query_guard: AsyncMutex<()>,
+    /// 完整账号资料仅驻留内存，通过设置窗口的白名单 IPC 返回，不进入日志或主卡快照。
+    account_profile: StdMutex<Option<account_profile::UsageProfile>>,
+    account: Option<Arc<accounts::ManagedAccount>>,
+    retired: AtomicBool,
     usage_client: UsageClient,
     snapshot: AsyncMutex<DashboardSnapshot>,
     refresh_guard: AsyncMutex<()>,
@@ -130,10 +141,10 @@ struct AppState {
     /// 串行化 deadline 的读取、验证和写入，避免在途刷新覆盖刚保存的刷新间隔。
     schedule_guard: AsyncMutex<()>,
     // 设置读取与几何保存都只访问很小的本地 JSON；使用同步锁以便关闭窗口前可靠落盘。
-    stored_settings: StdMutex<StoredSettings>,
+    stored_settings: Arc<StdMutex<StoredSettings>>,
     settings_path: PathBuf,
     history_path: PathBuf,
-    usage_history: AsyncMutex<HistoryRuntime>,
+    usage_history: Arc<AsyncMutex<HistoryRuntime>>,
     quota_auto_continue: QuotaAutoContinueRuntime,
     reset_credit_notifications: ResetCreditNotificationRuntime,
     /// 让通知设置发布与 baseline 重建相对通知评估保持原子。
@@ -208,18 +219,23 @@ impl AppState {
             }
         }
         Ok(Self {
+            reset_credit_cache: StdMutex::new(reset_credit_details::ResetCreditCache::default()),
+            reset_credit_query_guard: AsyncMutex::new(()),
+            account_profile: StdMutex::new(None),
+            account: None,
+            retired: AtomicBool::new(false),
             usage_client,
             snapshot: AsyncMutex::new(DashboardSnapshot::default()),
             refresh_guard: AsyncMutex::new(()),
             refresh_generation: AtomicU64::new(0),
             schedule_guard: AsyncMutex::new(()),
-            stored_settings: StdMutex::new(stored_settings),
+            stored_settings: Arc::new(StdMutex::new(stored_settings)),
             settings_path,
             history_path,
-            usage_history: AsyncMutex::new(HistoryRuntime {
+            usage_history: Arc::new(AsyncMutex::new(HistoryRuntime {
                 history: loaded_history.history,
                 storage_status: history_status,
-            }),
+            })),
             quota_auto_continue: QuotaAutoContinueRuntime::new(quota_auto_continue_path)?,
             reset_credit_notifications: ResetCreditNotificationRuntime::new(
                 reset_credit_notification_path,
@@ -248,11 +264,51 @@ impl AppState {
     }
 
     async fn current_snapshot(&self) -> DashboardSnapshot {
-        self.snapshot.lock().await.clone()
+        let mut snapshot = self.snapshot.lock().await.clone();
+        snapshot.account_id = self.account.as_ref().map(|a| a.id.clone());
+        snapshot
     }
 
     fn current_settings(&self) -> Settings {
-        self.stored_settings().preferences.clone()
+        let mut settings = self.stored_settings().preferences.clone();
+        if let Some(account) = &self.account {
+            settings.quota_auto_continue_enabled = account
+                .config()
+                .is_some_and(|a| a.enabled && a.auto_continue);
+        }
+        settings
+    }
+
+    fn select_history_account(&self, runtime: &mut HistoryRuntime) -> Result<(), String> {
+        if let Some(account) = &self.account {
+            let credentials = account.identity()?;
+            let identity = credentials
+                .account_id
+                .as_deref()
+                .map(AccountIdentity::AccountId)
+                .unwrap_or_else(|| AccountIdentity::Token(&credentials.access_token));
+            runtime
+                .history
+                .select_account(identity)
+                .map_err(|_| "accountIdentityMissing")?;
+        }
+        Ok(())
+    }
+
+    async fn fetch_account_dashboard(&self) -> Result<usage::FetchedDashboard, usage::UsageError> {
+        if let Some(account) = &self.account {
+            let credentials = account.credentials(false).await?;
+            match self.usage_client.fetch_with_credentials(credentials).await {
+                Err(usage::UsageError::Unauthorized) => {
+                    self.usage_client
+                        .fetch_with_credentials(account.credentials(true).await?)
+                        .await
+                }
+                result => result,
+            }
+        } else {
+            self.usage_client.fetch_dashboard().await
+        }
     }
 
     fn notify_schedule_changed(&self) {
@@ -358,7 +414,7 @@ impl AppState {
             }
             return HistoryRefreshEffect {
                 changed: account_changed,
-                account_changed,
+                account_changed: account_changed && self.account.is_none(),
             };
         }
         let mutation = match runtime.history.record_successful_snapshot_with_generations(
@@ -393,7 +449,7 @@ impl AppState {
         }
         HistoryRefreshEffect {
             changed: mutation.changed(),
-            account_changed: mutation.account_changed,
+            account_changed: mutation.account_changed && self.account.is_none(),
         }
     }
 
@@ -425,9 +481,18 @@ impl AppState {
             }
         };
 
-        let result = match self.usage_client.fetch_dashboard().await {
+        let result = match self.fetch_account_dashboard().await {
             Ok(fetched) => {
+                self.reset_credit_cache
+                    .lock()
+                    .unwrap_or_else(|v| v.into_inner())
+                    .observe_count(fetched.reset_credit_availability.map(|v| v.available_count));
+                *self
+                    .account_profile
+                    .lock()
+                    .unwrap_or_else(|v| v.into_inner()) = Some(fetched.profile.clone());
                 let mut fresh = fetched.snapshot;
+                fresh.account_id = self.account.as_ref().map(|a| a.id.clone());
                 let quota_auto_continue_changed = self.quota_auto_continue.observe_dashboard(
                     self.current_settings().quota_auto_continue_enabled,
                     &fetched.account_identity,
@@ -472,6 +537,7 @@ impl AppState {
                 let retry_seconds = failure_retry_seconds(failures);
                 let _schedule_guard = self.schedule_guard.lock().await;
                 let mut snapshot = self.snapshot.lock().await;
+                snapshot.account_id = self.account.as_ref().map(|a| a.id.clone());
                 snapshot.status = if snapshot.quota_windows.is_empty() {
                     DashboardStatus::Error
                 } else {
@@ -590,6 +656,9 @@ impl AppState {
 
     /// 自动模式只按窗口与可靠建议数量收敛高度，不触碰用户的位置和宽度。
     fn apply_auto_main_height(&self, app: &AppHandle, snapshot: &DashboardSnapshot) {
+        if !account_hub::is_selected(app, self) {
+            return;
+        }
         let (size_mode, locked) = {
             let stored = self.stored_settings();
             (
@@ -882,6 +951,11 @@ fn send_usage_notifications(
     if body.is_empty() {
         return;
     }
+    let body = state
+        .account
+        .as_ref()
+        .and_then(|a| a.config())
+        .map_or_else(|| body.clone(), |a| format!("{}\n{}", a.label, body));
     let reset_event_id = pending_event.as_ref().and_then(|event| {
         let window_index = matched_window_index?;
         batch
@@ -965,6 +1039,7 @@ impl SettingsUiFaultCode {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageHistorySeriesResponse {
+    current_reset_at: Option<DateTime<Utc>>,
     window_id: String,
     window_seconds: i64,
     fallback_label: QuotaFallbackLabel,
@@ -977,6 +1052,7 @@ struct UsageHistorySeriesResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageHistoryResponse {
+    account_id: Option<String>,
     request: UsageHistoryRequest,
     applied_start_at: DateTime<Utc>,
     applied_end_at_exclusive: DateTime<Utc>,
@@ -1049,9 +1125,11 @@ fn is_known_window_label(label: &str) -> bool {
 
 #[tauri::command]
 async fn get_dashboard(
+    account_id: Option<String>,
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<DashboardSnapshot, String> {
+    let state = account_hub::resolve(window.app_handle(), &state, account_id.as_deref())?;
     // 此命令只服务主悬浮卡，设置窗口不会接触用量快照。
     require_window_label(&window, MAIN_WINDOW_LABEL)?;
     Ok(state.current_snapshot().await)
@@ -1059,10 +1137,12 @@ async fn get_dashboard(
 
 #[tauri::command]
 async fn refresh_dashboard(
+    account_id: Option<String>,
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<DashboardSnapshot, String> {
+    let state = account_hub::resolve(window.app_handle(), &state, account_id.as_deref())?;
     require_window_label(&window, MAIN_WINDOW_LABEL)?;
     let result = state.refresh_dashboard().await;
     Ok(finalize_refresh_result(&app, &state, result).await)
@@ -1132,15 +1212,28 @@ async fn save_settings(
         let _ = settings_window.set_title(settings_window_title(stored.language));
     }
     tray::update_menu(&app, resolved_language(stored.language));
+    if let Some(hub) = app.try_state::<Arc<AccountHub>>() {
+        for child in hub.all() {
+            if should_reset_notification_baseline {
+                let _guard = child.notification_evaluation();
+                child.reset_notification_baseline();
+            }
+            let _guard = child.schedule_guard.lock().await;
+            let refreshed = child.reschedule_from_now_locked().await;
+            emit_dashboard(&app, refreshed);
+        }
+    }
     emit_dashboard(&app, snapshot);
     Ok(stored)
 }
 
 #[tauri::command]
 fn get_quota_auto_continue_status(
+    account_id: Option<String>,
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<QuotaAutoContinueStatus, String> {
+    let state = account_hub::resolve(window.app_handle(), &state, account_id.as_deref())?;
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
     let enabled = state.current_settings().quota_auto_continue_enabled;
     Ok(state.quota_auto_continue.status(enabled, Utc::now()))
@@ -1149,14 +1242,25 @@ fn get_quota_auto_continue_status(
 #[tauri::command]
 async fn set_quota_auto_continue_enabled(
     enabled: bool,
+    account_id: Option<String>,
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<QuotaAutoContinueStatus, String> {
+    let state = account_hub::resolve(window.app_handle(), &state, account_id.as_deref())?;
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
     let mut next = state.current_settings();
     next.quota_auto_continue_enabled = enabled;
-    let saved = state.save_preferences(next)?;
+    let saved = if let Some(account) = &state.account {
+        let _guard = account.store.operation.lock().await;
+        let mut config = account.config().ok_or("accountMissing")?;
+        config.auto_continue = enabled;
+        account.store.update(config)?;
+        account_hub::emit_accounts_changed(&app);
+        next
+    } else {
+        state.save_preferences(next)?
+    };
     state
         .quota_auto_continue
         .activate_cached_observation(enabled, Utc::now());
@@ -1179,10 +1283,12 @@ async fn set_quota_auto_continue_enabled(
 
 #[tauri::command]
 async fn test_quota_auto_continue(
+    account_id: Option<String>,
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<QuotaAutoContinueStatus, String> {
+    let state = account_hub::resolve(window.app_handle(), &state, account_id.as_deref())?;
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
     let _guard = state
         .quota_auto_continue
@@ -1335,15 +1441,18 @@ fn send_test_notification(
 #[tauri::command]
 async fn get_usage_history(
     request: UsageHistoryRequest,
+    account_id: Option<String>,
     window: WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<UsageHistoryResponse, String> {
+    let state = account_hub::resolve(window.app_handle(), &state, account_id.as_deref())?;
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
     let now_local = Local::now();
     let now = now_local.with_timezone(&Utc);
     let today_started_at = local_day_start_utc(now_local);
     let (query, storage_status) = {
-        let runtime = state.usage_history.lock().await;
+        let mut runtime = state.usage_history.lock().await;
+        state.select_history_account(&mut runtime)?;
         let storage_summary = runtime.history.summary();
         let query = runtime
             .history
@@ -1369,6 +1478,7 @@ async fn get_usage_history(
         .map(|series| {
             let forecast = convert_history_forecast(series.forecast);
             UsageHistorySeriesResponse {
+                current_reset_at: series.current_reset_at,
                 window_id: series.window_id,
                 window_seconds: series.window_seconds,
                 fallback_label: fallback_label_for_duration(series.window_seconds),
@@ -1380,6 +1490,7 @@ async fn get_usage_history(
         })
         .collect();
     Ok(UsageHistoryResponse {
+        account_id: state.account.as_ref().map(|a| a.id.clone()),
         request: query.request,
         applied_start_at: query.applied_start_at,
         applied_end_at_exclusive: query.applied_end_at_exclusive,
@@ -1451,22 +1562,37 @@ async fn set_history_enabled(
     state.apply_auto_main_height(&app, &snapshot);
     emit_dashboard(&app, snapshot);
     drop(refresh_barrier);
+    if let Some(hub) = app.try_state::<Arc<AccountHub>>() {
+        for child in hub.all() {
+            let _guard = child.refresh_guard.lock().await;
+            let snapshot = if enabled {
+                child.current_snapshot().await
+            } else {
+                child.clear_snapshot_forecasts().await
+            };
+            child.apply_auto_main_height(&app, &snapshot);
+            emit_dashboard(&app, snapshot);
+        }
+    }
     log::info!("本地趋势采集状态已更新：enabled={enabled}。");
     Ok(saved)
 }
 
 #[tauri::command]
 async fn clear_usage_history(
+    account_id: Option<String>,
     window: WebviewWindow,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    let state = account_hub::resolve(window.app_handle(), &state, account_id.as_deref())?;
     require_window_label(&window, SETTINGS_WINDOW_LABEL)?;
     // 与刷新严格使用 refresh_guard -> usage_history 的统一锁序，防止固定临时文件争用或旧数据回写。
     let _refresh_barrier = state.refresh_guard.lock().await;
     let removed;
     {
         let mut runtime = state.usage_history.lock().await;
+        state.select_history_account(&mut runtime)?;
         let mut replacement = runtime.history.clone();
         removed = replacement.clear_samples();
         let saved = clear_legacy_backup_for_current_account(&state.history_path, &replacement)
@@ -1487,7 +1613,7 @@ async fn clear_usage_history(
     let snapshot = state.clear_snapshot_forecasts().await;
     state.apply_auto_main_height(&app, &snapshot);
     emit_dashboard(&app, snapshot);
-    emit_usage_history_updated(&app);
+    emit_usage_history_updated(&app, state.account.as_ref().map(|a| a.id.clone()));
     log::info!("用户已清除当前账号本地趋势历史：samples_removed={removed}。");
     Ok(())
 }
@@ -1842,8 +1968,28 @@ async fn install_app_update(
 fn start_refresh_loop(app: AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         let mut schedule_receiver = state.schedule_sender.subscribe();
-        refresh_and_emit(&app, &state).await;
+        if state
+            .account
+            .as_ref()
+            .is_none_or(|a| a.config().is_some_and(|c| c.enabled))
+        {
+            refresh_and_emit(&app, &state).await;
+        }
         loop {
+            if state.retired.load(Ordering::Acquire) {
+                break;
+            }
+            if let Some(account) = &state.account {
+                let Some(config) = account.config() else {
+                    break;
+                };
+                if !config.enabled {
+                    if schedule_receiver.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            }
             let revision = *schedule_receiver.borrow_and_update();
             let deadline = state.current_snapshot().await.next_refresh_at;
             let wait = deadline
@@ -1883,6 +2029,11 @@ fn start_quota_auto_continue_loop(app: AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         let mut receiver = state.quota_auto_continue.subscribe();
         loop {
+            if state.retired.load(Ordering::Acquire)
+                || state.account.as_ref().is_some_and(|a| a.config().is_none())
+            {
+                break;
+            }
             let enabled = state.current_settings().quota_auto_continue_enabled;
             let now = Utc::now();
             let status = state.quota_auto_continue.status(enabled, now);
@@ -2094,13 +2245,14 @@ async fn finalize_refresh_result(
         );
     }
     if result.should_emit && result.history_effect.changed {
-        emit_usage_history_updated(app);
+        emit_usage_history_updated(app, state.account.as_ref().map(|a| a.id.clone()));
     }
     if result.should_emit && result.quota_auto_continue_changed {
         emit_quota_auto_continue_status(app, state);
     }
     let snapshot = result.snapshot;
-    if result.should_emit {
+    account_hub::emit_accounts_changed(app);
+    if result.should_emit && account_hub::is_selected(app, state) {
         state.apply_auto_main_height(app, &snapshot);
         emit_dashboard(app, snapshot.clone());
     }
@@ -2109,7 +2261,11 @@ async fn finalize_refresh_result(
 
 fn emit_quota_auto_continue_status(app: &AppHandle, state: &AppState) {
     let enabled = state.current_settings().quota_auto_continue_enabled;
-    let status = state.quota_auto_continue.status(enabled, Utc::now());
+    let mut status = state.quota_auto_continue.status(enabled, Utc::now());
+    status.account_id = state.account.as_ref().map(|a| a.id.clone());
+    if !account_hub::is_selected(app, state) {
+        return;
+    }
     if app
         .emit_to(SETTINGS_WINDOW_LABEL, "quota-auto-continue-updated", status)
         .is_err()
@@ -2118,9 +2274,13 @@ fn emit_quota_auto_continue_status(app: &AppHandle, state: &AppState) {
     }
 }
 
-fn emit_usage_history_updated(app: &AppHandle) {
+fn emit_usage_history_updated(app: &AppHandle, account_id: Option<String>) {
     if app
-        .emit_to(SETTINGS_WINDOW_LABEL, "usage-history-updated", ())
+        .emit_to(
+            SETTINGS_WINDOW_LABEL,
+            "usage-history-updated",
+            serde_json::json!({ "accountId": account_id }),
+        )
         .is_err()
     {
         log::warn!("无法向设置窗口广播本地趋势更新。");
@@ -2128,6 +2288,12 @@ fn emit_usage_history_updated(app: &AppHandle) {
 }
 
 fn emit_dashboard(app: &AppHandle, snapshot: DashboardSnapshot) {
+    if app
+        .try_state::<Arc<AccountHub>>()
+        .is_some_and(|hub| hub.store.selected_id() != snapshot.account_id)
+    {
+        return;
+    }
     // 即便设置窗口拥有通用事件监听能力，也不能收到主卡专属的账号摘要和额度快照。
     if app
         .emit_to(MAIN_WINDOW_LABEL, "dashboard-updated", snapshot)
@@ -2273,6 +2439,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         // 仅写入应用日志目录；关闭默认 stdout/Trace，避免第三方依赖输出无关运行细节。
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -2328,8 +2495,12 @@ pub fn run() {
             // 静态窗口在配置中默认隐藏；显式隐藏保证升级时不会与主卡同时出现。
             let _ = settings_window.hide();
             main_window.show()?;
-            start_refresh_loop(app.handle().clone(), state.clone());
-            start_quota_auto_continue_loop(app.handle().clone(), state.clone());
+            let hub = AccountHub::new(state.clone()).map_err(io::Error::other)?;
+            app.manage(hub.clone());
+            for account in hub.all() {
+                start_refresh_loop(app.handle().clone(), account.clone());
+                start_quota_auto_continue_loop(app.handle().clone(), account);
+            }
             start_update_check_loop(app.handle().clone(), state);
             Ok(())
         })
@@ -2369,6 +2540,16 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_accounts,
+            select_account,
+            import_accounts,
+            update_account,
+            remove_account,
+            apply_codex_account,
+            restore_codex_account,
+            get_account_models,
+            get_reset_credit_details,
+            get_usage_analytics,
             get_dashboard,
             refresh_dashboard,
             get_settings,
@@ -2631,6 +2812,7 @@ mod tests {
         // UTF-8 bytes for the largest response shape that can cross Tauri IPC.
         let series = (0..16)
             .map(|series_index| UsageHistorySeriesResponse {
+                current_reset_at: None,
                 window_id: format!("{series_index:064x}"),
                 window_seconds: 7 * 24 * 60 * 60,
                 fallback_label: QuotaFallbackLabel::Weekly,
@@ -2656,6 +2838,7 @@ mod tests {
             })
             .collect();
         let response = UsageHistoryResponse {
+            account_id: None,
             request,
             applied_start_at: now - ChronoDuration::days(30),
             applied_end_at_exclusive: now,
@@ -2839,6 +3022,7 @@ mod tests {
     #[test]
     fn notification_body_ignores_account_and_upstream_window_labels() {
         let snapshot = DashboardSnapshot {
+            account_id: None,
             status: DashboardStatus::Ready,
             account_email_masked: Some("s***@private.example".to_owned()),
             plan_label: Some("Sensitive Plan".to_owned()),
@@ -2883,6 +3067,7 @@ mod tests {
     #[test]
     fn reset_credit_line_merges_with_quota_reasons_in_both_languages() {
         let snapshot = DashboardSnapshot {
+            account_id: None,
             status: DashboardStatus::Ready,
             account_email_masked: None,
             plan_label: None,
@@ -3052,6 +3237,7 @@ mod tests {
             .unwrap(),
         );
         let expected = DashboardSnapshot {
+            account_id: None,
             status: DashboardStatus::Ready,
             account_email_masked: Some("p***@example.com".to_owned()),
             plan_label: Some("Pro".to_owned()),
