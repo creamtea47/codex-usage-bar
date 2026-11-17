@@ -139,9 +139,9 @@ The current signing key has no password. If a future encrypted key is used, conf
 Example maintainer release:
 
 ```powershell
-git tag -a v0.8.0 -m "v0.8.0 Plus quota and lightweight mode"
+git tag -a v0.8.1 -m "v0.8.1 Plus quota and lightweight mode"
 git push origin master
-git push origin v0.8.0
+git push origin v0.8.1
 ```
 
 ## Intentionally excluded

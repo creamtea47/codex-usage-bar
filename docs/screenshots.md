@@ -2,7 +2,7 @@
 
 [English README](../README.md) · [中文 README](../README-zh.md)
 
-## v0.8.0 / macOS
+## v0.8 系列 / macOS
 
 以下截图来自隔离运行的 macOS WKWebView，使用合成账号和本机模拟用量。轻量模式截图中的延时为测试设置，内存值为该次实测。
 

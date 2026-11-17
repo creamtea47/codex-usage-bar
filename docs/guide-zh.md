@@ -142,9 +142,9 @@ pnpm tauri build --bundles dmg --no-sign --config src-tauri/tauri.unsigned.conf.
 维护者发布示例：
 
 ```powershell
-git tag -a v0.8.0 -m "v0.8.0 Plus 额度与轻量模式"
+git tag -a v0.8.1 -m "v0.8.1 Plus 额度与轻量模式"
 git push origin master
-git push origin v0.8.0
+git push origin v0.8.1
 ```
 
 ## 不包含的能力
