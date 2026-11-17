@@ -2,6 +2,14 @@
 
 [English README](../README.md) · [中文 README](../README-zh.md)
 
+## v0.8.0 / macOS
+
+以下截图来自隔离运行的 macOS WKWebView，使用合成账号和本机模拟用量。轻量模式截图中的延时为测试设置，内存值为该次实测。
+
+- [Plus 挂件与两种额度的建议刻度](images/plus-widget-zh.png)
+- [历史范围与周额度切换](images/plus-trends-zh.png)
+- [轻量模式与内存对比](images/lightweight-zh.png)
+
 ## v0.7.0 additions / 新增截图
 
 2026-09-23：直接复用 v0.7.0 React 组件，通过隔离的浏览器入口使用合成账号和额度数据。未读取真实凭证或发送上游请求。这些图片展示界面，不替代原生窗口或接口验收。
@@ -37,11 +45,11 @@ Each view has English (`-en`) and Simplified Chinese (`-zh`) captures. 每组各
 
 ## UI sources / 对应源码
 
-- [App.tsx](../src/App.tsx)：主卡。
-- [SettingsWindow.tsx](../src/SettingsWindow.tsx)：设置导航、显示与更新。
-- [NotificationsPage.tsx](../src/NotificationsPage.tsx)：通知规则。
-- [TrendsPage.tsx](../src/TrendsPage.tsx)：趋势与采集控制。
-- [QuotaAutoContinuePage.tsx](../src/QuotaAutoContinuePage.tsx)：接续状态与确认界面。
+- [WidgetWindow.tsx](../src/app/WidgetWindow.tsx)：主卡。
+- [SettingsWindow.tsx](../src/app/SettingsWindow.tsx)：设置导航、显示与更新。
+- [NotificationsPage.tsx](../src/features/notifications/NotificationsPage.tsx)：通知规则。
+- [TrendsPage.tsx](../src/features/history/TrendsPage.tsx)：趋势与采集控制。
+- [QuotaAutoContinuePage.tsx](../src/features/continuation/QuotaAutoContinuePage.tsx)：接续状态与确认界面。
 
 ## README structure references / 文档结构参考
 

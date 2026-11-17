@@ -30,6 +30,10 @@ English | [简体中文](README-zh.md)
 | **Quota auto-continuation** | Optionally send a minimal request when weekly quota resets to help start the next cycle even during light usage. Inspect the schedule, trigger, and results. |
 | **Personalization and updates** | English / Simplified Chinese, light / dark / system themes, autostart, and update notifications with user-confirmed installation. |
 
+### v0.8.0
+
+Sign in through the official browser flow or import an account file. The widget shows pacing for both five-hour and weekly limits and any reported extra credits. Trends lets you choose the quota window independently of the history range. Lightweight mode releases the hidden windows while the tray continues refreshing, recording history, and sending alerts. On macOS, refresh resumes when the proxy configuration changes. [Release notes](docs/releases/v0.8.0.md)
+
 ## Quick start
 
 1. Download the matching installer from [Releases](https://github.com/creamtea47/codex-usage-bar/releases/latest).

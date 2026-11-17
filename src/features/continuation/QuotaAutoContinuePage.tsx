@@ -1,0 +1,252 @@
+import { ModelPicker } from '@/features/accounts/ModelPicker';
+import { useAccounts } from '@/features/accounts/accountStore';
+import { ResponsePanel } from './ResponsePanel';
+import AutorenewRoundedIcon from '@mui/icons-material/AutorenewRounded';
+import {
+  Alert,
+  Box,
+  Button,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  FormControlLabel,
+  Paper,
+  Stack,
+  Switch,
+  Typography,
+} from '@mui/material';
+import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+
+import { formatDateTime } from '@/shared/format';
+import type { Language } from '@/contracts/settings';
+import type { QuotaAutoContinueResult, QuotaAutoContinueStatus } from '@/contracts/continuation';
+
+interface QuotaAutoContinuePageProps {
+  enabled: boolean;
+  status: QuotaAutoContinueStatus | null;
+  language: Language;
+  disabled: boolean;
+  isChanging: boolean;
+  isTesting: boolean;
+  onSetEnabled: (enabled: boolean) => Promise<void>;
+  onTest: () => Promise<void>;
+}
+
+/**
+ * 真实请求操作始终先在本页完成二次确认；父组件只负责调用设置窗口限定的 Rust IPC。
+ * 页面展示脱敏排期和有界纯文本回复，认证材料不进入前端。
+ */
+export default function QuotaAutoContinuePage({
+  enabled,
+  status,
+  language,
+  disabled,
+  isChanging,
+  isTesting,
+  onSetEnabled,
+  onTest,
+}: QuotaAutoContinuePageProps) {
+  const { t } = useTranslation();
+  const accounts = useAccounts();
+  const account = accounts.accounts.find((a) => a.id === accounts.selectedId);
+  const [confirmAction, setConfirmAction] = useState<'enable' | 'test' | null>(null);
+  const busy = disabled || isChanging || isTesting;
+  const phase = status?.phase ?? (enabled ? 'waitingForWeeklyWindow' : 'disabled');
+  const automaticResult = automaticResultWithLegacyFallback(status);
+  const triggerReason = status?.lastTriggerReason
+    ? t(`settings.quotaAutoContinue.triggerReasons.${status.lastTriggerReason}`)
+    : t('common.unavailable');
+
+  const confirm = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action === 'enable') await onSetEnabled(true);
+    if (action === 'test') await onTest();
+  };
+
+  return (
+    <>
+      <Stack spacing={2.5}>
+        <Box>
+          <Typography component="h1" variant="h5" sx={{ fontWeight: 800 }}>
+            {t('settings.quotaAutoContinue.title')}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            {t('settings.quotaAutoContinue.subtitle')}
+          </Typography>
+        </Box>
+
+        {account && (
+          <Paper variant="outlined" sx={{ p: 2 }}>
+            <ModelPicker key={`${account.id}-${account.model ?? ''}`} account={account} disabled={busy} />
+          </Paper>
+        )}
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Stack spacing={1.25}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={account?.autoContinue ?? status?.enabled ?? enabled}
+                  disabled={busy}
+                  onChange={(event) => {
+                    if (event.target.checked) setConfirmAction('enable');
+                    else void onSetEnabled(false);
+                  }}
+                />
+              }
+              label={t('settings.quotaAutoContinue.enabled')}
+            />
+            <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>
+              {t('settings.quotaAutoContinue.enabledDescription')}
+            </Typography>
+            <Alert severity="warning" variant="outlined">
+              {t('settings.quotaAutoContinue.realRequestWarning')}
+            </Alert>
+          </Stack>
+        </Paper>
+
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Stack spacing={1.25} divider={<Divider flexItem />}>
+            <StatusRow
+              label={t('settings.quotaAutoContinue.currentStatus')}
+              value={t(`settings.quotaAutoContinue.phases.${phase}`)}
+            />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.targetResetAt')}
+              value={formatDateTime(status?.targetResetAt ?? null, language)}
+            />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.nextAttemptAt')}
+              value={formatDateTime(status?.nextAttemptAt ?? null, language)}
+            />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.attemptedCount')}
+              value={t('settings.quotaAutoContinue.attemptedValue', { count: status?.attemptedCount ?? 0 })}
+            />
+            <StatusRow label={t('settings.quotaAutoContinue.lastTriggerReason')} value={triggerReason} />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.lastResetDetectedAt')}
+              value={formatDateTime(status?.lastResetDetectedAt ?? null, language)}
+            />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.lastAutomaticResult')}
+              value={formatResult(automaticResult, language, t)}
+            />
+            <StatusRow
+              label={t('settings.quotaAutoContinue.lastManualResult')}
+              value={formatResult(status?.lastManualResult ?? null, language, t)}
+            />
+          </Stack>
+        </Paper>
+
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Stack spacing={1.25}>
+            <Button
+              startIcon={
+                isTesting ? <CircularProgress color="inherit" size={16} /> : <AutorenewRoundedIcon />
+              }
+              variant="contained"
+              disabled={busy}
+              onClick={() => setConfirmAction('test')}
+            >
+              {isTesting ? t('settings.quotaAutoContinue.testing') : t('settings.quotaAutoContinue.test')}
+            </Button>
+            <Typography variant="caption" color="text.secondary">
+              {t('settings.quotaAutoContinue.testDescription')}
+            </Typography>
+          </Stack>
+        </Paper>
+
+        <ResponsePanel result={automaticResult} automatic />
+        <ResponsePanel result={status?.lastManualResult ?? null} automatic={false} />
+        <Alert severity="info" variant="outlined">
+          {t('settings.quotaAutoContinue.runtimeNotice')}
+        </Alert>
+      </Stack>
+
+      <Dialog
+        open={confirmAction !== null}
+        onClose={() => !busy && setConfirmAction(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>
+          {confirmAction === 'enable'
+            ? t('settings.quotaAutoContinue.enableConfirmTitle')
+            : t('settings.quotaAutoContinue.testConfirmTitle')}
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2">
+            {confirmAction === 'enable'
+              ? t('settings.quotaAutoContinue.enableConfirmBody')
+              : t('settings.quotaAutoContinue.testConfirmBody')}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setConfirmAction(null)}>
+            {t('common.cancel')}
+          </Button>
+          <Button disabled={busy} color="warning" variant="contained" onClick={() => void confirm()}>
+            {t('settings.quotaAutoContinue.confirm')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+}
+
+/** v0.4.0 没有分离结果对象；只有存在自动槽位时间时才安全地回退为自动结果。 */
+function automaticResultWithLegacyFallback(
+  status: QuotaAutoContinueStatus | null,
+): QuotaAutoContinueResult | null {
+  if (!status) return null;
+  if (status.lastAutomaticResult !== undefined) return status.lastAutomaticResult;
+  if (!status.lastAttemptAt) return null;
+  return {
+    attemptedAt: status.lastAttemptAt,
+    successAt: status.lastSuccessAt,
+    errorCode: status.lastErrorCode,
+    model: status.selectedModel,
+    slotIndex: null,
+  };
+}
+
+type Translator = ReturnType<typeof useTranslation>['t'];
+
+/** 将固定错误码和脱敏元数据合并为单行结果，不展示请求正文或模型回复。 */
+function formatResult(result: QuotaAutoContinueResult | null, language: Language, t: Translator): string {
+  if (!result) return t('common.unavailable');
+  const occurredAt = result.successAt ?? result.attemptedAt;
+  const date = formatDateTime(occurredAt, language);
+  const outcome = result.errorCode
+    ? t('settings.quotaAutoContinue.resultFailed', {
+        error: t(`settings.quotaAutoContinue.errors.${result.errorCode}`),
+        date,
+      })
+    : result.successAt
+      ? t('settings.quotaAutoContinue.resultSucceeded', { date })
+      : t('settings.quotaAutoContinue.resultAttempted', { date });
+  const details = [outcome];
+  if (result.slotIndex !== null) {
+    details.push(t('settings.quotaAutoContinue.resultSlot', { count: result.slotIndex + 1 }));
+  }
+  if (result.model) details.push(t('settings.quotaAutoContinue.resultModel', { model: result.model }));
+  return details.join(' · ');
+}
+
+function StatusRow({ label, value }: { label: string; value: string }) {
+  return (
+    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={0.5} sx={{ justifyContent: 'space-between' }}>
+      <Typography variant="body2" color="text.secondary">
+        {label}
+      </Typography>
+      <Typography variant="body2" sx={{ fontWeight: 650, overflowWrap: 'anywhere' }}>
+        {value}
+      </Typography>
+    </Stack>
+  );
+}

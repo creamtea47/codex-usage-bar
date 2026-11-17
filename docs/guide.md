@@ -2,6 +2,14 @@
 
 [Back to README](../README.md)
 
+## Plus limits, browser sign-in and lightweight mode
+
+- The widget calculates the suggested remaining quota from the time left in each window. Two hours left in a five-hour window gives a 40% target. In Trends, choose the history range and the quota window independently. The solid line is observed quota and the dashed line is the suggested balance.
+- In Accounts, choose Sign in and import to authenticate in the system browser. Signing in again updates the managed credentials and preserves history and preferences. Apply to Codex separately controls the local binding.
+- Enable system notifications and grant OS permission to receive reset-credit, extra-credit and connection alerts. All three categories default to enabled. Upgrades retain explicit preferences. The first balance establishes a baseline. Each outage produces at most one disconnect alert, followed by recovery after a successful usage read.
+- In Display, enter lightweight mode immediately or enable a timer after both windows are hidden (10 minutes by default). Reopening a window cancels the timer. The tray can recreate either window and reports the latest measured memory change and its scope.
+- On macOS, proxy and network changes trigger fresh usage reads, including when a proxy application starts after the widget.
+
 ## Usage
 
 The card tries to load usage data immediately after launch. Use the top-right **Refresh** button to retry immediately, including while an automatic failure-backoff deadline is pending. The adjacent **Settings** button opens a separate window organized into **Accounts**, **Display**, **Data & refresh**, **Notifications**, **Trends**, **Quota Auto-Continuation**, **Startup**, and **About & updates**.
@@ -71,7 +79,7 @@ The frontend IPC also includes Settings-only `get_quota_auto_continue_status`, `
 
 - Settings and independent main/settings-window placement: `%APPDATA%\com.creamtea47.codexusagebar\settings.json` on Windows; `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json` on macOS.
 - Auto-continuation state and latest retained replies: `accounts/<local-account-key>/quota-auto-continue.json`. Disabling the feature does not delete it; re-enabling first validates it against the latest account snapshot. Replies are not copied into logs.
-- Reset-credit notification baseline: `accounts/<local-account-key>/reset-credit-notification.json`. It stores only a sanitized account fingerprint and the latest total count to detect arrivals across restarts, never the currently usable count or account plaintext.
+- Reset-credit notification baseline: `accounts/<local-account-key>/reset-credit-notification.json`. It records the account fingerprint, reset-credit total and latest reported extra-credit balance or availability to detect arrivals across restarts.
 - Local trend samples: `usage-history.json` beside `settings.json`. Samples are not evicted by age, point count, or stream count; each queried series still displays at most 1,000 points. The newest 24 hours keep collected samples, samples from 1–7 days use 15-minute buckets, samples from 7–32 days use hourly buckets, and older history keeps the first and last point per UTC-day bucket while preserving reset boundaries. Schema v1 migrates losslessly to multi-account schema v2 with a one-time pre-rewrite backup. Collection can be paused or the current account cleared in **Trends**, and data is never uploaded; time before the upgrade is reported as partial coverage when no samples exist.
 - Runtime logs: `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log` on Windows; `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log` on macOS; retained for 14 days.
 - Logs contain timestamps, levels, task deadlines, attempt numbers, selected model names, operation results, and sanitized result categories. They never contain tokens, account identifiers, Authorization headers, authentication-file contents, raw SSE, response bodies, or model replies.
@@ -81,6 +89,8 @@ The frontend IPC also includes Settings-only `get_quota_auto_continue_status`, `
 - Autostart from the legacy Win32 app is neither migrated nor removed. Disable its old `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry after confirming the new app works, otherwise two widgets may start together.
 
 ## Development
+
+[Architecture and module map](architecture.md) · [IPC compatibility baseline](ipc.md)
 
 Development requires Node.js 22.13+ or 24+, pnpm 10, and stable Rust. Windows additionally needs the MSVC toolchain and WebView2 Runtime; macOS needs Xcode Command Line Tools. A global Tauri CLI is not required.
 
@@ -129,9 +139,9 @@ The current signing key has no password. If a future encrypted key is used, conf
 Example maintainer release:
 
 ```powershell
-git tag -a v0.7.0 -m "v0.7.0 account management, range statistics, and reset credit expiry"
+git tag -a v0.8.0 -m "v0.8.0 Plus quota and lightweight mode"
 git push origin master
-git push origin v0.7.0
+git push origin v0.8.0
 ```
 
 ## Intentionally excluded

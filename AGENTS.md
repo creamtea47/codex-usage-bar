@@ -4,11 +4,13 @@
 
 This Tauri 2 desktop widget uses React 19, TypeScript, Material UI, and Rust.
 
-- `src/`: React pages/components, IPC bridges, shared types, localization, and colocated frontend tests.
-- `src-tauri/src/`: credential handling, accounts, usage collection, history analytics, notifications, scheduling, and native window/tray integration.
+- `src/app/` assembles the widget and settings windows. Put business UI, hooks, and command services in `src/features/<feature>/`, the wire types in `src/contracts/`, native SDK adapters in `src/platform/`, and cross-feature presentation and locales in `src/shared/`.
+- `src-tauri/src/app/` owns process state and account coordination, `ipc/` owns window permissions and commands, `domain/` owns models and rules, and `infra/` owns network, filesystem and desktop adapters. Shared HTTP fixtures belong in the test-only `test_support/` module.
 - `src-tauri/`: Cargo manifests, Tauri configuration, capabilities, and bundle icons.
 - `scripts/`: updater manifest generation, its Node tests, and a standalone Rust signature verifier.
 - `docs/`: bilingual development guides, release notes, and screenshots; `.github/workflows/build.yml` validates and packages Windows/macOS builds.
+
+Use relative imports inside a feature and `@/` for other modules. Keep `Page` components private to their feature and the app composition layer. Keep tests beside the owning module. The dependency and cycle check runs with `pnpm lint`. See [module map](docs/architecture.md) and [IPC baseline](docs/ipc.md).
 
 ## Build, Test, and Development Commands
 

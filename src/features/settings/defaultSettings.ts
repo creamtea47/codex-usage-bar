@@ -1,0 +1,28 @@
+import type { Settings } from '@/contracts/settings';
+export const defaultSettings: Settings = {
+  autoLightweight: false,
+  lightweightMinutes: 10,
+  alwaysOnTop: false,
+  lockPosition: false,
+  minimizeToTrayOnClose: true,
+  refreshIntervalSeconds: 60,
+  theme: 'system',
+  language: 'system',
+  notifications: {
+    enabled: false,
+    lowQuotaEnabled: true,
+    lowQuotaThresholdPercent: 20,
+    paceEnabled: true,
+    paceDeficitThresholdPercent: 10,
+    resetEnabled: true,
+    resetCreditEnabled: true,
+    extraCreditEnabled: true,
+    connectionEnabled: true,
+    quietHoursEnabled: false,
+    quietHoursStart: '22:00',
+    quietHoursEnd: '08:00',
+  },
+  historyEnabled: true,
+  autoCheckUpdates: true,
+  quotaAutoContinueEnabled: false,
+};

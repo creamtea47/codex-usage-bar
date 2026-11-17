@@ -2,6 +2,14 @@
 
 [返回首页](../README-zh.md)
 
+## Plus 额度、登录与轻量模式
+
+- 挂件按本周期剩余时间显示建议余量。例如 5 小时窗口还剩 2 小时，建议剩余至少 40%。趋势页先选历史范围，再选 5 小时或周额度，实线是实测剩余，虚线是建议剩余。
+- 账号管理的「登录并导入」打开系统浏览器。登录完成后返回应用即可查看账号。再次登录同一账号会更新托管凭据，可继续使用原有历史和偏好。「应用到 Codex」单独控制本机绑定。
+- 通知总开关和系统授权生效后，可接收重置卡到账、额外额度到账和用量服务断开／恢复通知。三项在新设置中默认开启，升级保留已保存的值。首次读取余额建立基线。同一次断线只提醒一次，首次成功读取用量后提醒恢复。
+- 在「显示 → 轻量模式」可立即释放两个 WebView，或启用两个窗口都收起后的空闲倒计时（默认 10 分钟）。重新打开窗口会取消倒计时。托盘可以单独重建挂件或设置，并显示最近一次内存变化与统计范围。
+- macOS 会在系统代理或活动网络变化后重新读取用量，适用于开机时代理程序较晚启动的情况。
+
 ## 使用方式
 
 打开后，卡片会立即尝试读取用量。右上角“刷新”可立即手动重试，即使当前正等待失败退避也不受影响；旁边的“设置”会打开独立窗口，其中按“账号管理”“显示”“数据与刷新”“通知”“趋势”“额度自动接续”“启动”“关于与更新”分类。
@@ -74,7 +82,7 @@
 
 - 设置及主卡 / 设置窗口的位置：Windows 为 `%APPDATA%\com.creamtea47.codexusagebar\settings.json`；macOS 为 `~/Library/Application Support/com.creamtea47.codexusagebar/settings.json`。
 - 自动接续脱敏运行状态：`accounts/<本机账号键>/quota-auto-continue.json`；关闭功能不会删除排期状态，重新开启后会先按当前账号最新快照校验。
-- 重置卡通知基线：`accounts/<本机账号键>/reset-credit-notification.json`；只保存脱敏账号指纹和最近卡片总数，用于跨重启识别新增卡片，不保存当前可使用数或账号原文。
+- 重置卡通知基线：`accounts/<本机账号键>/reset-credit-notification.json`；按账号记录脱敏指纹、最近卡片总数和额外额度余额／可用状态，用于跨重启识别到账。
 - 本地趋势样本：位于 `settings.json` 同目录的 `usage-history.json`；不按日期、点数或流数量淘汰，每次查询每个系列最多展示 1,000 点。最新 24 小时保留已采集样本，1–7 天按 15 分钟桶压缩，7–32 天按小时桶压缩，32 天以上按 UTC 日桶保留每日首尾点，并始终保留重置周期边界。schema v1 会无损迁移到多账号 schema v2，并在首次改写前创建一次迁移备份。可在“趋势”中暂停或清除当前账号历史，绝不上传；升级前没有样本的时段会显示为“部分覆盖”。
 - 运行日志：Windows 为 `%LOCALAPPDATA%\com.creamtea47.codexusagebar\logs\codex-usage-bar.log`；macOS 为 `~/Library/Logs/com.creamtea47.codexusagebar/codex-usage-bar.log`；均保留 14 天。
 - 日志只记录时间、级别、任务时点、尝试序号、所选模型、操作结果和脱敏错误类别；不记录 Token、账号、Authorization 请求头、认证文件内容、原始 SSE、响应正文或模型回复。设置界面故障仅记录固定类别，更新日志仅记录版本号和脱敏结果。
@@ -84,6 +92,8 @@
 - 若旧 Win32 版开通过自启，旧的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 项不会被新版迁移或删除；确认新版可用后请自行关闭旧项，避免两个悬浮窗同时启动。
 
 ## 开发
+
+[工程架构与模块迁移对照](architecture.md) · [IPC 兼容基线](ipc.md)
 
 开发环境需要 Node.js 22.13+ 或 24+、pnpm 10 和稳定版 Rust。Windows 还需要 MSVC 工具链与 WebView2 Runtime；macOS 需要 Xcode Command Line Tools。不需要全局安装 Tauri CLI。
 
@@ -132,9 +142,9 @@ pnpm tauri build --bundles dmg --no-sign --config src-tauri/tauri.unsigned.conf.
 维护者发布示例：
 
 ```powershell
-git tag -a v0.7.0 -m "v0.7.0 多账号管理、范围统计与重置卡有效期"
+git tag -a v0.8.0 -m "v0.8.0 Plus 额度与轻量模式"
 git push origin master
-git push origin v0.7.0
+git push origin v0.8.0
 ```
 
 ## 不包含的能力
